@@ -190,11 +190,29 @@ export class PowerPilotPanel extends LitElement {
   /** Compute the start/end ISO strings for the current window. */
   private _computeWindow(): { start: Date; end: Date; pastHours: number } {
     const hours = RANGE_HOURS[this._rangeMode];
-    // anchor = right edge of window. Null means "live" (now + 24h forecast lookahead).
+    // anchor = right edge of window. Null means "live" — extend the right
+    // edge to the end of whatever forecast horizon the backend currently
+    // has (up to 96h), capped to a sensible default if no plan loaded yet.
     const live = this._anchor === null;
-    const end = live ? new Date(Date.now() + 24 * 3600 * 1000) : new Date(this._anchor!);
+    const end = live ? this._liveEdge() : new Date(this._anchor!);
     const start = new Date(end.getTime() - hours * 3600 * 1000);
     return { start, end, pastHours: hours };
+  }
+
+  /** Right edge of the "live" window: end of plan horizon or now+24h fallback. */
+  private _liveEdge(): Date {
+    const plan = this._plan;
+    if (plan?.hours?.length) {
+      const last = plan.hours[plan.hours.length - 1];
+      const t = new Date(last.start);
+      if (!isNaN(t.getTime())) return new Date(t.getTime() + 3600 * 1000);
+    }
+    if (plan?.forecast?.length) {
+      const last = plan.forecast[plan.forecast.length - 1];
+      const t = new Date(last.start);
+      if (!isNaN(t.getTime())) return new Date(t.getTime() + 3600 * 1000);
+    }
+    return new Date(Date.now() + 24 * 3600 * 1000);
   }
 
   private async _refresh(): Promise<void> {
@@ -232,8 +250,8 @@ export class PowerPilotPanel extends LitElement {
   private _shiftAnchor(deltaHours: number): void {
     const { end } = this._computeWindow();
     const next = new Date(end.getTime() + deltaHours * 3600 * 1000);
-    // Snap to live if user navigates back into the future beyond now+24h.
-    const liveEdge = Date.now() + 24 * 3600 * 1000;
+    // Snap back to live mode if user navigates past the available horizon edge.
+    const liveEdge = this._liveEdge().getTime();
     this._anchor = next.getTime() >= liveEdge ? null : next;
     this._refresh();
   }

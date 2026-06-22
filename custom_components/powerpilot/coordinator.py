@@ -198,6 +198,98 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         horizons = await self.prices.async_fetch_forecasts(target)
         return {"date": target.isoformat(), "horizons": horizons}
 
+    async def _recent_soc(self, past_hours: int) -> dict:
+        """Recent hourly battery SoC (%) from the SoC sensor's statistics."""
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import (
+            statistics_during_period,
+        )
+
+        from .const import CONF_SOC_SENSOR
+
+        entity_id = self.config.get(CONF_SOC_SENSOR)
+        if not entity_id:
+            return {}
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        start = now - timedelta(hours=past_hours + 1)
+        rows = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period, self.hass, start, now, {entity_id}, "hour", None, {"mean"}
+        )
+        out: dict = {}
+        for row in rows.get(entity_id, []):
+            value = row.get("mean")
+            if value is None:
+                continue
+            ts = row["start"]
+            if isinstance(ts, (int, float)):
+                ts = dt_util.utc_from_timestamp(ts)
+            hour = dt_util.as_local(ts).replace(minute=0, second=0, microsecond=0)
+            out[hour] = float(value)
+        return out
+
+    async def get_series(self, past_hours: int = 24) -> dict:
+        """Unified hourly series: real past (recorder) + forecast future (plan).
+
+        Each hour carries the fields the chart needs to distinguish real vs
+        forecast data, confirmed vs forecast prices, and the planned inverter mode.
+        """
+        from .const import CONF_CONSUMPTION_SENSOR
+
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        learned = self.consumption.base.observed_days > 0
+
+        real: dict = {}
+        main_sensor = self.config.get(CONF_CONSUMPTION_SENSOR)
+        if main_sensor:
+            real = await self.consumption.async_recent_kwh(main_sensor, past_hours)
+        soc_real = await self._recent_soc(past_hours)
+
+        hours: list[dict] = []
+        for offset in range(past_hours, 0, -1):
+            h = now - timedelta(hours=offset)
+            wd, hr = h.weekday(), h.hour
+            forecast_c = (
+                round(self.consumption.base_value(wd, hr) + self.consumption.device_value(wd, hr), 3)
+                if learned
+                else None
+            )
+            hours.append(
+                {
+                    "start": h.isoformat(),
+                    "is_past": True,
+                    "buy_price": self.prices.price_at(h),
+                    "price_confirmed": self.prices.is_confirmed(h),
+                    "consumption_real": round(real[h], 3) if h in real else None,
+                    "consumption_forecast": forecast_c,
+                    "soc": round(soc_real[h], 1) if h in soc_real else None,
+                    "inverter_mode": None,
+                    "battery_charge_kwh": None,
+                    "battery_discharge_kwh": None,
+                    "battery_energy_cost": None,
+                }
+            )
+
+        plan = self.data
+        if plan:
+            for slot, decision in zip(plan.forecast.slots, plan.decisions):
+                hours.append(
+                    {
+                        "start": slot.start.isoformat(),
+                        "is_past": False,
+                        "buy_price": slot.buy_price,
+                        "price_confirmed": slot.price_confirmed,
+                        "consumption_real": None,
+                        "consumption_forecast": round(slot.total_consumption_kwh, 3),
+                        "soc": round(decision.battery_soc, 1),
+                        "inverter_mode": decision.inverter_mode,
+                        "battery_charge_kwh": round(decision.battery_charge_kwh, 3),
+                        "battery_discharge_kwh": round(decision.battery_discharge_kwh, 3),
+                        "battery_energy_cost": round(decision.battery_energy_cost, 4),
+                    }
+                )
+
+        return {"now": now.isoformat(), "past_hours": past_hours, "hours": hours}
+
     def get_status(self) -> dict:
         """Feature/module status for the panel: what works, what's missing."""
         from .const import (

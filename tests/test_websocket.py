@@ -49,3 +49,11 @@ async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:
     assert msg["success"]
     assert "horizons" in msg["result"]
     assert "date" in msg["result"]
+
+    await client.send_json({"id": 6, "type": "powerpilot/series", "past_hours": 12})
+    msg = await client.receive_json()
+    assert msg["success"]
+    assert "hours" in msg["result"]
+    assert "now" in msg["result"]
+    # Should contain both past hours and the forecast horizon.
+    assert any(h["is_past"] for h in msg["result"]["hours"])

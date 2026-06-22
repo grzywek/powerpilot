@@ -73,6 +73,26 @@ interface Forecasts {
   horizons: Record<string, ForecastPoint[]>;
 }
 
+interface SeriesHour {
+  start: string;
+  is_past: boolean;
+  buy_price: number | null;
+  price_confirmed: boolean;
+  consumption_real: number | null;
+  consumption_forecast: number | null;
+  soc: number | null;
+  inverter_mode: string | null;
+  battery_charge_kwh: number | null;
+  battery_discharge_kwh: number | null;
+  battery_energy_cost: number | null;
+}
+
+interface Series {
+  now: string;
+  past_hours: number;
+  hours: SeriesHour[];
+}
+
 type Tab = "overview" | "status" | "profiles" | "logs";
 
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -90,6 +110,18 @@ const HORIZON_COLORS: Record<string, string> = {
   "D+2": "#7b6cf6",
   "D+3": "#c98a3a",
 };
+const MODE_COLORS: Record<string, string> = {
+  charge: "#43a047",
+  discharge: "#c98a3a",
+  passthrough: "#6b6b6b",
+};
+// Chart geometry (SVG user units).
+const CW = 880;
+const CH = 250;
+const ML = 48;
+const MR = 48;
+const MT = 14;
+const MB = 52;
 
 @customElement("powerpilot-panel")
 export class PowerPilotPanel extends LitElement {
@@ -102,6 +134,7 @@ export class PowerPilotPanel extends LitElement {
   @state() private _log: LogEvent[] = [];
   @state() private _profiles: Profiles | null = null;
   @state() private _forecasts: Forecasts | null = null;
+  @state() private _series: Series | null = null;
   @state() private _error: string | null = null;
 
   private _timer?: number;
@@ -120,16 +153,18 @@ export class PowerPilotPanel extends LitElement {
   private async _refresh(): Promise<void> {
     if (!this.hass) return;
     try {
-      const [plan, status, log, profiles] = await Promise.all([
+      const [plan, status, log, profiles, series] = await Promise.all([
         this.hass.callWS({ type: "powerpilot/plan" }),
         this.hass.callWS({ type: "powerpilot/status" }),
         this.hass.callWS({ type: "powerpilot/log" }),
         this.hass.callWS({ type: "powerpilot/profiles" }),
+        this.hass.callWS({ type: "powerpilot/series", past_hours: 24 }),
       ]);
       this._plan = plan;
       this._status = status;
       this._log = log?.events ?? [];
       this._profiles = profiles;
+      this._series = series;
       this._error = null;
     } catch (err: any) {
       this._error = err?.message ?? String(err);
@@ -208,12 +243,14 @@ export class PowerPilotPanel extends LitElement {
         </div>
       </div>
       <div class="card">
-        <div class="card-title">Bateria (SoC %) i zużycie</div>
-        ${this._socChart(plan)}
+        <div class="card-title">Bateria (SoC %) i zużycie — realne dane → prognoza</div>
+        ${this._series ? this._socChart(this._series) : html`<div class="empty">Ładowanie…</div>`}
+        ${this._socLegend()}
       </div>
       <div class="card">
-        <div class="card-title">Ceny (PLN/kWh) — zakup, sprzedaż, cena w baterii</div>
-        ${this._priceChart(plan)}
+        <div class="card-title">Ceny (PLN/kWh) — pewne vs prognozowane + cena w baterii</div>
+        ${this._series ? this._priceChart(this._series) : html`<div class="empty">Ładowanie…</div>`}
+        ${this._priceLegend()}
       </div>
     `;
   }
@@ -222,37 +259,89 @@ export class PowerPilotPanel extends LitElement {
     return html`<div class="stat"><span class="k">${label}</span><span class="v">${value}</span></div>`;
   }
 
-  private _socChart(plan: Plan): TemplateResult {
-    const soc = plan.hours.map((h) => h.battery_soc);
-    const cons = plan.forecast.map((f) => f.consumption_kwh);
-    const w = 760;
-    const h = 180;
-    const socPath = this._linePath(soc, 0, 100, w, h);
-    const maxC = Math.max(0.1, ...cons);
-    return svg`
-      <svg viewBox="0 0 ${w} ${h}" class="chart">
-        ${this._bars(cons, 0, maxC, w, h, "var(--error-color, #b5475d)")}
-        <path d=${socPath} fill="none" stroke="var(--primary-color, #2ec4b6)" stroke-width="2" />
-      </svg>`;
+  // ------------------------------------------------------------------
+  // Chart engine
+  // ------------------------------------------------------------------
+  private _niceTicks(min: number, max: number, count = 5): number[] {
+    if (max <= min) max = min + 1;
+    const span = max - min;
+    const step0 = span / count;
+    const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+    const norm = step0 / mag;
+    const step = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag;
+    const start = Math.ceil(min / step) * step;
+    const ticks: number[] = [];
+    for (let v = start; v <= max + 1e-9; v += step) ticks.push(Math.round(v * 1000) / 1000);
+    return ticks;
   }
 
-  private _priceChart(plan: Plan): TemplateResult {
-    const buy = plan.forecast.map((f) => f.buy_price ?? NaN);
-    const sell = plan.forecast.map((f) => f.sell_price ?? NaN);
-    const cost = plan.hours.map((h) => h.battery_energy_cost);
-    const all = [...buy, ...sell, ...cost].filter((v) => !isNaN(v));
-    const min = Math.min(0, ...all);
-    const max = Math.max(0.1, ...all);
-    const w = 760;
-    const h = 180;
-    return svg`
-      <svg viewBox="0 0 ${w} ${h}" class="chart">
-        <path d=${this._linePath(buy, min, max, w, h)} fill="none" stroke="var(--primary-color, #2ec4b6)" stroke-width="2" />
-        <path d=${this._linePath(sell, min, max, w, h)} fill="none" stroke="#7b6cf6" stroke-width="2" />
-        <path d=${this._linePath(cost, min, max, w, h)} fill="none" stroke="var(--secondary-text-color, #9e9e9e)" stroke-width="2" stroke-dasharray="4 3" />
-      </svg>`;
+  private _xAt(i: number, n: number): number {
+    const plotW = CW - ML - MR;
+    return n <= 1 ? ML + plotW / 2 : ML + (i * plotW) / (n - 1);
   }
 
+  /** X grid: hour labels every 3h, day separators + labels at midnight. */
+  private _xAxis(dates: Date[]) {
+    const n = dates.length;
+    const bottom = MT + (CH - MT - MB);
+    const parts: any[] = [];
+    dates.forEach((d, i) => {
+      const x = this._xAt(i, n);
+      const midnight = d.getHours() === 0;
+      if (midnight) {
+        parts.push(
+          svg`<line x1=${x} y1=${MT} x2=${x} y2=${bottom} stroke="var(--divider-color)" stroke-width="1" opacity="0.7" />`
+        );
+        parts.push(
+          svg`<text x=${x + 3} y=${bottom + 30} class="ax day">${d.getDate()}.${d.getMonth() + 1}</text>`
+        );
+      }
+      if (d.getHours() % 3 === 0) {
+        parts.push(
+          svg`<text x=${x} y=${bottom + 14} class="ax xh" text-anchor="middle">${String(d.getHours()).padStart(2, "0")}</text>`
+        );
+      }
+    });
+    return parts;
+  }
+
+  private _yAxisLeft(ticks: number[], yFn: (v: number) => number, unit: string) {
+    const parts: any[] = [];
+    parts.push(svg`<text x=${ML} y=${MT - 2} class="ax unit" text-anchor="start">${unit}</text>`);
+    ticks.forEach((t) => {
+      const y = yFn(t);
+      parts.push(
+        svg`<line x1=${ML} y1=${y} x2=${CW - MR} y2=${y} stroke="var(--divider-color)" stroke-width="0.5" opacity="0.5" />`
+      );
+      parts.push(svg`<text x=${ML - 6} y=${y + 3} class="ax" text-anchor="end">${t}</text>`);
+    });
+    return parts;
+  }
+
+  private _yAxisRight(ticks: number[], yFn: (v: number) => number, unit: string) {
+    const parts: any[] = [];
+    parts.push(svg`<text x=${CW - MR} y=${MT - 2} class="ax unit" text-anchor="end">${unit}</text>`);
+    ticks.forEach((t) => {
+      const y = yFn(t);
+      parts.push(svg`<text x=${CW - MR + 6} y=${y + 3} class="ax" text-anchor="start">${t}</text>`);
+    });
+    return parts;
+  }
+
+  private _nowMarker(dates: Date[], boundaryIndex: number) {
+    if (boundaryIndex < 0) return nothing;
+    const x = this._xAt(boundaryIndex, dates.length);
+    const bottom = MT + (CH - MT - MB);
+    return svg`
+      <line x1=${x} y1=${MT} x2=${x} y2=${bottom} stroke="var(--primary-text-color)" stroke-width="1.5" stroke-dasharray="3 2" />
+      <text x=${x + 4} y=${MT + 12} class="ax now">Prognoza ▶</text>`;
+  }
+
+  private _path(pts: { x: number; y: number }[]): string {
+    return pts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  }
+
+  /** Simple index-based polyline used by the forecast overlay. */
   private _linePath(values: number[], min: number, max: number, w: number, h: number): string {
     const n = values.length;
     if (n < 2) return "";
@@ -267,25 +356,138 @@ export class PowerPilotPanel extends LitElement {
         return;
       }
       const x = (i / (n - 1)) * w;
-      const y = pad + innerH - ((v - min) / span) * innerH;
-      d += `${started ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)} `;
+      const yy = pad + innerH - ((v - min) / span) * innerH;
+      d += `${started ? "L" : "M"}${x.toFixed(1)},${yy.toFixed(1)} `;
       started = true;
     });
     return d.trim();
   }
 
-  private _bars(values: number[], min: number, max: number, w: number, h: number, color: string) {
-    const n = values.length;
-    if (!n) return nothing;
-    const span = max - min || 1;
-    const pad = 6;
-    const innerH = h - pad * 2;
-    const bw = (w / n) * 0.7;
-    return values.map((v, i) => {
-      const x = (i / n) * w;
-      const bh = ((v - min) / span) * innerH;
-      return svg`<rect x=${x.toFixed(1)} y=${(pad + innerH - bh).toFixed(1)} width=${bw.toFixed(1)} height=${Math.max(0, bh).toFixed(1)} fill=${color} opacity="0.35" />`;
-    });
+  private _socChart(s: Series): TemplateResult {
+    const hrs = s.hours;
+    const n = hrs.length;
+    if (!n) return html`<div class="empty">Brak danych szeregu.</div>`;
+    const dates = hrs.map((h) => new Date(h.start));
+    const plotH = CH - MT - MB;
+    const bottom = MT + plotH;
+    const cons = hrs
+      .flatMap((h) => [h.consumption_real, h.consumption_forecast, h.battery_charge_kwh, h.battery_discharge_kwh])
+      .filter((v): v is number => v != null);
+    const cMax = Math.max(0.5, ...cons);
+    const yL = (v: number) => bottom - (v / 100) * plotH;
+    const yR = (v: number) => bottom - (v / cMax) * plotH;
+    const bIdx = hrs.findIndex((h) => !h.is_past);
+    const bw = Math.max(2, ((CW - ML - MR) / n) * 0.5);
+    const half = bw / 2;
+
+    const realBars = hrs.map((h, i) =>
+      h.consumption_real == null
+        ? nothing
+        : svg`<rect x=${(this._xAt(i, n) - bw / 2).toFixed(1)} y=${yR(h.consumption_real).toFixed(1)}
+            width=${half.toFixed(1)} height=${(bottom - yR(h.consumption_real)).toFixed(1)}
+            fill="#b5475d" opacity="0.6" />`
+    );
+    const chargeBars = hrs.map((h, i) =>
+      !h.battery_charge_kwh
+        ? nothing
+        : svg`<rect x=${this._xAt(i, n).toFixed(1)} y=${yR(h.battery_charge_kwh).toFixed(1)}
+            width=${half.toFixed(1)} height=${(bottom - yR(h.battery_charge_kwh)).toFixed(1)}
+            fill="#c98a3a" opacity="0.75" />`
+    );
+    const dischargeBars = hrs.map((h, i) =>
+      !h.battery_discharge_kwh
+        ? nothing
+        : svg`<rect x=${this._xAt(i, n).toFixed(1)} y=${yR(h.battery_discharge_kwh).toFixed(1)}
+            width=${half.toFixed(1)} height=${(bottom - yR(h.battery_discharge_kwh)).toFixed(1)}
+            fill="#b0a14f" opacity="0.75" />`
+    );
+    const fcPts = hrs
+      .map((h, i) => (h.consumption_forecast == null ? null : { x: this._xAt(i, n), y: yR(h.consumption_forecast) }))
+      .filter((p): p is { x: number; y: number } => p != null);
+    const socPts = hrs
+      .map((h, i) => (h.soc == null ? null : { x: this._xAt(i, n), y: yL(h.soc) }))
+      .filter((p): p is { x: number; y: number } => p != null);
+    const modeStrip = hrs.map((h, i) =>
+      !h.inverter_mode
+        ? nothing
+        : svg`<rect x=${(this._xAt(i, n) - bw / 2).toFixed(1)} y=${bottom + 34}
+            width=${bw.toFixed(1)} height="7" rx="1" fill=${MODE_COLORS[h.inverter_mode] ?? "#888"} />`
+    );
+
+    return svg`
+      <svg viewBox="0 0 ${CW} ${CH}" class="chart">
+        ${this._yAxisLeft([0, 25, 50, 75, 100], yL, "SoC %")}
+        ${this._yAxisRight(this._niceTicks(0, cMax, 4), yR, "kWh")}
+        ${this._xAxis(dates)}
+        ${realBars}
+        ${chargeBars}
+        ${dischargeBars}
+        <path d=${this._path(fcPts)} fill="none" stroke="#e08aa0" stroke-width="1.5" stroke-dasharray="4 3" />
+        <path d=${this._path(socPts)} fill="none" stroke="#2ec4b6" stroke-width="2.5" />
+        ${modeStrip}
+        ${this._nowMarker(dates, bIdx)}
+      </svg>`;
+  }
+
+  private _priceChart(s: Series): TemplateResult {
+    const hrs = s.hours;
+    const n = hrs.length;
+    if (!n) return html`<div class="empty">Brak danych szeregu.</div>`;
+    const dates = hrs.map((h) => new Date(h.start));
+    const plotH = CH - MT - MB;
+    const bottom = MT + plotH;
+    const vals = hrs
+      .flatMap((h) => [h.buy_price, h.battery_energy_cost])
+      .filter((v): v is number => v != null);
+    const pmin = Math.min(0, ...vals);
+    const pmax = Math.max(0.1, ...vals);
+    const y = (v: number) => bottom - ((v - pmin) / (pmax - pmin)) * plotH;
+    const bIdx = hrs.findIndex((h) => !h.is_past);
+
+    const buySegs: any[] = [];
+    for (let i = 1; i < n; i++) {
+      const a = hrs[i - 1];
+      const b = hrs[i];
+      if (a.buy_price == null || b.buy_price == null) continue;
+      const dashed = !b.price_confirmed;
+      buySegs.push(
+        svg`<line x1=${this._xAt(i - 1, n).toFixed(1)} y1=${y(a.buy_price).toFixed(1)}
+          x2=${this._xAt(i, n).toFixed(1)} y2=${y(b.buy_price).toFixed(1)}
+          stroke="#2ec4b6" stroke-width="2" stroke-dasharray=${dashed ? "4 3" : "0"} />`
+      );
+    }
+    const costPts = hrs
+      .map((h, i) => (h.battery_energy_cost == null ? null : { x: this._xAt(i, n), y: y(h.battery_energy_cost) }))
+      .filter((p): p is { x: number; y: number } => p != null);
+
+    return svg`
+      <svg viewBox="0 0 ${CW} ${CH}" class="chart">
+        ${this._yAxisLeft(this._niceTicks(pmin, pmax, 5), y, "PLN/kWh")}
+        ${this._xAxis(dates)}
+        ${buySegs}
+        <path d=${this._path(costPts)} fill="none" stroke="var(--secondary-text-color, #9e9e9e)" stroke-width="2" stroke-dasharray="2 2" />
+        ${this._nowMarker(dates, bIdx)}
+      </svg>`;
+  }
+
+  private _socLegend(): TemplateResult {
+    return html`<div class="fc-legend">
+      <span class="fc-key"><span class="swatch" style="background:#2ec4b6"></span>SoC (%)</span>
+      <span class="fc-key"><span class="swatch" style="background:#b5475d"></span>Zużycie realne (kWh)</span>
+      <span class="fc-key"><span class="swatch" style="background:#e08aa0"></span>Zużycie prognoza (kWh)</span>
+      <span class="fc-key"><span class="swatch" style="background:#c98a3a"></span>Ładowanie z sieci (kWh)</span>
+      <span class="fc-key"><span class="swatch" style="background:#b0a14f"></span>Rozładowanie (kWh)</span>
+      <span class="fc-key"><span class="swatch" style="background:#43a047"></span>ład.</span>
+      <span class="fc-key"><span class="swatch" style="background:#c98a3a"></span>rozład.</span>
+      <span class="fc-key"><span class="swatch" style="background:#6b6b6b"></span>przepływ</span>
+    </div>`;
+  }
+
+  private _priceLegend(): TemplateResult {
+    return html`<div class="fc-legend">
+      <span class="fc-key"><span class="swatch" style="background:#2ec4b6"></span>Cena zakupu — ciągła = pewna, przerywana = prognoza</span>
+      <span class="fc-key"><span class="swatch" style="background:#9e9e9e"></span>Cena w baterii (po stratach)</span>
+    </div>`;
   }
 
   // ------------------------------------------------------------------
@@ -544,6 +746,20 @@ export class PowerPilotPanel extends LitElement {
       width: 100%;
       height: auto;
       display: block;
+    }
+    .ax {
+      fill: var(--secondary-text-color);
+      font-size: 10px;
+    }
+    .ax.unit {
+      font-weight: 600;
+    }
+    .ax.day {
+      font-weight: 600;
+    }
+    .ax.now {
+      fill: var(--primary-text-color);
+      font-weight: 600;
     }
     .stat-row {
       display: flex;

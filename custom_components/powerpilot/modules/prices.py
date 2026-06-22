@@ -145,6 +145,12 @@ class PriceModule(PowerPilotModule):
             return await source.async_fetch_forecasts(target_date)
         return {}
 
+    def price_at(self, hour) -> float | None:
+        return self._data.buy.get(hour)
+
+    def is_confirmed(self, hour) -> bool:
+        return hour in self._data.confirmed_hours
+
     async def _maybe_backfill(self) -> None:
         """Fold each settled past day into the profile exactly once."""
         if self.config.get(CONF_PRICE_SOURCE) != PRICE_SOURCE_PRADCAST:

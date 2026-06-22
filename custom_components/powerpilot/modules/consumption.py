@@ -91,6 +91,12 @@ class ConsumptionModule(PowerPilotModule):
     async def async_update(self) -> None:
         await self._maybe_learn()
 
+    async def async_recent_kwh(self, entity_id: str, hours: int) -> dict:
+        """Recent hourly kWh for a sensor (used by the chart's real-data series)."""
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        start = now - timedelta(hours=hours + 1)
+        return await self._fetch_hourly_kwh(entity_id, start, now)
+
     async def _async_save(self) -> None:
         if self._store is None:
             return

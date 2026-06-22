@@ -22,8 +22,10 @@ For every hour of the horizon (as far as price data reaches), PowerPilot decides
 | Full plan (chart data) | per-hour forecast + decisions | `sensor.powerpilot_optimization_plan` |
 
 The `optimization_plan` sensor exposes the whole horizon as attributes
-(`hours` + `forecast`), ready to drive the two-chart dashboard from the design
-mock (SoC/flows + prices incl. the battery-cost line).
+(`hours` + `forecast`), driving the two-chart dashboard in
+[dashboards/powerpilot-dashboard.yaml](dashboards/powerpilot-dashboard.yaml)
+(SoC/flows + prices incl. the battery-cost line). It needs the `apexcharts-card`
+frontend card (HACS → Frontend).
 
 ## Architecture
 

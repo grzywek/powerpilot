@@ -53,6 +53,7 @@ class Decision:
     charge_power: str = ChargePower.FULL
     grid_connected: bool = True
     ev_charge: bool = False
+    ev_charge_kwh: float = 0.0
 
     # Resulting battery state at the *end* of the hour.
     battery_soc: float = 0.0  # %
@@ -77,6 +78,7 @@ class Decision:
             "charge_power": self.charge_power,
             "grid_connected": self.grid_connected,
             "ev_charge": self.ev_charge,
+            "ev_charge_kwh": round(self.ev_charge_kwh, 3),
             "battery_soc": round(self.battery_soc, 1),
             "battery_energy_cost": round(self.battery_energy_cost, 4),
             "grid_buy_kwh": round(self.grid_buy_kwh, 3),

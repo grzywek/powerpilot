@@ -8,6 +8,8 @@
         "title": "PowerPilot – konfiguracja podstawowa",
         "description": "Parametry sieci, baterii i falownika oraz sensory, które PowerPilot ma odczytywać.",
         "data": {
+          "device_sensors": "Sensory urządzeń z osobnym pomiarem (klima, pralka, bojler, żelazko…)",
+          "consumption_learn_days": "Okno uczenia zużycia (dni)",
           "phases": "Liczba faz (1 lub 3)",
           "main_fuse_a": "Zabezpieczenie przedlicznikowe (A)",
           "battery_capacity_kwh": "Pojemność baterii (kWh)",
@@ -56,6 +58,8 @@
       "init": {
         "title": "PowerPilot – konfiguracja podstawowa",
         "data": {
+          "device_sensors": "Sensory urządzeń z osobnym pomiarem (klima, pralka, bojler, żelazko…)",
+          "consumption_learn_days": "Okno uczenia zużycia (dni)",
           "phases": "Liczba faz (1 lub 3)",
           "main_fuse_a": "Zabezpieczenie przedlicznikowe (A)",
           "battery_capacity_kwh": "Pojemność baterii (kWh)",

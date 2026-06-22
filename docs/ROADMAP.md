@@ -24,9 +24,15 @@ integration installable and working.
 - [ ] Historical backfill from `/prices/trend` + `/prices/forecasts`.
 
 ## Stage 2 – Consumption learning
-- [ ] Rolling weekly consumption profile from a chosen power sensor.
-- [ ] Subtract known loads (EV, scheduled) so the base profile stays clean.
-- [ ] Confidence/decay so recent days weigh more.
+- [x] Rolling weekly base profile learned from the main sensor via recorder
+      long-term statistics (handles both energy kWh and power W/kW sensors).
+- [x] Break out separately-metered devices (AC, washer, boiler, iron) into their
+      own weekly profiles so the base = main − Σ(devices) stays clean.
+- [x] Persisted, incremental (one settled day folded in at a time), with a default
+      shape fallback until learned.
+- [ ] Recency weighting / decay so recent days weigh more.
+- [ ] Let a smarter forward model (climate/calendar) mark a device "managed" to
+      replace its learned profile instead of adding it back.
 
 ## Stage 3 – EV + calendar
 - [ ] EV module: SoC, home/away location, km-per-charge, weekly off-calendar km.
@@ -47,8 +53,10 @@ integration installable and working.
 - [ ] Negative-price handling; weekend "arrive with empty EV battery" strategy.
 
 ## Stage 6 – Frontend
-- [ ] Two-chart dashboard (SoC/flows + prices incl. battery cost line) matching the
-      reference mock, via ApexCharts card config shipped with the integration.
+- [x] Two-chart dashboard (SoC/flows + prices incl. battery cost line) matching the
+      reference mock, shipped as `dashboards/powerpilot-dashboard.yaml` (ApexCharts).
+- [ ] Inverter-mode status markers + forecast-confidence shading on the charts.
+- [ ] Overlay D+1/D+2/D+3 forecasts (`/prices/forecasts`).
 
 ## Stage 7 – Hardening
 - [ ] Tests for battery math, optimizer decisions, module contributions.

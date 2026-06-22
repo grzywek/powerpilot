@@ -1,0 +1,165 @@
+# PowerPilot dashboard (ApexCharts)
+#
+# Reproduces the two-chart design:
+#   • top    – battery SoC + energy flows (consumption, charge, discharge, EV)
+#   • bottom – prices: buy, sell and the battery energy cost after losses
+#
+# Requirements:
+#   - PowerPilot integration installed and configured.
+#   - "apexcharts-card" frontend card (install via HACS → Frontend).
+#
+# Usage:
+#   1. Settings → Dashboards → (your dashboard) → Edit → Raw configuration editor,
+#      or add a new "Manual" card and paste one card at a time.
+#   2. If your plan entity id differs, replace `sensor.powerpilot_optimization_plan`
+#      below (check Developer Tools → States).
+#
+# The plan entity exposes two attribute arrays the charts read via data_generator:
+#   attributes.hours[]    → {start, battery_soc, battery_energy_cost,
+#                            battery_charge_kwh, battery_discharge_kwh,
+#                            ev_charge_kwh, grid_buy_kwh, hour_cost, ...}
+#   attributes.forecast[] → {start, buy_price, sell_price, consumption_kwh, temperature}
+
+type: vertical-stack
+cards:
+  # ----------------------------------------------------------------------
+  # Chart 1 — SoC and energy flows
+  # ----------------------------------------------------------------------
+  - type: custom:apexcharts-card
+    header:
+      show: true
+      title: PowerPilot — bateria i przepływy energii
+      show_states: false
+    graph_span: 4d
+    span:
+      start: hour
+    now:
+      show: true
+      label: Teraz
+    yaxis:
+      - id: soc
+        min: -10
+        max: 100
+        decimals: 0
+        apex_config:
+          title:
+            text: SOC %
+      - id: kwh
+        opposite: true
+        decimals: 1
+        apex_config:
+          title:
+            text: kWh
+    series:
+      - entity: sensor.powerpilot_optimization_plan
+        name: Końcowy SOC baterii (%)
+        type: line
+        yaxis_id: soc
+        stroke_width: 2
+        curve: smooth
+        color: "#2ec4b6"
+        data_generator: |
+          return (entity.attributes.hours || []).map(h => [
+            new Date(h.start).getTime(), h.battery_soc
+          ]);
+      - entity: sensor.powerpilot_optimization_plan
+        name: Zużycie (kWh)
+        type: column
+        yaxis_id: kwh
+        color: "#b5475d"
+        data_generator: |
+          return (entity.attributes.forecast || []).map(f => [
+            new Date(f.start).getTime(), f.consumption_kwh
+          ]);
+      - entity: sensor.powerpilot_optimization_plan
+        name: Ładowanie z sieci (kWh)
+        type: column
+        yaxis_id: kwh
+        color: "#c98a3a"
+        data_generator: |
+          return (entity.attributes.hours || []).map(h => [
+            new Date(h.start).getTime(), h.battery_charge_kwh
+          ]);
+      - entity: sensor.powerpilot_optimization_plan
+        name: Rozładowanie (kWh)
+        type: column
+        yaxis_id: kwh
+        color: "#b0a14f"
+        data_generator: |
+          return (entity.attributes.hours || []).map(h => [
+            new Date(h.start).getTime(), -h.battery_discharge_kwh
+          ]);
+      - entity: sensor.powerpilot_optimization_plan
+        name: Samochód elektryczny (kWh)
+        type: column
+        yaxis_id: kwh
+        color: "#8e7dbe"
+        data_generator: |
+          return (entity.attributes.hours || []).map(h => [
+            new Date(h.start).getTime(), h.ev_charge_kwh
+          ]);
+
+  # ----------------------------------------------------------------------
+  # Chart 2 — prices (incl. battery energy cost after losses)
+  # ----------------------------------------------------------------------
+  - type: custom:apexcharts-card
+    header:
+      show: true
+      title: PowerPilot — ceny energii
+      show_states: false
+    graph_span: 4d
+    span:
+      start: hour
+    now:
+      show: true
+      label: Teraz
+    yaxis:
+      - id: price
+        decimals: 2
+        apex_config:
+          title:
+            text: PLN/kWh
+    series:
+      - entity: sensor.powerpilot_optimization_plan
+        name: Cena zakupu (PLN/kWh)
+        type: line
+        yaxis_id: price
+        stroke_width: 2
+        curve: smooth
+        color: "#2ec4b6"
+        data_generator: |
+          return (entity.attributes.forecast || []).map(f => [
+            new Date(f.start).getTime(), f.buy_price
+          ]);
+      - entity: sensor.powerpilot_optimization_plan
+        name: Cena sprzedaży (PLN/kWh)
+        type: line
+        yaxis_id: price
+        stroke_width: 2
+        curve: smooth
+        color: "#7b6cf6"
+        data_generator: |
+          return (entity.attributes.forecast || []).map(f => [
+            new Date(f.start).getTime(), f.sell_price
+          ]);
+      - entity: sensor.powerpilot_optimization_plan
+        name: Cena energii w baterii (po stratach)
+        type: line
+        yaxis_id: price
+        stroke_width: 2
+        curve: stepline
+        color: "#d6d6d6"
+        data_generator: |
+          return (entity.attributes.hours || []).map(h => [
+            new Date(h.start).getTime(), h.battery_energy_cost
+          ]);
+      - entity: sensor.powerpilot_optimization_plan
+        name: Koszt godzinowy (PLN)
+        type: column
+        yaxis_id: price
+        color: "#4f7fb5"
+        opacity: 0.4
+        data_generator: |
+          return (entity.attributes.hours || []).map(h => [
+            new Date(h.start).getTime(), h.hour_cost
+          ]);

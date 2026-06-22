@@ -100,6 +100,7 @@ class Optimizer:
 
             decision = Decision(start=slot.start)
             decision.ev_charge = ev_kwh > 0
+            decision.ev_charge_kwh = ev_kwh
             if decision.ev_charge:
                 decision.charge_power = ChargePower.LIMITED
 

@@ -8,6 +8,8 @@
         "title": "PowerPilot – core setup",
         "description": "Grid, battery and inverter parameters, plus the sensors PowerPilot should read.",
         "data": {
+          "device_sensors": "Separately-metered device sensors (AC, washer, boiler, iron…)",
+          "consumption_learn_days": "Consumption learning window (days)",
           "phases": "Grid phases (1 or 3)",
           "main_fuse_a": "Main breaker rating (A)",
           "battery_capacity_kwh": "Battery capacity (kWh)",
@@ -56,6 +58,8 @@
       "init": {
         "title": "PowerPilot – core setup",
         "data": {
+          "device_sensors": "Separately-metered device sensors (AC, washer, boiler, iron…)",
+          "consumption_learn_days": "Consumption learning window (days)",
           "phases": "Grid phases (1 or 3)",
           "main_fuse_a": "Main breaker rating (A)",
           "battery_capacity_kwh": "Battery capacity (kWh)",

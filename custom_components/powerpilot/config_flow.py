@@ -19,7 +19,9 @@ from .const import (
     CONF_BATTERY_WEAR_COST,
     CONF_BUY_PRICE_SENSOR,
     CONF_CHARGE_EFFICIENCY,
+    CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
+    CONF_DEVICE_SENSORS,
     CONF_DISCHARGE_EFFICIENCY,
     CONF_EV_BATTERY_KWH,
     CONF_EV_CHARGER_KW,
@@ -100,6 +102,14 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_CONSUMPTION_SENSOR, default=d(CONF_CONSUMPTION_SENSOR) or vol.UNDEFINED
             ): _entity("sensor"),
+            vol.Optional(
+                CONF_DEVICE_SENSORS, default=d(CONF_DEVICE_SENSORS) or vol.UNDEFINED
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", multiple=True)
+            ),
+            vol.Optional(
+                CONF_CONSUMPTION_LEARN_DAYS, default=d(CONF_CONSUMPTION_LEARN_DAYS)
+            ): _NUMBER(_NUM(min=7, max=90, step=1, unit_of_measurement="d", mode="box")),
             vol.Optional(
                 CONF_BUY_PRICE_SENSOR, default=d(CONF_BUY_PRICE_SENSOR) or vol.UNDEFINED
             ): _entity("sensor"),

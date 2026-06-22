@@ -129,4 +129,15 @@ class Plan:
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "total_cost": round(self.total_cost, 4),
             "hours": [d.as_dict() for d in self.decisions],
+            "forecast": [
+                {
+                    "start": s.start.isoformat(),
+                    "buy_price": s.buy_price,
+                    "sell_price": s.sell_price,
+                    "price_confirmed": s.price_confirmed,
+                    "consumption_kwh": round(s.total_consumption_kwh, 3),
+                    "temperature": s.temperature,
+                }
+                for s in self.forecast.slots
+            ],
         }

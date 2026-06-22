@@ -30,6 +30,7 @@ class PowerPilotModule:
         self.hass = hass
         self.coordinator = coordinator
         self.config = coordinator.config
+        self.last_error: str | None = None
 
     async def async_setup(self) -> None:
         """One-time setup (subscribe to entities, load history, etc.)."""
@@ -66,21 +67,25 @@ class ModuleRegistry:
         for module in self._modules:
             try:
                 await module.async_setup()
-            except Exception:  # noqa: BLE001 - one module must not break others
+            except Exception as err:  # noqa: BLE001 - one module must not break others
+                module.last_error = f"setup: {err}"
                 _LOGGER.exception("Error setting up module %s", module.domain)
 
     async def async_update_all(self) -> None:
         for module in self._modules:
             try:
                 await module.async_update()
-            except Exception:  # noqa: BLE001
+                module.last_error = None
+            except Exception as err:  # noqa: BLE001
+                module.last_error = f"update: {err}"
                 _LOGGER.exception("Error updating module %s", module.domain)
 
     def contribute_all(self, forecast: Forecast) -> None:
         for module in self._modules:
             try:
                 module.contribute(forecast)
-            except Exception:  # noqa: BLE001
+            except Exception as err:  # noqa: BLE001
+                module.last_error = f"contribute: {err}"
                 _LOGGER.exception("Error in contribute() of module %s", module.domain)
 
     def collect_reminders(self) -> list[str]:

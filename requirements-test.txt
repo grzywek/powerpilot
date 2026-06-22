@@ -1,0 +1,5 @@
+# Test-only dependencies. Install in a venv:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements-test.txt
+#   pytest -q
+pytest-homeassistant-custom-component

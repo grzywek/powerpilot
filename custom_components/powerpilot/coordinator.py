@@ -10,11 +10,13 @@ and exposes the resulting :class:`Plan` to the entities.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .battery import BatteryModel
 from .const import (
@@ -57,6 +59,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.entry = entry
         self.config: dict = {**DEFAULTS, **entry.data, **entry.options}
         self._battery_energy_cost = 0.0
+        self.events: deque = deque(maxlen=50)
 
         super().__init__(
             hass,
@@ -143,4 +146,84 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if plan.current is not None:
             self._battery_energy_cost = plan.current.battery_energy_cost
 
+        self._record_event(plan)
         return plan
+
+    # ------------------------------------------------------------------
+    # Frontend support: event log + feature status
+    # ------------------------------------------------------------------
+    def _record_event(self, plan: Plan) -> None:
+        current = plan.current
+        errors = [
+            f"{m.domain}: {m.last_error}" for m in self.registry.modules if m.last_error
+        ]
+        self.events.appendleft(
+            {
+                "time": dt_util.now().isoformat(),
+                "horizon_hours": len(plan.decisions),
+                "action": current.inverter_mode if current else None,
+                "ev_charge": current.ev_charge if current else None,
+                "battery_soc": round(current.battery_soc, 1) if current else None,
+                "errors": errors,
+            }
+        )
+
+    def get_log(self) -> list[dict]:
+        return list(self.events)
+
+    def get_status(self) -> dict:
+        """Feature/module status for the panel: what works, what's missing."""
+        from .const import (
+            CONF_BUY_PRICE_SENSOR,
+            CONF_CONSUMPTION_SENSOR,
+            CONF_PRADCAST_API_KEY,
+            CONF_PRICE_SOURCE,
+            CONF_SOC_SENSOR,
+            PRICE_SOURCE_PRADCAST,
+        )
+
+        plan = self.data
+        price_source = self.config.get(CONF_PRICE_SOURCE)
+        price_ok = bool(
+            self.config.get(CONF_PRADCAST_API_KEY)
+            if price_source == PRICE_SOURCE_PRADCAST
+            else self.config.get(CONF_BUY_PRICE_SENSOR)
+        )
+
+        modules = []
+        for module in self.registry.modules:
+            modules.append(
+                {
+                    "domain": module.domain,
+                    "error": module.last_error,
+                }
+            )
+
+        checks = [
+            {
+                "key": "battery_soc",
+                "label": "Sensor SoC baterii",
+                "ok": bool(self.config.get(CONF_SOC_SENSOR)),
+            },
+            {
+                "key": "prices",
+                "label": f"Źródło cen ({price_source})",
+                "ok": price_ok,
+            },
+            {
+                "key": "consumption",
+                "label": "Sensor zużycia",
+                "ok": bool(self.config.get(CONF_CONSUMPTION_SENSOR)),
+            },
+        ]
+
+        return {
+            "last_update": self.events[0]["time"] if self.events else None,
+            "horizon_hours": len(plan.decisions) if plan else 0,
+            "price_profile_days": self.prices.profile.observed_days,
+            "consumption_days": self.consumption.base.observed_days,
+            "consumption_devices": list(self.consumption.devices.keys()),
+            "ev_enabled": self.ev.enabled,
+            "modules": modules,
+            "checks": checks,
+        }

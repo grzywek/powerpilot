@@ -55,8 +55,16 @@ integration installable and working.
 ## Stage 6 – Frontend
 - [x] Two-chart dashboard (SoC/flows + prices incl. battery cost line) matching the
       reference mock, shipped as `dashboards/powerpilot-dashboard.yaml` (ApexCharts).
+- [x] Full sidebar panel dashboard (`dashboards/powerpilot-panel.yaml`) as a YAML
+      dashboard alternative.
+- [x] **Custom Lit panel** auto-registered in the sidebar (no YAML needed):
+      Overview (SVG charts + control), Status (what works / what's missing),
+      Logs (recent optimization runs + module errors), plus a Configure button.
+- [x] WebSocket API (`powerpilot/plan|status|log`) backing the panel instead of
+      overloading entity attributes.
 - [ ] Inverter-mode status markers + forecast-confidence shading on the charts.
 - [ ] Overlay D+1/D+2/D+3 forecasts (`/prices/forecasts`).
+- [ ] Options flow grouped into sections + menu for a tidier config.
 
 ## Stage 7 – Hardening
 - [ ] Tests for battery math, optimizer decisions, module contributions.

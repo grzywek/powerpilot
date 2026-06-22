@@ -1,0 +1,251 @@
+# PowerPilot — pełny dashboard do paska bocznego (osobna pozycja w menu)
+#
+# To jest KOMPLETNY dashboard (widoki + karty), nie pojedyncza karta.
+# Rejestrujesz go jako pozycję w menu bocznym przez configuration.yaml:
+#
+#   lovelace:
+#     mode: storage            # zostaw swój dotychczasowy tryb
+#     dashboards:
+#       powerpilot:
+#         mode: yaml
+#         title: PowerPilot
+#         icon: mdi:home-battery
+#         show_in_sidebar: true
+#         filename: powerpilot/powerpilot-panel.yaml
+#
+#   Skopiuj ten plik do: <config>/powerpilot/powerpilot-panel.yaml
+#   i zrestartuj Home Assistant. W pasku bocznym pojawi się „PowerPilot”.
+#
+# Wymaga karty apexcharts-card (HACS → Frontend).
+# Jeśli encje mają inne ID, podmień `sensor.powerpilot_*` poniżej.
+
+title: PowerPilot
+views:
+  # ====================================================================
+  # Widok 1 — Przegląd (wykresy + stan)
+  # ====================================================================
+  - title: Przegląd
+    path: overview
+    icon: mdi:home-battery
+    cards:
+      - type: entities
+        title: Sterowanie i stan
+        entities:
+          - entity: sensor.powerpilot_next_action
+            name: Następna akcja
+          - entity: sensor.powerpilot_inverter_mode
+            name: Tryb falownika
+          - entity: sensor.powerpilot_charge_power
+            name: Moc ładowania
+          - entity: binary_sensor.powerpilot_grid_connected
+            name: Połączenie z siecią
+          - entity: binary_sensor.powerpilot_ev_charge
+            name: Ładowanie EV
+          - entity: sensor.powerpilot_battery_energy_cost
+            name: Cena energii w baterii (po stratach)
+          - entity: sensor.powerpilot_optimization_plan
+            name: Plan (koszt horyzontu)
+
+      - type: markdown
+        title: Przypomnienia
+        content: >
+          {% set r = state_attr('sensor.powerpilot_next_action', 'reminders') %}
+          {% if r %}{% for item in r %}- {{ item }}
+          {% endfor %}{% else %}Brak przypomnień.{% endif %}
+
+      # --- Wykres 1: bateria i przepływy energii ---
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Bateria i przepływy energii
+          show_states: false
+        graph_span: 4d
+        span:
+          start: hour
+        now:
+          show: true
+          label: Teraz
+        yaxis:
+          - id: soc
+            min: -10
+            max: 100
+            decimals: 0
+            apex_config:
+              title:
+                text: SOC %
+          - id: kwh
+            opposite: true
+            decimals: 1
+            apex_config:
+              title:
+                text: kWh
+        series:
+          - entity: sensor.powerpilot_optimization_plan
+            name: Końcowy SOC baterii (%)
+            type: line
+            yaxis_id: soc
+            stroke_width: 2
+            curve: smooth
+            color: "#2ec4b6"
+            data_generator: |
+              return (entity.attributes.hours || []).map(h => [
+                new Date(h.start).getTime(), h.battery_soc
+              ]);
+          - entity: sensor.powerpilot_optimization_plan
+            name: Zużycie (kWh)
+            type: column
+            yaxis_id: kwh
+            color: "#b5475d"
+            data_generator: |
+              return (entity.attributes.forecast || []).map(f => [
+                new Date(f.start).getTime(), f.consumption_kwh
+              ]);
+          - entity: sensor.powerpilot_optimization_plan
+            name: Ładowanie z sieci (kWh)
+            type: column
+            yaxis_id: kwh
+            color: "#c98a3a"
+            data_generator: |
+              return (entity.attributes.hours || []).map(h => [
+                new Date(h.start).getTime(), h.battery_charge_kwh
+              ]);
+          - entity: sensor.powerpilot_optimization_plan
+            name: Rozładowanie (kWh)
+            type: column
+            yaxis_id: kwh
+            color: "#b0a14f"
+            data_generator: |
+              return (entity.attributes.hours || []).map(h => [
+                new Date(h.start).getTime(), -h.battery_discharge_kwh
+              ]);
+          - entity: sensor.powerpilot_optimization_plan
+            name: Samochód elektryczny (kWh)
+            type: column
+            yaxis_id: kwh
+            color: "#8e7dbe"
+            data_generator: |
+              return (entity.attributes.hours || []).map(h => [
+                new Date(h.start).getTime(), h.ev_charge_kwh
+              ]);
+
+      # --- Wykres 2: ceny ---
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Ceny energii
+          show_states: false
+        graph_span: 4d
+        span:
+          start: hour
+        now:
+          show: true
+          label: Teraz
+        yaxis:
+          - id: price
+            decimals: 2
+            apex_config:
+              title:
+                text: PLN/kWh
+        series:
+          - entity: sensor.powerpilot_optimization_plan
+            name: Cena zakupu (PLN/kWh)
+            type: line
+            yaxis_id: price
+            stroke_width: 2
+            curve: smooth
+            color: "#2ec4b6"
+            data_generator: |
+              return (entity.attributes.forecast || []).map(f => [
+                new Date(f.start).getTime(), f.buy_price
+              ]);
+          - entity: sensor.powerpilot_optimization_plan
+            name: Cena sprzedaży (PLN/kWh)
+            type: line
+            yaxis_id: price
+            stroke_width: 2
+            curve: smooth
+            color: "#7b6cf6"
+            data_generator: |
+              return (entity.attributes.forecast || []).map(f => [
+                new Date(f.start).getTime(), f.sell_price
+              ]);
+          - entity: sensor.powerpilot_optimization_plan
+            name: Cena energii w baterii (po stratach)
+            type: line
+            yaxis_id: price
+            stroke_width: 2
+            curve: stepline
+            color: "#d6d6d6"
+            data_generator: |
+              return (entity.attributes.hours || []).map(h => [
+                new Date(h.start).getTime(), h.battery_energy_cost
+              ]);
+          - entity: sensor.powerpilot_optimization_plan
+            name: Koszt godzinowy (PLN)
+            type: column
+            yaxis_id: price
+            color: "#4f7fb5"
+            opacity: 0.4
+            data_generator: |
+              return (entity.attributes.hours || []).map(h => [
+                new Date(h.start).getTime(), h.hour_cost
+              ]);
+
+  # ====================================================================
+  # Widok 2 — Dane i diagnostyka
+  # ====================================================================
+  - title: Dane
+    path: data
+    icon: mdi:database-search
+    cards:
+      - type: entities
+        title: Wszystkie encje PowerPilot
+        entities:
+          - sensor.powerpilot_inverter_mode
+          - sensor.powerpilot_charge_power
+          - sensor.powerpilot_battery_energy_cost
+          - sensor.powerpilot_next_action
+          - sensor.powerpilot_optimization_plan
+          - binary_sensor.powerpilot_grid_connected
+          - binary_sensor.powerpilot_ev_charge
+
+      - type: markdown
+        title: Diagnostyka uczenia
+        content: >
+          **Ceny** — dni nauczone:
+          {{ state_attr('sensor.powerpilot_optimization_plan', 'price_profile_observed_days') }}
+          (próbki: {{ state_attr('sensor.powerpilot_optimization_plan', 'price_profile_samples') }})
+
+          **Zużycie** — dni nauczone:
+          {{ state_attr('sensor.powerpilot_optimization_plan', 'consumption_observed_days') }}
+
+          **Urządzenia rozdzielone:**
+          {{ state_attr('sensor.powerpilot_optimization_plan', 'consumption_devices') | join(', ') or 'brak' }}
+
+          **Horyzont planu:**
+          {{ state_attr('sensor.powerpilot_optimization_plan', 'horizon_hours') }} h
+
+  # ====================================================================
+  # Widok 3 — Logi i historia
+  # ====================================================================
+  - title: Logi
+    path: logs
+    icon: mdi:text-box-search
+    cards:
+      - type: history-graph
+        title: Historia decyzji i ceny baterii
+        hours_to_show: 72
+        entities:
+          - sensor.powerpilot_inverter_mode
+          - sensor.powerpilot_battery_energy_cost
+          - binary_sensor.powerpilot_grid_connected
+          - binary_sensor.powerpilot_ev_charge
+
+      - type: logbook
+        title: Logbook PowerPilot
+        hours_to_show: 72
+        entities:
+          - sensor.powerpilot_inverter_mode
+          - sensor.powerpilot_next_action
+          - binary_sensor.powerpilot_grid_connected
+          - binary_sensor.powerpilot_ev_charge

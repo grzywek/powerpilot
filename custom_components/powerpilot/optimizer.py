@@ -86,14 +86,26 @@ class Optimizer:
         battery = battery.copy()  # never mutate the live state
         ev_hours = self._plan_ev(forecast, ev_request)
 
-        prices = forecast.buy_prices
-        median_price = statistics.median(prices) if prices else 0.0
-        cheap = _percentile(prices, self.config.cheap_percentile)
-        expensive = _percentile(prices, self.config.expensive_percentile)
+        # Decisions (cheap/expensive thresholds, "battery vs grid" comparisons)
+        # all use *total* price = energy + distribution, because that is what
+        # the household actually pays per kWh imported from the grid.
+        energy_prices = forecast.buy_prices
+        median_energy = statistics.median(energy_prices) if energy_prices else 0.0
+        total_prices = [
+            (slot.buy_price or 0.0) + (slot.distribution_price_kwh or 0.0)
+            for slot in forecast.slots
+            if slot.buy_price is not None
+        ]
+        cheap = _percentile(total_prices, self.config.cheap_percentile)
+        expensive = _percentile(total_prices, self.config.expensive_percentile)
 
         decisions: list[Decision] = []
         for index, slot in enumerate(forecast.slots):
-            price = slot.buy_price if slot.buy_price is not None else median_price
+            energy_price = (
+                slot.buy_price if slot.buy_price is not None else median_energy
+            )
+            distribution = slot.distribution_price_kwh or 0.0
+            total_price = energy_price + distribution
             demand = slot.total_consumption_kwh
             ev_kwh = ev_hours.get(slot.start, 0.0)
 
@@ -105,7 +117,7 @@ class Optimizer:
 
             grid_buy = ev_kwh  # EV is always grid-fed
 
-            if price <= cheap and battery.usable_charge_headroom_kwh > 0:
+            if total_price <= cheap and battery.usable_charge_headroom_kwh > 0:
                 # Cheap hour: charge the battery and serve the house from grid.
                 max_kw = self.config.charge_curve.max_kw(battery.soc)
                 if decision.ev_charge:
@@ -114,11 +126,20 @@ class Optimizer:
                     max_kw,
                     battery.usable_charge_headroom_kwh / max(battery.charge_efficiency, 0.01),
                 )
-                stored = battery.charge_from_grid(charge_grid_kwh, price)
+                # Battery energy cost tracking includes distribution: the
+                # household paid full grid price for every kWh that ends up
+                # stored. Without this, discharge decisions would prefer the
+                # battery even on hours where the stored energy is actually
+                # more expensive than the grid.
+                stored = battery.charge_from_grid(charge_grid_kwh, total_price)
                 decision.inverter_mode = InverterMode.CHARGE
                 decision.battery_charge_kwh = stored
                 grid_buy += charge_grid_kwh + demand
-            elif price >= expensive and battery.energy_cost < price and battery.usable_discharge_kwh > 0:
+            elif (
+                total_price >= expensive
+                and battery.energy_cost < total_price
+                and battery.usable_discharge_kwh > 0
+            ):
                 # Expensive hour and stored energy is cheaper than the grid: discharge.
                 delivered, _cost = battery.discharge_to_load(demand)
                 decision.inverter_mode = InverterMode.DISCHARGE
@@ -133,7 +154,9 @@ class Optimizer:
             decision.battery_soc = battery.soc
             decision.battery_energy_cost = battery.energy_cost
             decision.grid_connected = battery.soc >= self.config.grid_disconnect_soc
-            decision.hour_cost = grid_buy * price
+            decision.energy_cost = grid_buy * energy_price
+            decision.distribution_cost = grid_buy * distribution
+            decision.hour_cost = decision.energy_cost + decision.distribution_cost
 
             if index == 0 and reminders:
                 decision.reminders = list(reminders)

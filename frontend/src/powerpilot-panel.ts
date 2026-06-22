@@ -83,6 +83,8 @@ interface SeriesHour {
   start: string;
   is_past: boolean;
   buy_price: number | null;
+  distribution_price_kwh: number | null;
+  total_price_kwh: number | null;
   price_confirmed: boolean;
   consumption_real: number | null;
   consumption_forecast: number | null;
@@ -95,6 +97,8 @@ interface SeriesHour {
   grid_buy_kwh: number | null;
   ev_charge_kwh: number | null;
   hour_cost: number | null;
+  energy_cost: number | null;
+  distribution_cost: number | null;
   devices_real: Record<string, number | null>;
   devices_forecast: Record<string, number | null>;
 }
@@ -609,14 +613,34 @@ export class PowerPilotPanel extends LitElement {
       x: t,
       y: !hrs[i].price_confirmed && hrs[i].buy_price != null ? hrs[i].buy_price : null,
     }));
+    const distributionData = ts.map((t, i) => ({
+      x: t,
+      y: hrs[i].distribution_price_kwh,
+    }));
+    const totalConfirmedData = ts.map((t, i) => ({
+      x: t,
+      y: hrs[i].price_confirmed ? hrs[i].total_price_kwh : null,
+    }));
+    const totalForecastData = ts.map((t, i) => ({
+      x: t,
+      y: !hrs[i].price_confirmed ? hrs[i].total_price_kwh : null,
+    }));
     const batCostData = ts.map((t, i) => ({ x: t, y: hrs[i].battery_energy_cost }));
-    const hourCostData = ts.map((t, i) => ({ x: t, y: hrs[i].hour_cost }));
+    // Stacked column: energy + distribution = total hour cost (PLN/h).
+    // For past hours we don't compute a per-hour cost (no decision), so feed
+    // nulls to keep the column blank.
+    const energyCostData = ts.map((t, i) => ({ x: t, y: hrs[i].energy_cost }));
+    const distCostData = ts.map((t, i) => ({ x: t, y: hrs[i].distribution_cost }));
 
     const series: any[] = [
       { name: "Cena zakupu (pewne)", type: "line", data: confirmedData, color: "#2ec4b6" },
       { name: "Cena zakupu (prognoza)", type: "line", data: forecastData, color: "#7ed3c9" },
+      { name: "Cena dystrybucji", type: "line", data: distributionData, color: "#c084fc" },
+      { name: "Cena całkowita (pewne)", type: "line", data: totalConfirmedData, color: "#facc15" },
+      { name: "Cena całkowita (prognoza)", type: "line", data: totalForecastData, color: "#fde68a" },
       { name: "Cena w baterii", type: "line", data: batCostData, color: "#9e9e9e" },
-      { name: "Koszt godziny (PLN)", type: "column", data: hourCostData, color: "#e67e22" },
+      { name: "Koszt energii (PLN)", type: "column", data: energyCostData, color: "#e67e22" },
+      { name: "Koszt dystrybucji (PLN)", type: "column", data: distCostData, color: "#a16207" },
     ];
 
     const nowTs = Date.now();
@@ -624,7 +648,10 @@ export class PowerPilotPanel extends LitElement {
       chart: {
         type: "line",
         height: 380,
-        stacked: false,
+        // Stacked applies only to column/area series in mixed charts; the
+        // line series remain independent. This makes the two cost columns
+        // visually sum to the hour total without distorting the price lines.
+        stacked: true,
         animations: { enabled: false },
         toolbar: {
           show: true,
@@ -635,13 +662,15 @@ export class PowerPilotPanel extends LitElement {
       },
       theme: { mode: "dark" },
       stroke: {
-        width: [2.5, 2.5, 2, 0],
+        // Match width/dash settings to the 8 series declared above
+        // (5 price lines + battery cost + 2 stacked columns).
+        width: [2.5, 2.5, 2, 3, 3, 2, 0, 0],
         curve: "straight",
-        dashArray: [0, 5, 3, 0],
+        dashArray: [0, 5, 4, 0, 5, 3, 0, 0],
       },
       plotOptions: { bar: { columnWidth: "55%", borderRadius: 1 } },
       dataLabels: { enabled: false },
-      fill: { opacity: [1, 1, 1, 0.7] },
+      fill: { opacity: [1, 1, 1, 1, 1, 1, 0.75, 0.6] },
       series,
       xaxis: {
         type: "datetime",
@@ -651,9 +680,8 @@ export class PowerPilotPanel extends LitElement {
         },
       },
       yaxis: [
-        // Each PLN/kWh line gets its own yaxis entry sharing the LEFT axis
-        // (only the first carries title/labels) so every series has an
-        // explicit mapping — see _buildEnergyOptions for the rationale.
+        // PLN/kWh lines all share the LEFT axis. Only the first carries the
+        // title/labels; the rest map to it via `seriesName` with `show:false`.
         {
           seriesName: "Cena zakupu (pewne)",
           title: { text: "PLN/kWh" },
@@ -661,25 +689,21 @@ export class PowerPilotPanel extends LitElement {
           forceNiceScale: true,
           decimalsInFloat: 3,
         },
+        { seriesName: "Cena zakupu (prognoza)", show: false, forceNiceScale: true },
+        { seriesName: "Cena dystrybucji", show: false, forceNiceScale: true },
+        { seriesName: "Cena całkowita (pewne)", show: false, forceNiceScale: true },
+        { seriesName: "Cena całkowita (prognoza)", show: false, forceNiceScale: true },
+        { seriesName: "Cena w baterii", show: false, forceNiceScale: true },
         {
-          seriesName: "Cena zakupu (prognoza)",
-          show: false,
-          forceNiceScale: true,
-        },
-        {
-          seriesName: "Cena w baterii",
-          show: false,
-          forceNiceScale: true,
-        },
-        {
-          // RIGHT axis: PLN/h — only the hour-cost column series.
-          seriesName: "Koszt godziny (PLN)",
+          // RIGHT axis: PLN/h — first stacked-column series carries title.
+          seriesName: "Koszt energii (PLN)",
           opposite: true,
           title: { text: "PLN/h" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
           forceNiceScale: true,
           min: 0,
         },
+        { seriesName: "Koszt dystrybucji (PLN)", opposite: true, show: false, forceNiceScale: true, min: 0 },
       ],
       tooltip: {
         shared: true,
@@ -690,7 +714,7 @@ export class PowerPilotPanel extends LitElement {
           formatter: (val: number, opts: any) => {
             if (val == null) return "—";
             const name = opts?.w?.config?.series?.[opts.seriesIndex]?.name ?? "";
-            if (name.includes("Koszt godziny")) return val.toFixed(2) + " PLN";
+            if (name.includes("Koszt")) return val.toFixed(2) + " PLN";
             return val.toFixed(3) + " PLN/kWh";
           },
         },

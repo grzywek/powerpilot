@@ -36,7 +36,7 @@ from .const import (
     DOMAIN,
 )
 from .forecast import ForecastBuilder
-from .models import Plan
+from .models import Plan, tariff_for_day
 from .modules import (
     CalendarModule,
     ClimateModule,
@@ -373,11 +373,20 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if learned
                 else None
             )
+            buy_price = self.prices.price_at(h)
+            dist_price = self.tariff.snapshot_for(h)
+            total_price = (
+                buy_price + dist_price
+                if buy_price is not None and dist_price is not None
+                else None
+            )
             hours.append(
                 {
                     "start": h.isoformat(),
                     "is_past": True,
-                    "buy_price": self.prices.price_at(h),
+                    "buy_price": buy_price,
+                    "distribution_price_kwh": dist_price,
+                    "total_price_kwh": total_price,
                     "price_confirmed": self.prices.is_confirmed(h),
                     "consumption_real": round(main_real[h], 3) if h in main_real else None,
                     "consumption_forecast": forecast_c,
@@ -390,6 +399,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "grid_buy_kwh": round(grid_import_real[h], 3) if h in grid_import_real else None,
                     "ev_charge_kwh": None,
                     "hour_cost": None,
+                    "energy_cost": None,
+                    "distribution_cost": None,
                     "devices_real": dev_real_h,
                     "devices_forecast": dev_forecast,
                 }
@@ -419,6 +430,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "start": slot.start.isoformat(),
                         "is_past": False,
                         "buy_price": slot.buy_price,
+                        "distribution_price_kwh": slot.distribution_price_kwh,
+                        "total_price_kwh": slot.total_price_kwh,
                         "price_confirmed": slot.price_confirmed,
                         "consumption_real": None,
                         "consumption_forecast": round(slot.total_consumption_kwh, 3),
@@ -431,6 +444,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "grid_buy_kwh": round(decision.grid_buy_kwh, 3),
                         "ev_charge_kwh": round(decision.ev_charge_kwh, 3),
                         "hour_cost": round(decision.hour_cost, 4),
+                        "energy_cost": round(decision.energy_cost, 4),
+                        "distribution_cost": round(decision.distribution_cost, 4),
                         "devices_real": {eid: None for eid in device_ids},
                         "devices_forecast": dev_forecast,
                     }
@@ -488,6 +503,14 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "key": "consumption",
                 "label": "Sensor zużycia",
                 "ok": bool(self.config.get(CONF_CONSUMPTION_SENSOR)),
+            },
+            {
+                "key": "tariff",
+                "label": "Taryfa dystrybucyjna",
+                "ok": bool(
+                    self.tariff.tariffs
+                    and tariff_for_day(self.tariff.tariffs, dt_util.now().date())
+                ),
             },
         ]
 

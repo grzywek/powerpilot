@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -45,12 +46,16 @@ from .const import (
     CONF_PRICE_SOURCE,
     CONF_PRICE_VAT,
     CONF_SOC_SENSOR,
+    CONF_TARIFFS,
     CONF_WEATHER_ENTITY,
+    CONF_WORKDAY_PLUS_N_SENSORS,
     DEFAULTS,
     DOMAIN,
+    MAX_WORKDAY_PLUS_N,
     PRICE_SOURCE_PRADCAST,
     PRICE_SOURCE_SENSOR,
 )
+from .models import Tariff, TariffPeriod
 
 _NUMBER = selector.NumberSelector
 _NUM = selector.NumberSelectorConfig
@@ -221,28 +226,359 @@ class PowerPilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class PowerPilotOptionsFlow(OptionsFlow):
-    """Allow editing all parameters after setup."""
+    """Menu-based options flow.
+
+    The init step shows a menu; each sub-section (core, prices, EV, tariffs,
+    workday sensors) saves into ``self._data`` and returns to the menu. The
+    user finalises by picking *Save & exit* from the menu.
+
+    Tariff editing is multi-level:
+
+        tariff_list ──► tariff_form ──► period_list ──► period_form
+                ▲           │              ▲   │
+                └───────────┘              └───┘  (loops until ← Back)
+    """
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
+        self._loaded = False
+        # Edit context for the tariff sub-flow.
+        self._editing_tariff_id: str | None = None
+        self._editing_period_id: str | None = None
+
+    # ------------------------------------------------------------------ utils
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._data = {**self.config_entry.data, **self.config_entry.options}
+        self._loaded = True
+
+    def _tariffs(self) -> list[Tariff]:
+        raw = self._data.get(CONF_TARIFFS) or []
+        return [Tariff.from_dict(t) for t in raw]
+
+    def _save_tariffs(self, tariffs: list[Tariff]) -> None:
+        self._data[CONF_TARIFFS] = [t.to_dict() for t in tariffs]
+
+    def _current_tariff(self) -> Tariff | None:
+        if not self._editing_tariff_id:
+            return None
+        for t in self._tariffs():
+            if t.id == self._editing_tariff_id:
+                return t
+        return None
+
+    # ------------------------------------------------------------ menu (init)
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        merged = {**self.config_entry.data, **self.config_entry.options}
+        self._ensure_loaded()
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=[
+                "core",
+                "prices",
+                "ev",
+                "tariff_list",
+                "workday_sensors",
+                "finish",
+            ],
+        )
+
+    async def async_step_finish(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        return self.async_create_entry(title="", data=self._data)
+
+    # ----------------------------------------------------- existing sub-forms
+
+    async def async_step_core(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_prices()
-        return self.async_show_form(step_id="init", data_schema=_core_schema(merged))
+            return await self.async_step_init()
+        return self.async_show_form(step_id="core", data_schema=_core_schema(self._data))
 
     async def async_step_prices(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        merged = {**self.config_entry.data, **self.config_entry.options}
+        self._ensure_loaded()
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_ev()
-        return self.async_show_form(step_id="prices", data_schema=_price_schema(merged))
+            return await self.async_step_init()
+        return self.async_show_form(step_id="prices", data_schema=_price_schema(self._data))
 
     async def async_step_ev(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        merged = {**self.config_entry.data, **self.config_entry.options}
+        self._ensure_loaded()
         if user_input is not None:
             self._data.update(user_input)
-            return self.async_create_entry(title="", data=self._data)
-        return self.async_show_form(step_id="ev", data_schema=_ev_schema(merged))
+            return await self.async_step_init()
+        return self.async_show_form(step_id="ev", data_schema=_ev_schema(self._data))
+
+    # ------------------------------------------------------------- workday D+N
+
+    async def async_step_workday_sensors(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        existing = self._data.get(CONF_WORKDAY_PLUS_N_SENSORS) or []
+        if user_input is not None:
+            sensors: list[str] = []
+            for n in range(1, MAX_WORKDAY_PLUS_N + 1):
+                value = user_input.get(f"d{n}")
+                sensors.append(value or "")
+            # Strip trailing empties so we don't persist [..., "", "", ""].
+            while sensors and not sensors[-1]:
+                sensors.pop()
+            self._data[CONF_WORKDAY_PLUS_N_SENSORS] = sensors
+            return await self.async_step_init()
+
+        schema_dict: dict[Any, Any] = {}
+        for n in range(1, MAX_WORKDAY_PLUS_N + 1):
+            current = existing[n - 1] if n - 1 < len(existing) else None
+            schema_dict[vol.Optional(f"d{n}", default=current or vol.UNDEFINED)] = _entity("binary_sensor")
+        return self.async_show_form(
+            step_id="workday_sensors",
+            data_schema=vol.Schema(schema_dict),
+        )
+
+    # -------------------------------------------------------------- tariff list
+
+    async def async_step_tariff_list(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        tariffs = self._tariffs()
+
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "__back__":
+                return await self.async_step_init()
+            if action == "__add__":
+                self._editing_tariff_id = None
+                return await self.async_step_tariff_form()
+            kind, _, tid = action.partition(":")
+            if kind == "edit":
+                self._editing_tariff_id = tid
+                return await self.async_step_tariff_form()
+            if kind == "del":
+                remaining = [t for t in tariffs if t.id != tid]
+                self._save_tariffs(remaining)
+                return await self.async_step_tariff_list()
+            return await self.async_step_tariff_list()
+
+        options: list[selector.SelectOptionDict] = [
+            selector.SelectOptionDict(value="__add__", label="➕ Dodaj nową taryfę"),
+        ]
+        for t in tariffs:
+            range_label = ""
+            if t.valid_from or t.valid_to:
+                range_label = (
+                    f" ({t.valid_from.isoformat() if t.valid_from else '…'}"
+                    f" → {t.valid_to.isoformat() if t.valid_to else '…'})"
+                )
+            options.append(
+                selector.SelectOptionDict(
+                    value=f"edit:{t.id}",
+                    label=f"✎ {t.name}{range_label} — {len(t.periods)} okr.",
+                )
+            )
+            options.append(
+                selector.SelectOptionDict(
+                    value=f"del:{t.id}",
+                    label=f"🗑 Usuń: {t.name}",
+                )
+            )
+        options.append(selector.SelectOptionDict(value="__back__", label="← Powrót do menu"))
+
+        return self.async_show_form(
+            step_id="tariff_list",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    )
+                }
+            ),
+            description_placeholders={"count": str(len(tariffs))},
+        )
+
+    # -------------------------------------------------------------- tariff form
+
+    async def async_step_tariff_form(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        existing = self._current_tariff()
+
+        if user_input is not None:
+            from datetime import date as _date
+
+            def _to_date(value: Any) -> _date | None:
+                if not value:
+                    return None
+                if isinstance(value, _date):
+                    return value
+                return _date.fromisoformat(str(value))
+
+            tariffs = self._tariffs()
+            new_tariff = Tariff(
+                id=existing.id if existing else uuid4().hex,
+                name=str(user_input["name"]).strip(),
+                fallback_price_kwh=float(user_input["fallback_price_kwh"]),
+                valid_from=_to_date(user_input.get("valid_from")),
+                valid_to=_to_date(user_input.get("valid_to")),
+                periods=existing.periods if existing else [],
+            )
+            if existing:
+                tariffs = [new_tariff if t.id == existing.id else t for t in tariffs]
+            else:
+                tariffs.append(new_tariff)
+                self._editing_tariff_id = new_tariff.id
+            self._save_tariffs(tariffs)
+            return await self.async_step_period_list()
+
+        defaults = {
+            "name": existing.name if existing else "",
+            "fallback_price_kwh": existing.fallback_price_kwh if existing else 0.0392,
+            "valid_from": existing.valid_from.isoformat() if existing and existing.valid_from else vol.UNDEFINED,
+            "valid_to": existing.valid_to.isoformat() if existing and existing.valid_to else vol.UNDEFINED,
+        }
+        schema = vol.Schema(
+            {
+                vol.Required("name", default=defaults["name"]): selector.TextSelector(),
+                vol.Required("fallback_price_kwh", default=defaults["fallback_price_kwh"]): _NUMBER(
+                    _NUM(min=0, max=5, step="any", unit_of_measurement="PLN/kWh", mode="box")
+                ),
+                vol.Optional("valid_from", default=defaults["valid_from"]): selector.DateSelector(),
+                vol.Optional("valid_to", default=defaults["valid_to"]): selector.DateSelector(),
+            }
+        )
+        return self.async_show_form(
+            step_id="tariff_form",
+            data_schema=schema,
+            description_placeholders={
+                "mode": "edycja" if existing else "nowa",
+                "name": existing.name if existing else "—",
+            },
+        )
+
+    # -------------------------------------------------------------- period list
+
+    async def async_step_period_list(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        tariff = self._current_tariff()
+        if tariff is None:
+            return await self.async_step_tariff_list()
+
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "__back__":
+                self._editing_tariff_id = None
+                return await self.async_step_tariff_list()
+            if action == "__add__":
+                self._editing_period_id = None
+                return await self.async_step_period_form()
+            kind, _, pid = action.partition(":")
+            if kind == "edit":
+                self._editing_period_id = pid
+                return await self.async_step_period_form()
+            if kind == "del":
+                tariffs = self._tariffs()
+                for t in tariffs:
+                    if t.id == tariff.id:
+                        t.periods = [p for p in t.periods if p.id != pid]
+                self._save_tariffs(tariffs)
+                return await self.async_step_period_list()
+            return await self.async_step_period_list()
+
+        options: list[selector.SelectOptionDict] = [
+            selector.SelectOptionDict(value="__add__", label="➕ Dodaj okres"),
+        ]
+        for p in tariff.periods:
+            options.append(
+                selector.SelectOptionDict(
+                    value=f"edit:{p.id}",
+                    label=f"✎ {p.name} — {p.hour_from:02d}-{p.hour_to:02d}, {p.price_kwh:.4f} PLN/kWh",
+                )
+            )
+            options.append(
+                selector.SelectOptionDict(value=f"del:{p.id}", label=f"🗑 Usuń: {p.name}")
+            )
+        options.append(selector.SelectOptionDict(value="__back__", label="← Powrót do listy taryf"))
+
+        return self.async_show_form(
+            step_id="period_list",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    )
+                }
+            ),
+            description_placeholders={
+                "tariff_name": tariff.name,
+                "fallback_price": f"{tariff.fallback_price_kwh:.4f}",
+                "count": str(len(tariff.periods)),
+            },
+        )
+
+    # -------------------------------------------------------------- period form
+
+    async def async_step_period_form(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        tariff = self._current_tariff()
+        if tariff is None:
+            return await self.async_step_tariff_list()
+        existing = next((p for p in tariff.periods if p.id == self._editing_period_id), None)
+
+        if user_input is not None:
+            hour_from = int(user_input["hour_from"])
+            hour_to = int(user_input["hour_to"])
+            new_period = TariffPeriod(
+                id=existing.id if existing else uuid4().hex,
+                name=str(user_input["name"]).strip(),
+                hour_from=hour_from,
+                hour_to=hour_to,
+                price_kwh=float(user_input["price_kwh"]),
+                day_sensor=user_input.get("day_sensor") or None,
+            )
+            tariffs = self._tariffs()
+            for t in tariffs:
+                if t.id == tariff.id:
+                    if existing:
+                        t.periods = [new_period if p.id == existing.id else p for p in t.periods]
+                    else:
+                        t.periods.append(new_period)
+            self._save_tariffs(tariffs)
+            self._editing_period_id = None
+            return await self.async_step_period_list()
+
+        defaults = {
+            "name": existing.name if existing else "",
+            "hour_from": existing.hour_from if existing else 0,
+            "hour_to": existing.hour_to if existing else 24,
+            "price_kwh": existing.price_kwh if existing else tariff.fallback_price_kwh,
+            "day_sensor": existing.day_sensor if existing and existing.day_sensor else vol.UNDEFINED,
+        }
+        schema = vol.Schema(
+            {
+                vol.Required("name", default=defaults["name"]): selector.TextSelector(),
+                vol.Required("hour_from", default=defaults["hour_from"]): _NUMBER(
+                    _NUM(min=0, max=23, step=1, unit_of_measurement="h", mode="box")
+                ),
+                vol.Required("hour_to", default=defaults["hour_to"]): _NUMBER(
+                    _NUM(min=1, max=24, step=1, unit_of_measurement="h", mode="box")
+                ),
+                vol.Required("price_kwh", default=defaults["price_kwh"]): _NUMBER(
+                    _NUM(min=0, max=5, step="any", unit_of_measurement="PLN/kWh", mode="box")
+                ),
+                vol.Optional("day_sensor", default=defaults["day_sensor"]): _entity("binary_sensor"),
+            }
+        )
+        return self.async_show_form(
+            step_id="period_form",
+            data_schema=schema,
+            description_placeholders={
+                "mode": "edycja" if existing else "nowy",
+                "tariff_name": tariff.name,
+            },
+        )
+

@@ -58,6 +58,18 @@
   "options": {
     "step": {
       "init": {
+        "title": "PowerPilot",
+        "description": "Pick a section to edit, then return here. Use *Save & exit* to commit changes.",
+        "menu_options": {
+          "core": "⚙️ Core (grid / battery / inverter / sensors)",
+          "prices": "💰 Energy prices",
+          "ev": "🚗 EV",
+          "tariff_list": "🧾 Distribution tariffs",
+          "workday_sensors": "📆 Future-day classifier sensors (D+1..D+7)",
+          "finish": "✅ Save & exit"
+        }
+      },
+      "core": {
         "title": "PowerPilot – core setup",
         "data": {
           "device_sensors": "Separately-metered device sensors (AC, washer, boiler, iron…)",
@@ -101,6 +113,54 @@
           "ev_battery_kwh": "EV battery capacity (kWh)",
           "ev_weekly_km": "Weekly off-calendar km",
           "ev_charger_kw": "Charger power per phase (kW)"
+        }
+      },
+      "tariff_list": {
+        "title": "Distribution tariffs",
+        "description": "Tariffs configured: {count}. Pick an action.",
+        "data": {
+          "action": "Action"
+        }
+      },
+      "tariff_form": {
+        "title": "Tariff ({mode})",
+        "description": "Editing: {name}. Periods are added in the next step.",
+        "data": {
+          "name": "Tariff name (e.g. Tauron G12)",
+          "fallback_price_kwh": "Fallback price for unmatched hours (PLN/kWh)",
+          "valid_from": "Valid from (optional)",
+          "valid_to": "Valid to (optional)"
+        }
+      },
+      "period_list": {
+        "title": "Periods of {tariff_name}",
+        "description": "Tariff: **{tariff_name}** · fallback {fallback_price} PLN/kWh · {count} periods. Periods are evaluated in order — first match wins.",
+        "data": {
+          "action": "Action"
+        }
+      },
+      "period_form": {
+        "title": "Period ({mode}) in {tariff_name}",
+        "description": "Hour range is half-open: [from, to). For a night band crossing midnight (e.g. 22→6) set from=22 to=6.",
+        "data": {
+          "name": "Period name (e.g. Afternoon peak)",
+          "hour_from": "Hour from (0–23, inclusive)",
+          "hour_to": "Hour to (1–24, exclusive)",
+          "price_kwh": "Price (PLN/kWh)",
+          "day_sensor": "Day classifier (binary_sensor, optional)"
+        }
+      },
+      "workday_sensors": {
+        "title": "Future-day classifier sensors",
+        "description": "Optional binary sensors that classify each future day. Used by periods that reference *workday_today* for D+1..D+7. Leave blank if you don't need future-day classification.",
+        "data": {
+          "d1": "D+1 (tomorrow)",
+          "d2": "D+2",
+          "d3": "D+3",
+          "d4": "D+4",
+          "d5": "D+5",
+          "d6": "D+6",
+          "d7": "D+7"
         }
       }
     }

@@ -156,20 +156,63 @@ class PradcastPriceSource(PriceSource):
     async def _fetch_day(
         self, session: aiohttp.ClientSession, api_key: str, day: date
     ) -> dict | None:
-        url = f"{PRADCAST_BASE}/prices/date/{day.isoformat()}"
+        return await self._get_json(session, api_key, f"{PRADCAST_BASE}/prices/date/{day.isoformat()}")
+
+    async def _get_json(
+        self, session: aiohttp.ClientSession, api_key: str, url: str
+    ) -> dict | None:
         try:
             async with asyncio.timeout(15):
                 async with session.get(url, headers={"X-API-Key": api_key}) as resp:
                     if resp.status == 429:
-                        _LOGGER.warning("Pradcast rate-limited (429) for %s", day)
+                        _LOGGER.warning("Pradcast rate-limited (429): %s", url)
                         return None
                     if resp.status != 200:
-                        _LOGGER.debug("Pradcast %s returned HTTP %s", day, resp.status)
+                        _LOGGER.debug("Pradcast %s returned HTTP %s", url, resp.status)
                         return None
                     return await resp.json()
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            _LOGGER.debug("Pradcast fetch failed for %s: %s", day, err)
+            _LOGGER.debug("Pradcast fetch failed for %s: %s", url, err)
             return None
+
+    async def async_fetch_forecasts(self, target_date: date) -> dict:
+        """Return horizon-indexed forecasts for a date (for the D+1..D+3 overlay).
+
+        Shape: ``{"D+1": [{"hour", "buy", "p10", "p90"}], "D+2": [...], ...}``
+        with retail conversion applied to price/p10/p90.
+        """
+        api_key = self.config.get(CONF_PRADCAST_API_KEY)
+        if not api_key:
+            return {}
+        markup = float(self.config.get(CONF_PRICE_MARKUP, 0.0) or 0.0)
+        vat = float(self.config.get(CONF_PRICE_VAT, 1.0) or 1.0)
+        session = async_get_clientsession(self.hass)
+        payload = await self._get_json(
+            session, api_key, f"{PRADCAST_BASE}/prices/forecasts/{target_date.isoformat()}"
+        )
+        if not payload:
+            return {}
+
+        def _retail(value):
+            return (float(value) + markup) * vat if value is not None else None
+
+        out: dict[str, list[dict]] = {}
+        for horizon, block in (payload.get("forecasts") or {}).items():
+            series = []
+            for entry in block.get("prices", []) or []:
+                if entry.get("price_kwh") is None:
+                    continue
+                series.append(
+                    {
+                        "hour": int(entry["hour"]),
+                        "buy": _retail(entry["price_kwh"]),
+                        "p10": _retail(entry.get("p10")),
+                        "p90": _retail(entry.get("p90")),
+                    }
+                )
+            if series:
+                out[horizon] = series
+        return out
 
     @staticmethod
     def _merge_day(

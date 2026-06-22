@@ -51,7 +51,45 @@ interface LogEvent {
   errors: string[];
 }
 
-type Tab = "overview" | "status" | "logs";
+type Matrix = Record<string, (number | null)[]>;
+
+interface Profiles {
+  price: Matrix;
+  price_days: number;
+  consumption: Matrix;
+  consumption_days: number;
+  devices: Record<string, Matrix>;
+}
+
+interface ForecastPoint {
+  hour: number;
+  buy: number | null;
+  p10: number | null;
+  p90: number | null;
+}
+
+interface Forecasts {
+  date: string;
+  horizons: Record<string, ForecastPoint[]>;
+}
+
+type Tab = "overview" | "status" | "profiles" | "logs";
+
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const WEEKDAY_PL: Record<string, string> = {
+  mon: "Pon",
+  tue: "Wt",
+  wed: "Śr",
+  thu: "Czw",
+  fri: "Pt",
+  sat: "Sob",
+  sun: "Nd",
+};
+const HORIZON_COLORS: Record<string, string> = {
+  "D+1": "#2ec4b6",
+  "D+2": "#7b6cf6",
+  "D+3": "#c98a3a",
+};
 
 @customElement("powerpilot-panel")
 export class PowerPilotPanel extends LitElement {
@@ -62,6 +100,8 @@ export class PowerPilotPanel extends LitElement {
   @state() private _plan: Plan | null = null;
   @state() private _status: Status | null = null;
   @state() private _log: LogEvent[] = [];
+  @state() private _profiles: Profiles | null = null;
+  @state() private _forecasts: Forecasts | null = null;
   @state() private _error: string | null = null;
 
   private _timer?: number;
@@ -80,18 +120,34 @@ export class PowerPilotPanel extends LitElement {
   private async _refresh(): Promise<void> {
     if (!this.hass) return;
     try {
-      const [plan, status, log] = await Promise.all([
+      const [plan, status, log, profiles] = await Promise.all([
         this.hass.callWS({ type: "powerpilot/plan" }),
         this.hass.callWS({ type: "powerpilot/status" }),
         this.hass.callWS({ type: "powerpilot/log" }),
+        this.hass.callWS({ type: "powerpilot/profiles" }),
       ]);
       this._plan = plan;
       this._status = status;
       this._log = log?.events ?? [];
+      this._profiles = profiles;
       this._error = null;
     } catch (err: any) {
       this._error = err?.message ?? String(err);
     }
+  }
+
+  private async _loadForecasts(): Promise<void> {
+    if (this._forecasts || !this.hass) return;
+    try {
+      this._forecasts = await this.hass.callWS({ type: "powerpilot/forecasts" });
+    } catch (err: any) {
+      this._error = err?.message ?? String(err);
+    }
+  }
+
+  private _selectTab(tab: Tab): void {
+    this._tab = tab;
+    if (tab === "profiles") this._loadForecasts();
   }
 
   private _openConfig(): void {
@@ -108,12 +164,14 @@ export class PowerPilotPanel extends LitElement {
       <div class="tabs">
         ${this._tabButton("overview", "Przegląd")}
         ${this._tabButton("status", "Status")}
+        ${this._tabButton("profiles", "Profile")}
         ${this._tabButton("logs", "Logi")}
       </div>
       ${this._error ? html`<div class="error">Błąd: ${this._error}</div>` : nothing}
       <div class="content">
         ${this._tab === "overview" ? this._renderOverview() : nothing}
         ${this._tab === "status" ? this._renderStatus() : nothing}
+        ${this._tab === "profiles" ? this._renderProfiles() : nothing}
         ${this._tab === "logs" ? this._renderLogs() : nothing}
       </div>
     `;
@@ -122,7 +180,7 @@ export class PowerPilotPanel extends LitElement {
   private _tabButton(tab: Tab, label: string): TemplateResult {
     return html`<button
       class=${"tab" + (this._tab === tab ? " active" : "")}
-      @click=${() => (this._tab = tab)}
+      @click=${() => this._selectTab(tab)}
     >
       ${label}
     </button>`;
@@ -264,6 +322,114 @@ export class PowerPilotPanel extends LitElement {
             <span class=${"dot " + (m.error ? "bad" : "ok")}></span>${m.domain}
             ${m.error ? html`<span class="muted">${m.error}</span>` : nothing}
           </div>`
+        )}
+      </div>
+    `;
+  }
+
+  // ------------------------------------------------------------------
+  // Profiles (7×24 heatmaps + D+1..D+3 overlay)
+  // ------------------------------------------------------------------
+  private _renderProfiles(): TemplateResult {
+    const p = this._profiles;
+    return html`
+      ${p
+        ? html`
+            <div class="card">
+              <div class="card-title">Profil cen — 7×24 (${p.price_days} dni)</div>
+              ${this._heatmap(p.price, "PLN/kWh")}
+            </div>
+            <div class="card">
+              <div class="card-title">Profil zużycia (bazowy) — 7×24 (${p.consumption_days} dni)</div>
+              ${this._heatmap(p.consumption, "kWh")}
+            </div>
+          `
+        : html`<div class="card empty">Ładowanie profili…</div>`}
+      <div class="card">
+        <div class="card-title">
+          Prognozy D+1..D+3 ${this._forecasts ? "— " + this._forecasts.date : ""}
+        </div>
+        ${this._renderForecastOverlay()}
+      </div>
+    `;
+  }
+
+  private _heatmap(matrix: Matrix, unit: string): TemplateResult {
+    const values: number[] = [];
+    WEEKDAYS.forEach((d) =>
+      (matrix[d] ?? []).forEach((v) => {
+        if (v !== null && v !== undefined) values.push(v);
+      })
+    );
+    if (!values.length) return html`<div class="empty">Brak danych — profil jeszcze się uczy.</div>`;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    return html`
+      <div class="heatmap">
+        <div class="hm-row hm-head">
+          <div class="hm-label"></div>
+          ${Array.from({ length: 24 }, (_, h) => html`<div class="hm-h">${h}</div>`)}
+        </div>
+        ${WEEKDAYS.map(
+          (d) => html`
+            <div class="hm-row">
+              <div class="hm-label">${WEEKDAY_PL[d]}</div>
+              ${(matrix[d] ?? []).map((v) => {
+                const color = v === null || v === undefined ? "transparent" : this._heatColor(v, min, max);
+                const title = v === null || v === undefined ? "—" : `${v.toFixed(3)} ${unit}`;
+                return html`<div class="hm-cell" style=${"background:" + color} title=${title}></div>`;
+              })}
+            </div>
+          `
+        )}
+      </div>
+      <div class="legend">
+        <span>${min.toFixed(2)}</span>
+        <div class="legend-bar"></div>
+        <span>${max.toFixed(2)} ${unit}</span>
+      </div>
+    `;
+  }
+
+  private _heatColor(v: number, min: number, max: number): string {
+    const t = max > min ? (v - min) / (max - min) : 0.5;
+    const hue = (1 - t) * 160; // teal (low) → red (high)
+    return `hsl(${hue}, 70%, 45%)`;
+  }
+
+  private _renderForecastOverlay(): TemplateResult {
+    const f = this._forecasts;
+    if (!f) return html`<div class="empty">Ładowanie prognoz…</div>`;
+    const horizons = Object.keys(f.horizons || {});
+    if (!horizons.length)
+      return html`<div class="empty">Brak prognoz (wymaga źródła Pradcast z kluczem API).</div>`;
+
+    const toArray = (pts: ForecastPoint[]): number[] => {
+      const arr = new Array(24).fill(NaN);
+      pts.forEach((p) => {
+        if (p.buy !== null && p.hour >= 0 && p.hour < 24) arr[p.hour] = p.buy;
+      });
+      return arr;
+    };
+    const series = horizons.map((h) => ({ h, vals: toArray(f.horizons[h]) }));
+    const all = series.flatMap((s) => s.vals).filter((v) => !isNaN(v));
+    const min = Math.min(0, ...all);
+    const max = Math.max(0.1, ...all);
+    const w = 760;
+    const ht = 180;
+    return html`
+      <svg viewBox="0 0 ${w} ${ht}" class="chart">
+        ${series.map(
+          (s) =>
+            svg`<path d=${this._linePath(s.vals, min, max, w, ht)} fill="none"
+              stroke=${HORIZON_COLORS[s.h] ?? "#888"} stroke-width="2" />`
+        )}
+      </svg>
+      <div class="fc-legend">
+        ${series.map(
+          (s) => html`<span class="fc-key">
+            <span class="swatch" style=${"background:" + (HORIZON_COLORS[s.h] ?? "#888")}></span>${s.h}
+          </span>`
         )}
       </div>
     `;
@@ -431,6 +597,73 @@ export class PowerPilotPanel extends LitElement {
     }
     td.err {
       color: var(--error-color, #d33);
+    }
+    .heatmap {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      overflow-x: auto;
+    }
+    .hm-row {
+      display: flex;
+      gap: 2px;
+      align-items: center;
+    }
+    .hm-label {
+      width: 34px;
+      font-size: 12px;
+      color: var(--secondary-text-color);
+      flex: 0 0 auto;
+    }
+    .hm-h {
+      width: 22px;
+      text-align: center;
+      font-size: 10px;
+      color: var(--secondary-text-color);
+      flex: 0 0 auto;
+    }
+    .hm-cell {
+      width: 22px;
+      height: 18px;
+      border-radius: 2px;
+      flex: 0 0 auto;
+    }
+    .legend {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--secondary-text-color);
+    }
+    .legend-bar {
+      flex: 1;
+      max-width: 240px;
+      height: 10px;
+      border-radius: 5px;
+      background: linear-gradient(
+        90deg,
+        hsl(160, 70%, 45%),
+        hsl(80, 70%, 45%),
+        hsl(0, 70%, 45%)
+      );
+    }
+    .fc-legend {
+      display: flex;
+      gap: 16px;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+    .fc-key {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
     }
   `;
 }

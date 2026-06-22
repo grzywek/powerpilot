@@ -46,8 +46,30 @@ def ws_log(hass: HomeAssistant, connection, msg) -> None:
     )
 
 
+@websocket_api.websocket_command({vol.Required("type"): "powerpilot/profiles"})
+@callback
+def ws_profiles(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass)
+    connection.send_result(msg["id"], coordinator.get_profiles() if coordinator else {})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "powerpilot/forecasts", vol.Optional("date"): str}
+)
+@websocket_api.async_response
+async def ws_forecasts(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass)
+    if not coordinator:
+        connection.send_result(msg["id"], {})
+        return
+    result = await coordinator.get_forecasts(msg.get("date"))
+    connection.send_result(msg["id"], result)
+
+
 @callback
 def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_plan)
     websocket_api.async_register_command(hass, ws_status)
     websocket_api.async_register_command(hass, ws_log)
+    websocket_api.async_register_command(hass, ws_profiles)
+    websocket_api.async_register_command(hass, ws_forecasts)

@@ -62,8 +62,9 @@ integration installable and working.
       Logs (recent optimization runs + module errors), plus a Configure button.
 - [x] WebSocket API (`powerpilot/plan|status|log`) backing the panel instead of
       overloading entity attributes.
+- [x] Panel **Profiles** tab: 7×24 heatmaps (price + consumption) and a D+1..D+3
+      forecast overlay (`/prices/forecasts`), via `powerpilot/profiles|forecasts`.
 - [ ] Inverter-mode status markers + forecast-confidence shading on the charts.
-- [ ] Overlay D+1/D+2/D+3 forecasts (`/prices/forecasts`).
 - [ ] Options flow grouped into sections + menu for a tidier config.
 
 ## Stage 7 – Hardening

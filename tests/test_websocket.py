@@ -37,3 +37,15 @@ async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:
     assert "events" in msg["result"]
     # The first optimization run should have recorded an event.
     assert len(msg["result"]["events"]) >= 1
+
+    await client.send_json({"id": 4, "type": "powerpilot/profiles"})
+    msg = await client.receive_json()
+    assert msg["success"]
+    assert "price" in msg["result"]
+    assert "consumption" in msg["result"]
+
+    await client.send_json({"id": 5, "type": "powerpilot/forecasts"})
+    msg = await client.receive_json()
+    assert msg["success"]
+    assert "horizons" in msg["result"]
+    assert "date" in msg["result"]

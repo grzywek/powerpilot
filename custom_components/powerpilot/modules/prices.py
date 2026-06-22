@@ -138,6 +138,13 @@ class PriceModule(PowerPilotModule):
         source = self._build_source()
         self._data = await source.async_fetch()
 
+    async def async_fetch_forecasts(self, target_date) -> dict:
+        """Horizon-indexed forecasts (D+1..D+3) for the overlay, if supported."""
+        source = self._build_source()
+        if isinstance(source, PradcastPriceSource):
+            return await source.async_fetch_forecasts(target_date)
+        return {}
+
     async def _maybe_backfill(self) -> None:
         """Fold each settled past day into the profile exactly once."""
         if self.config.get(CONF_PRICE_SOURCE) != PRICE_SOURCE_PRADCAST:

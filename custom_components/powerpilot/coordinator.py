@@ -171,6 +171,33 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
     def get_log(self) -> list[dict]:
         return list(self.events)
 
+    def get_profiles(self) -> dict:
+        """7×24 learned profiles for the panel heatmaps."""
+        return {
+            "price": self.prices.profile.as_matrix(),
+            "price_days": self.prices.profile.observed_days,
+            "consumption": self.consumption.base.as_matrix(),
+            "consumption_days": self.consumption.base.observed_days,
+            "devices": {
+                eid: acc.as_matrix() for eid, acc in self.consumption.devices.items()
+            },
+        }
+
+    async def get_forecasts(self, date_str: str | None) -> dict:
+        """Horizon-indexed price forecasts (D+1..D+3) for a target date."""
+        from datetime import date as _date, timedelta as _td
+
+        if date_str:
+            try:
+                target = _date.fromisoformat(date_str)
+            except ValueError:
+                target = dt_util.now().date() + _td(days=1)
+        else:
+            target = dt_util.now().date() + _td(days=1)
+
+        horizons = await self.prices.async_fetch_forecasts(target)
+        return {"date": target.isoformat(), "horizons": horizons}
+
     def get_status(self) -> dict:
         """Feature/module status for the panel: what works, what's missing."""
         from .const import (

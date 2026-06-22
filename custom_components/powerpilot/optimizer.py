@@ -157,6 +157,12 @@ class Optimizer:
             decision.energy_cost = grid_buy * energy_price
             decision.distribution_cost = grid_buy * distribution
             decision.hour_cost = decision.energy_cost + decision.distribution_cost
+            # Value of energy drawn from the battery this hour (after losses
+            # are already baked into battery.energy_cost). Used by the chart
+            # to show "served from grid" vs "served from battery".
+            decision.battery_use_cost = (
+                decision.battery_discharge_kwh * decision.battery_energy_cost
+            )
 
             if index == 0 and reminders:
                 decision.reminders = list(reminders)

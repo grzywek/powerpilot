@@ -77,11 +77,15 @@ class Decision:
     battery_discharge_kwh: float = 0.0
 
     # Cost incurred during the hour (PLN), negative = earned.
-    # ``hour_cost`` is the *total* cost for the hour (energy + distribution).
-    # ``energy_cost`` and ``distribution_cost`` break it down for the chart.
+    # ``hour_cost`` is the *grid* cost for the hour (energy + distribution from
+    # the grid). ``energy_cost`` and ``distribution_cost`` break it down.
+    # ``battery_use_cost`` is the value of energy drawn from the battery during
+    # the hour (battery_discharge_kwh × battery_energy_cost) — exposed so the
+    # chart can show "cost served from grid" vs "cost served from battery".
     hour_cost: float = 0.0
     energy_cost: float = 0.0
     distribution_cost: float = 0.0
+    battery_use_cost: float = 0.0
 
     reminders: list[str] = field(default_factory=list)
 
@@ -102,6 +106,7 @@ class Decision:
             "hour_cost": round(self.hour_cost, 4),
             "energy_cost": round(self.energy_cost, 4),
             "distribution_cost": round(self.distribution_cost, 4),
+            "battery_use_cost": round(self.battery_use_cost, 4),
             "reminders": list(self.reminders),
         }
 
@@ -265,12 +270,19 @@ class Tariff:
     matching period's ``price_kwh`` for every hour. The user is responsible for
     adding a catch-all "pozaszczyt" period (``day_sensor=None``, hours 0-24) so
     that *some* period always matches.
+
+    ``vat_rate`` (e.g. 0.23 for 23%) is applied multiplicatively to the
+    distribution price (``base + period_price``). The energy price already
+    carries its own VAT from the prices module (``CONF_PRICE_VAT``); this VAT
+    only covers the distribution side so the chart can show a single fully
+    gross total.
     """
 
     name: str
     base_component_kwh: float  # PLN/kWh, flat surcharge added to every hour
     periods: list[TariffPeriod] = field(default_factory=list)
     validity_ranges: list[ValidityRange] = field(default_factory=list)
+    vat_rate: float = 0.23  # 0.23 = 23% VAT applied to (base + period_price)
     id: str = field(default_factory=lambda: uuid4().hex)
 
     def is_active_on(self, day: date) -> bool:
@@ -290,6 +302,7 @@ class Tariff:
             "id": self.id,
             "name": self.name,
             "base_component_kwh": self.base_component_kwh,
+            "vat_rate": self.vat_rate,
             "validity_ranges": [r.to_dict() for r in self.validity_ranges],
             "periods": [p.to_dict() for p in self.periods],
         }
@@ -312,6 +325,9 @@ class Tariff:
             id=str(data.get("id") or uuid4().hex),
             name=str(data.get("name") or ""),
             base_component_kwh=float(base),
+            # Pre-D.1 stored tariffs had no vat_rate → keep them VAT-free until
+            # the user re-saves the tariff in the OptionsFlow.
+            vat_rate=float(data.get("vat_rate", 0.0)),
             validity_ranges=[ValidityRange.from_dict(r) for r in validity_raw],
             periods=[TariffPeriod.from_dict(p) for p in (data.get("periods") or [])],
         )

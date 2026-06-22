@@ -245,19 +245,26 @@ class TariffModule(PowerPilotModule):
     def _resolve_price(
         self, slot_dt: datetime, day_offset: int
     ) -> tuple[float | None, str | None, str | None]:
-        """Return ``(price, tariff_id, period_id)`` for the given hour."""
+        """Return ``(price, tariff_id, period_id)`` for the given hour.
+
+        Price is gross: ``(base_component_kwh + period.price_kwh) * (1 + vat_rate)``.
+        """
         tariff = tariff_for_day(self._tariffs, slot_dt.date())
         if tariff is None:
             return None, None, None
+
+        vat_mul = 1.0 + tariff.vat_rate
 
         for period in tariff.periods:
             if not period.matches_hour(slot_dt.hour):
                 continue
             if period.day_sensor is None:
-                return tariff.base_component_kwh + period.price_kwh, tariff.id, period.id
+                price = (tariff.base_component_kwh + period.price_kwh) * vat_mul
+                return price, tariff.id, period.id
             if not self._is_day_sensor_on(period.day_sensor, slot_dt.date(), day_offset):
                 continue
-            return tariff.base_component_kwh + period.price_kwh, tariff.id, period.id
+            price = (tariff.base_component_kwh + period.price_kwh) * vat_mul
+            return price, tariff.id, period.id
 
         self.log_warning(
             f"Brak pasującego okresu dla {slot_dt.isoformat()} "

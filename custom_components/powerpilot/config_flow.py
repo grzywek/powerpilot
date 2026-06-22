@@ -381,6 +381,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 id=existing.id if existing else uuid4().hex,
                 name=str(user_input["name"]).strip(),
                 base_component_kwh=float(user_input["base_component_kwh"]),
+                vat_rate=float(user_input["vat_rate"]),
                 validity_ranges=existing.validity_ranges if existing else [],
                 periods=existing.periods if existing else [],
             )
@@ -395,12 +396,19 @@ class PowerPilotOptionsFlow(OptionsFlow):
         defaults = {
             "name": existing.name if existing else "",
             "base_component_kwh": existing.base_component_kwh if existing else 0.0435,
+            # New tariffs default to 23 % VAT (standard PL rate); legacy
+            # tariffs loaded without a vat_rate get 0.0 from the model and we
+            # surface that as-is so the user sees what's stored.
+            "vat_rate": existing.vat_rate if existing else 0.23,
         }
         schema = vol.Schema(
             {
                 vol.Required("name", default=defaults["name"]): selector.TextSelector(),
                 vol.Required("base_component_kwh", default=defaults["base_component_kwh"]): _NUMBER(
                     _NUM(min=0, max=5, step="any", unit_of_measurement="PLN/kWh", mode="box")
+                ),
+                vol.Required("vat_rate", default=defaults["vat_rate"]): _NUMBER(
+                    _NUM(min=0, max=1, step=0.01, unit_of_measurement="× netto", mode="box")
                 ),
             }
         )

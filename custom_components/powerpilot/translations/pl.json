@@ -123,10 +123,11 @@
       },
       "tariff_form": {
         "title": "Taryfa ({mode})",
-        "description": "Edycja: {name}. Składnik bazowy dodawany jest do ceny każdego okresu. Zakresy obowiązywania i okresy konfigurujesz w kolejnych krokach.",
+        "description": "Edycja: {name}. Składnik bazowy dodawany jest do ceny każdego okresu. VAT mnoży cenę dystrybucji (bazowa + okres). VAT dla ceny energii ustawiasz w sekcji 'Ceny'. Zakresy obowiązywania i okresy konfigurujesz w kolejnych krokach.",
         "data": {
           "name": "Nazwa taryfy (np. Tauron G12)",
-          "base_component_kwh": "Składnik bazowy dodawany do każdej godziny (PLN/kWh)"
+          "base_component_kwh": "Składnik bazowy dodawany do każdej godziny (PLN/kWh)",
+          "vat_rate": "VAT na cenę dystrybucji (0.23 = 23%)"
         }
       },
       "period_list": {

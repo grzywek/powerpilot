@@ -123,10 +123,11 @@
       },
       "tariff_form": {
         "title": "Tariff ({mode})",
-        "description": "Editing: {name}. The base component is added to every period's price. Configure validity ranges and periods in the next steps.",
+        "description": "Editing: {name}. The base component is added to every period's price. VAT is applied multiplicatively to the distribution price (base + period). Energy price has its own VAT in the prices section. Configure validity ranges and periods in the next steps.",
         "data": {
           "name": "Tariff name (e.g. Tauron G12)",
-          "base_component_kwh": "Base component added to every hour (PLN/kWh)"
+          "base_component_kwh": "Base component added to every hour (PLN/kWh)",
+          "vat_rate": "VAT applied to the distribution price (0.23 = 23%)"
         }
       },
       "period_list": {

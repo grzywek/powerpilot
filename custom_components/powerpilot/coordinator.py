@@ -401,6 +401,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "hour_cost": None,
                     "energy_cost": None,
                     "distribution_cost": None,
+                    "battery_use_cost": None,
                     "devices_real": dev_real_h,
                     "devices_forecast": dev_forecast,
                 }
@@ -446,6 +447,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "hour_cost": round(decision.hour_cost, 4),
                         "energy_cost": round(decision.energy_cost, 4),
                         "distribution_cost": round(decision.distribution_cost, 4),
+                        "battery_use_cost": round(decision.battery_use_cost, 4),
                         "devices_real": {eid: None for eid in device_ids},
                         "devices_forecast": dev_forecast,
                     }

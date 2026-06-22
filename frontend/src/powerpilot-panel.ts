@@ -99,6 +99,7 @@ interface SeriesHour {
   hour_cost: number | null;
   energy_cost: number | null;
   distribution_cost: number | null;
+  battery_use_cost: number | null;
   devices_real: Record<string, number | null>;
   devices_forecast: Record<string, number | null>;
 }
@@ -604,43 +605,30 @@ export class PowerPilotPanel extends LitElement {
     const hrs = s.hours;
     const ts = hrs.map((h) => new Date(h.start).getTime());
 
-    // Split buy_price into confirmed (solid) and forecast (dashed) lines.
+    // Single price line per slot = TOTAL gross price (energy + distribution).
+    // Split into "confirmed" (solid) and "forecast" (dashed) so the user can
+    // tell where real RDN ends and the projection begins. The breakdown into
+    // energy vs distribution is shown in the tooltip.
     const confirmedData = ts.map((t, i) => ({
-      x: t,
-      y: hrs[i].price_confirmed && hrs[i].buy_price != null ? hrs[i].buy_price : null,
-    }));
-    const forecastData = ts.map((t, i) => ({
-      x: t,
-      y: !hrs[i].price_confirmed && hrs[i].buy_price != null ? hrs[i].buy_price : null,
-    }));
-    const distributionData = ts.map((t, i) => ({
-      x: t,
-      y: hrs[i].distribution_price_kwh,
-    }));
-    const totalConfirmedData = ts.map((t, i) => ({
       x: t,
       y: hrs[i].price_confirmed ? hrs[i].total_price_kwh : null,
     }));
-    const totalForecastData = ts.map((t, i) => ({
+    const forecastData = ts.map((t, i) => ({
       x: t,
       y: !hrs[i].price_confirmed ? hrs[i].total_price_kwh : null,
     }));
     const batCostData = ts.map((t, i) => ({ x: t, y: hrs[i].battery_energy_cost }));
-    // Stacked column: energy + distribution = total hour cost (PLN/h).
-    // For past hours we don't compute a per-hour cost (no decision), so feed
-    // nulls to keep the column blank.
-    const energyCostData = ts.map((t, i) => ({ x: t, y: hrs[i].energy_cost }));
-    const distCostData = ts.map((t, i) => ({ x: t, y: hrs[i].distribution_cost }));
+    // Two PLN/h stacked columns: cost served from the grid vs cost served
+    // from the battery. Sum = total cost of meeting demand this hour.
+    const gridCostData = ts.map((t, i) => ({ x: t, y: hrs[i].hour_cost }));
+    const batUseCostData = ts.map((t, i) => ({ x: t, y: hrs[i].battery_use_cost }));
 
     const series: any[] = [
-      { name: "Cena zakupu (pewne)", type: "line", data: confirmedData, color: "#2ec4b6" },
-      { name: "Cena zakupu (prognoza)", type: "line", data: forecastData, color: "#7ed3c9" },
-      { name: "Cena dystrybucji", type: "line", data: distributionData, color: "#c084fc" },
-      { name: "Cena całkowita (pewne)", type: "line", data: totalConfirmedData, color: "#facc15" },
-      { name: "Cena całkowita (prognoza)", type: "line", data: totalForecastData, color: "#fde68a" },
+      { name: "Cena zakupu (pewne)", type: "line", data: confirmedData, color: "#facc15" },
+      { name: "Cena zakupu (prognoza)", type: "line", data: forecastData, color: "#fde68a" },
       { name: "Cena w baterii", type: "line", data: batCostData, color: "#9e9e9e" },
-      { name: "Koszt energii (PLN)", type: "column", data: energyCostData, color: "#e67e22" },
-      { name: "Koszt dystrybucji (PLN)", type: "column", data: distCostData, color: "#a16207" },
+      { name: "Koszt energii - sieć", type: "column", data: gridCostData, color: "#e67e22" },
+      { name: "Koszt energii - bateria", type: "column", data: batUseCostData, color: "#3b82f6" },
     ];
 
     const nowTs = Date.now();
@@ -648,9 +636,6 @@ export class PowerPilotPanel extends LitElement {
       chart: {
         type: "line",
         height: 380,
-        // Stacked applies only to column/area series in mixed charts; the
-        // line series remain independent. This makes the two cost columns
-        // visually sum to the hour total without distorting the price lines.
         stacked: true,
         animations: { enabled: false },
         toolbar: {
@@ -662,15 +647,14 @@ export class PowerPilotPanel extends LitElement {
       },
       theme: { mode: "dark" },
       stroke: {
-        // Match width/dash settings to the 8 series declared above
-        // (5 price lines + battery cost + 2 stacked columns).
-        width: [2.5, 2.5, 2, 3, 3, 2, 0, 0],
+        // 3 lines + 2 columns = 5 series total.
+        width: [3, 3, 2, 0, 0],
         curve: "straight",
-        dashArray: [0, 5, 4, 0, 5, 3, 0, 0],
+        dashArray: [0, 5, 3, 0, 0],
       },
       plotOptions: { bar: { columnWidth: "55%", borderRadius: 1 } },
       dataLabels: { enabled: false },
-      fill: { opacity: [1, 1, 1, 1, 1, 1, 0.75, 0.6] },
+      fill: { opacity: [1, 1, 1, 0.75, 0.7] },
       series,
       xaxis: {
         type: "datetime",
@@ -680,8 +664,6 @@ export class PowerPilotPanel extends LitElement {
         },
       },
       yaxis: [
-        // PLN/kWh lines all share the LEFT axis. Only the first carries the
-        // title/labels; the rest map to it via `seriesName` with `show:false`.
         {
           seriesName: "Cena zakupu (pewne)",
           title: { text: "PLN/kWh" },
@@ -690,33 +672,53 @@ export class PowerPilotPanel extends LitElement {
           decimalsInFloat: 3,
         },
         { seriesName: "Cena zakupu (prognoza)", show: false, forceNiceScale: true },
-        { seriesName: "Cena dystrybucji", show: false, forceNiceScale: true },
-        { seriesName: "Cena całkowita (pewne)", show: false, forceNiceScale: true },
-        { seriesName: "Cena całkowita (prognoza)", show: false, forceNiceScale: true },
         { seriesName: "Cena w baterii", show: false, forceNiceScale: true },
         {
-          // RIGHT axis: PLN/h — first stacked-column series carries title.
-          seriesName: "Koszt energii (PLN)",
+          seriesName: "Koszt energii - sieć",
           opposite: true,
           title: { text: "PLN/h" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
           forceNiceScale: true,
           min: 0,
         },
-        { seriesName: "Koszt dystrybucji (PLN)", opposite: true, show: false, forceNiceScale: true, min: 0 },
+        { seriesName: "Koszt energii - bateria", opposite: true, show: false, forceNiceScale: true, min: 0 },
       ],
       tooltip: {
         shared: true,
         intersect: false,
         followCursor: false,
         x: { format: "EEEE dd.MM HH:mm" },
-        y: {
-          formatter: (val: number, opts: any) => {
-            if (val == null) return "—";
-            const name = opts?.w?.config?.series?.[opts.seriesIndex]?.name ?? "";
-            if (name.includes("Koszt")) return val.toFixed(2) + " PLN";
-            return val.toFixed(3) + " PLN/kWh";
-          },
+        // Custom HTML so price lines can show the energy/distribution split
+        // that's encoded in the total. ApexCharts passes the data index of
+        // the hovered point; we use it to look the slot back up.
+        custom: ({ dataPointIndex }: { dataPointIndex: number }) => {
+          const row = hrs[dataPointIndex];
+          if (!row) return "";
+          const fmt3 = (v: number | null) => (v == null ? "—" : v.toFixed(3));
+          const fmt2 = (v: number | null) => (v == null ? "—" : v.toFixed(2));
+          const start = new Date(row.start);
+          const date = start.toLocaleString("pl-PL", {
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          const confirmed = row.price_confirmed ? "(pewne)" : "(prognoza)";
+          return `
+            <div style="padding:8px 10px;background:#1f2937;color:#f3f4f6;border:1px solid #374151;border-radius:6px;font-size:12px;line-height:1.4;min-width:240px">
+              <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid #374151;padding-bottom:4px">${date}</div>
+              <table style="border-collapse:collapse;width:100%">
+                <tr><td style="padding:1px 0">Cena całkowita ${confirmed}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt3(row.total_price_kwh)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· energia</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmt3(row.buy_price)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· dystrybucja (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmt3(row.distribution_price_kwh)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0">Cena w baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt3(row.battery_energy_cost)} PLN/kWh</td></tr>
+                <tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid #374151"></div></td></tr>
+                <tr><td style="padding:1px 0">Koszt z sieci</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.hour_cost)} PLN</td></tr>
+                <tr><td style="padding:1px 0">Koszt z baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.battery_use_cost)} PLN</td></tr>
+              </table>
+            </div>
+          `;
         },
       },
       legend: {

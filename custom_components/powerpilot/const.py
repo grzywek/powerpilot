@@ -34,11 +34,13 @@ CONF_CHARGE_CURVE: Final = "charge_curve"
 
 # --- Linked entities ---
 CONF_SOC_SENSOR: Final = "soc_sensor"  # current battery SoC %
+CONF_BATTERY_CHARGE_SENSOR: Final = "battery_charge_sensor"  # kW or kWh (total_increasing)
+CONF_BATTERY_DISCHARGE_SENSOR: Final = "battery_discharge_sensor"
+CONF_GRID_IMPORT_SENSOR: Final = "grid_import_sensor"
 CONF_CONSUMPTION_SENSOR: Final = "consumption_sensor"  # household power/energy
 CONF_DEVICE_SENSORS: Final = "device_sensors"  # separately-metered loads to break out
 CONF_CONSUMPTION_LEARN_DAYS: Final = "consumption_learn_days"  # history window
 CONF_BUY_PRICE_SENSOR: Final = "buy_price_sensor"
-CONF_SELL_PRICE_SENSOR: Final = "sell_price_sensor"
 CONF_WEATHER_ENTITY: Final = "weather_entity"
 
 # --- Price source ---

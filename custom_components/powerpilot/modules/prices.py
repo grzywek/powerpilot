@@ -1,7 +1,7 @@
 """Price module.
 
 Delegates price retrieval to a pluggable :class:`PriceSource` (HA sensors or the
-prądcast.pl API) and contributes hourly buy/sell prices to the forecast, marking
+prądcast.pl API) and contributes hourly buy prices to the forecast, marking
 each hour as confirmed or forecast.
 
 It also maintains a rolling **price profile** keyed by ``(weekday, hour)`` from the
@@ -104,7 +104,7 @@ class PriceProfile:
 
 
 class PriceModule(PowerPilotModule):
-    """Provides hourly buy/sell prices to the forecast."""
+    """Provides hourly buy prices to the forecast."""
 
     domain = "prices"
 
@@ -207,8 +207,6 @@ class PriceModule(PowerPilotModule):
                     slot.tags.append("price_profile")
             if price is not None:
                 slot.buy_price = price
-            if hour in self._data.sell:
-                slot.sell_price = self._data.sell[hour]
             slot.price_confirmed = hour in self._data.confirmed_hours
             if hour in self._data.levels:
                 slot.tags.append(f"price:{self._data.levels[hour]}")

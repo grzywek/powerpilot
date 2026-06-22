@@ -25,13 +25,11 @@ class HourSlot:
     # Prices (PLN/kWh). ``price_confirmed`` is True once the operator has
     # published binding prices (typically D+1), otherwise the value is a forecast.
     buy_price: float | None = None
-    sell_price: float | None = None
     price_confirmed: bool = False
 
     # Energy (kWh) expected during this hour.
     base_consumption_kwh: float = 0.0  # learned household profile
     extra_load_kwh: float = 0.0  # EV + scheduled appliances + climate
-    pv_kwh: float = 0.0  # optional self-production
 
     temperature: float | None = None  # °C, for climate modelling
 
@@ -40,8 +38,8 @@ class HourSlot:
 
     @property
     def total_consumption_kwh(self) -> float:
-        """Total demand for the hour, net of PV."""
-        return max(0.0, self.base_consumption_kwh + self.extra_load_kwh - self.pv_kwh)
+        """Total demand for the hour."""
+        return max(0.0, self.base_consumption_kwh + self.extra_load_kwh)
 
 
 @dataclass
@@ -61,7 +59,6 @@ class Decision:
 
     # Energy flows during the hour (kWh).
     grid_buy_kwh: float = 0.0
-    grid_sell_kwh: float = 0.0
     battery_charge_kwh: float = 0.0
     battery_discharge_kwh: float = 0.0
 
@@ -82,7 +79,6 @@ class Decision:
             "battery_soc": round(self.battery_soc, 1),
             "battery_energy_cost": round(self.battery_energy_cost, 4),
             "grid_buy_kwh": round(self.grid_buy_kwh, 3),
-            "grid_sell_kwh": round(self.grid_sell_kwh, 3),
             "battery_charge_kwh": round(self.battery_charge_kwh, 3),
             "battery_discharge_kwh": round(self.battery_discharge_kwh, 3),
             "hour_cost": round(self.hour_cost, 4),
@@ -133,7 +129,6 @@ class Plan:
                 {
                     "start": s.start.isoformat(),
                     "buy_price": s.buy_price,
-                    "sell_price": s.sell_price,
                     "price_confirmed": s.price_confirmed,
                     "consumption_kwh": round(s.total_consumption_kwh, 3),
                     "temperature": s.temperature,

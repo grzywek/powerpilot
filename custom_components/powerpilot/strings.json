@@ -20,9 +20,11 @@
           "max_soc": "Maximum SoC (%)",
           "grid_disconnect_soc": "Grid-disconnect SoC (%)",
           "soc_sensor": "Battery SoC sensor",
+          "battery_charge_sensor": "Battery charge sensor (kW or kWh)",
+          "battery_discharge_sensor": "Battery discharge sensor (kW or kWh)",
+          "grid_import_sensor": "Grid import sensor (kW or kWh)",
           "consumption_sensor": "Household consumption sensor",
           "buy_price_sensor": "Buy price sensor",
-          "sell_price_sensor": "Sell price sensor",
           "weather_entity": "Weather entity"
         }
       },
@@ -70,9 +72,11 @@
           "max_soc": "Maximum SoC (%)",
           "grid_disconnect_soc": "Grid-disconnect SoC (%)",
           "soc_sensor": "Battery SoC sensor",
+          "battery_charge_sensor": "Battery charge sensor (kW or kWh)",
+          "battery_discharge_sensor": "Battery discharge sensor (kW or kWh)",
+          "grid_import_sensor": "Grid import sensor (kW or kWh)",
           "consumption_sensor": "Household consumption sensor",
           "buy_price_sensor": "Buy price sensor",
-          "sell_price_sensor": "Sell price sensor",
           "weather_entity": "Weather entity"
         }
       },
@@ -109,15 +113,29 @@
   },
   "entity": {
     "sensor": {
-      "inverter_mode": { "name": "Inverter mode" },
-      "charge_power": { "name": "Charge power" },
-      "battery_energy_cost": { "name": "Battery energy cost" },
-      "plan": { "name": "Optimization plan" },
-      "next_action": { "name": "Next action" }
+      "inverter_mode": {
+        "name": "Inverter mode"
+      },
+      "charge_power": {
+        "name": "Charge power"
+      },
+      "battery_energy_cost": {
+        "name": "Battery energy cost"
+      },
+      "plan": {
+        "name": "Optimization plan"
+      },
+      "next_action": {
+        "name": "Next action"
+      }
     },
     "binary_sensor": {
-      "grid_connected": { "name": "Grid connected" },
-      "ev_charge": { "name": "EV charge" }
+      "grid_connected": {
+        "name": "Grid connected"
+      },
+      "ev_charge": {
+        "name": "EV charge"
+      }
     }
   }
 }

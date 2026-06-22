@@ -97,6 +97,12 @@ class ConsumptionModule(PowerPilotModule):
         start = now - timedelta(hours=hours + 1)
         return await self._fetch_hourly_kwh(entity_id, start, now)
 
+    async def async_range_kwh(
+        self, entity_id: str, start: datetime, end: datetime
+    ) -> dict[datetime, float]:
+        """Hourly kWh for an arbitrary [start, end) window (public wrapper)."""
+        return await self._fetch_hourly_kwh(entity_id, start, end)
+
     async def _async_save(self) -> None:
         if self._store is None:
             return

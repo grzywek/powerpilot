@@ -22,9 +22,11 @@
           "max_soc": "Maksymalny SoC (%)",
           "grid_disconnect_soc": "SoC odłączenia od sieci (%)",
           "soc_sensor": "Sensor SoC baterii",
+          "battery_charge_sensor": "Sensor ładowania baterii (kW lub kWh)",
+          "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
+          "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
           "consumption_sensor": "Sensor zużycia mieszkania",
           "buy_price_sensor": "Sensor ceny zakupu",
-          "sell_price_sensor": "Sensor ceny sprzedaży",
           "weather_entity": "Encja pogody"
         }
       },
@@ -72,9 +74,11 @@
           "max_soc": "Maksymalny SoC (%)",
           "grid_disconnect_soc": "SoC odłączenia od sieci (%)",
           "soc_sensor": "Sensor SoC baterii",
+          "battery_charge_sensor": "Sensor ładowania baterii (kW lub kWh)",
+          "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
+          "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
           "consumption_sensor": "Sensor zużycia mieszkania",
           "buy_price_sensor": "Sensor ceny zakupu",
-          "sell_price_sensor": "Sensor ceny sprzedaży",
           "weather_entity": "Encja pogody"
         }
       },
@@ -111,15 +115,29 @@
   },
   "entity": {
     "sensor": {
-      "inverter_mode": { "name": "Tryb falownika" },
-      "charge_power": { "name": "Moc ładowania" },
-      "battery_energy_cost": { "name": "Cena energii w baterii" },
-      "plan": { "name": "Plan optymalizacji" },
-      "next_action": { "name": "Następna akcja" }
+      "inverter_mode": {
+        "name": "Tryb falownika"
+      },
+      "charge_power": {
+        "name": "Moc ładowania"
+      },
+      "battery_energy_cost": {
+        "name": "Cena energii w baterii"
+      },
+      "plan": {
+        "name": "Plan optymalizacji"
+      },
+      "next_action": {
+        "name": "Następna akcja"
+      }
     },
     "binary_sensor": {
-      "grid_connected": { "name": "Połączenie z siecią" },
-      "ev_charge": { "name": "Ładowanie EV" }
+      "grid_connected": {
+        "name": "Połączenie z siecią"
+      },
+      "ev_charge": {
+        "name": "Ładowanie EV"
+      }
     }
   }
 }

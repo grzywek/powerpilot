@@ -79,7 +79,7 @@ for i in range(24):
     start = _NOW + timedelta(hours=i)
     hour = start.hour
     price = 0.3 if hour < 6 or 13 <= hour <= 16 else (1.2 if 18 <= hour <= 21 else 0.7)
-    slot = HourSlot(start=start, buy_price=price, sell_price=price * 0.5, price_confirmed=True)
+    slot = HourSlot(start=start, buy_price=price, price_confirmed=True)
     slot.base_consumption_kwh = 0.5
     slots.append(slot)
 forecast = Forecast(slots=slots)

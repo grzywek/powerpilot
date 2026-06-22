@@ -94,7 +94,6 @@ class Optimizer:
         decisions: list[Decision] = []
         for index, slot in enumerate(forecast.slots):
             price = slot.buy_price if slot.buy_price is not None else median_price
-            sell = slot.sell_price if slot.sell_price is not None else 0.0
             demand = slot.total_consumption_kwh
             ev_kwh = ev_hours.get(slot.start, 0.0)
 
@@ -105,7 +104,6 @@ class Optimizer:
                 decision.charge_power = ChargePower.LIMITED
 
             grid_buy = ev_kwh  # EV is always grid-fed
-            grid_sell = 0.0
 
             if price <= cheap and battery.usable_charge_headroom_kwh > 0:
                 # Cheap hour: charge the battery and serve the house from grid.
@@ -132,11 +130,10 @@ class Optimizer:
                 grid_buy += demand
 
             decision.grid_buy_kwh = grid_buy
-            decision.grid_sell_kwh = grid_sell
             decision.battery_soc = battery.soc
             decision.battery_energy_cost = battery.energy_cost
             decision.grid_connected = battery.soc >= self.config.grid_disconnect_soc
-            decision.hour_cost = grid_buy * price - grid_sell * sell
+            decision.hour_cost = grid_buy * price
 
             if index == 0 and reminders:
                 decision.reminders = list(reminders)

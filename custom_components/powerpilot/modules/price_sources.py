@@ -30,7 +30,6 @@ from ..const import (
     CONF_PRADCAST_API_KEY,
     CONF_PRICE_MARKUP,
     CONF_PRICE_VAT,
-    CONF_SELL_PRICE_SENSOR,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,7 +47,6 @@ class PriceData:
     """Result of a price-source fetch."""
 
     buy: dict[datetime, float] = field(default_factory=dict)
-    sell: dict[datetime, float] = field(default_factory=dict)
     confirmed_hours: set[datetime] = field(default_factory=set)
     levels: dict[datetime, str] = field(default_factory=dict)
     confidence: dict[datetime, str] = field(default_factory=dict)
@@ -97,7 +95,6 @@ class SensorPriceSource(PriceSource):
     async def async_fetch(self) -> PriceData:
         data = PriceData()
         data.buy = self._read_sensor(self.config.get(CONF_BUY_PRICE_SENSOR))
-        data.sell = self._read_sensor(self.config.get(CONF_SELL_PRICE_SENSOR))
         # Treat today + tomorrow as confirmed.
         confirmed_until = (dt_util.now() + timedelta(days=1)).replace(
             hour=23, minute=0, second=0, microsecond=0

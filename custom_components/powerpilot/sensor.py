@@ -133,7 +133,6 @@ class PlanSensor(PowerPilotEntity, SensorEntity):
                 {
                     "start": s.start.isoformat(),
                     "buy_price": s.buy_price,
-                    "sell_price": s.sell_price,
                     "price_confirmed": s.price_confirmed,
                     "consumption_kwh": round(s.total_consumption_kwh, 3),
                     "temperature": s.temperature,

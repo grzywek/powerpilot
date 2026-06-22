@@ -1,5 +1,6 @@
 import { LitElement, html, css, svg, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import ApexCharts from "apexcharts";
 
 interface PlanHour {
   start: string;
@@ -80,16 +81,25 @@ interface SeriesHour {
   price_confirmed: boolean;
   consumption_real: number | null;
   consumption_forecast: number | null;
+  base_consumption_forecast: number | null;
   soc: number | null;
   inverter_mode: string | null;
   battery_charge_kwh: number | null;
   battery_discharge_kwh: number | null;
   battery_energy_cost: number | null;
+  grid_buy_kwh: number | null;
+  ev_charge_kwh: number | null;
+  hour_cost: number | null;
+  devices_real: Record<string, number | null>;
+  devices_forecast: Record<string, number | null>;
 }
 
 interface Series {
   now: string;
   past_hours: number;
+  start: string;
+  end: string;
+  device_ids: string[];
   hours: SeriesHour[];
 }
 
@@ -110,18 +120,25 @@ const HORIZON_COLORS: Record<string, string> = {
   "D+2": "#7b6cf6",
   "D+3": "#c98a3a",
 };
-const MODE_COLORS: Record<string, string> = {
-  charge: "#43a047",
-  discharge: "#c98a3a",
-  passthrough: "#6b6b6b",
+
+const DEVICE_PALETTE = [
+  "#7b6cf6",
+  "#43a047",
+  "#e67e22",
+  "#3498db",
+  "#9b59b6",
+  "#e74c3c",
+  "#1abc9c",
+  "#f1c40f",
+];
+
+type RangeMode = "24h" | "3d" | "7d";
+
+const RANGE_HOURS: Record<RangeMode, number> = {
+  "24h": 24,
+  "3d": 72,
+  "7d": 168,
 };
-// Chart geometry (SVG user units).
-const CW = 880;
-const CH = 250;
-const ML = 48;
-const MR = 48;
-const MT = 14;
-const MB = 52;
 
 @customElement("powerpilot-panel")
 export class PowerPilotPanel extends LitElement {
@@ -137,7 +154,14 @@ export class PowerPilotPanel extends LitElement {
   @state() private _series: Series | null = null;
   @state() private _error: string | null = null;
 
+  /** Active range preset. */
+  @state() private _rangeMode: RangeMode = "3d";
+  /** Right edge of the visible window. Defaults to "live" (now + horizon). */
+  @state() private _anchor: Date | null = null;
+
   private _timer?: number;
+  private _energyChart?: ApexCharts;
+  private _priceChart?: ApexCharts;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -147,18 +171,38 @@ export class PowerPilotPanel extends LitElement {
 
   disconnectedCallback(): void {
     if (this._timer) window.clearInterval(this._timer);
+    this._energyChart?.destroy();
+    this._priceChart?.destroy();
+    this._energyChart = undefined;
+    this._priceChart = undefined;
     super.disconnectedCallback();
+  }
+
+  /** Compute the start/end ISO strings for the current window. */
+  private _computeWindow(): { start: Date; end: Date; pastHours: number } {
+    const hours = RANGE_HOURS[this._rangeMode];
+    // anchor = right edge of window. Null means "live" (now + 24h forecast lookahead).
+    const live = this._anchor === null;
+    const end = live ? new Date(Date.now() + 24 * 3600 * 1000) : new Date(this._anchor!);
+    const start = new Date(end.getTime() - hours * 3600 * 1000);
+    return { start, end, pastHours: hours };
   }
 
   private async _refresh(): Promise<void> {
     if (!this.hass) return;
     try {
+      const { start, end, pastHours } = this._computeWindow();
       const [plan, status, log, profiles, series] = await Promise.all([
         this.hass.callWS({ type: "powerpilot/plan" }),
         this.hass.callWS({ type: "powerpilot/status" }),
         this.hass.callWS({ type: "powerpilot/log" }),
         this.hass.callWS({ type: "powerpilot/profiles" }),
-        this.hass.callWS({ type: "powerpilot/series", past_hours: 24 }),
+        this.hass.callWS({
+          type: "powerpilot/series",
+          past_hours: pastHours,
+          start: start.toISOString(),
+          end: end.toISOString(),
+        }),
       ]);
       this._plan = plan;
       this._status = status;
@@ -169,6 +213,34 @@ export class PowerPilotPanel extends LitElement {
     } catch (err: any) {
       this._error = err?.message ?? String(err);
     }
+  }
+
+  private _setRange(mode: RangeMode): void {
+    this._rangeMode = mode;
+    this._refresh();
+  }
+
+  private _shiftAnchor(deltaHours: number): void {
+    const { end } = this._computeWindow();
+    const next = new Date(end.getTime() + deltaHours * 3600 * 1000);
+    // Snap to live if user navigates back into the future beyond now+24h.
+    const liveEdge = Date.now() + 24 * 3600 * 1000;
+    this._anchor = next.getTime() >= liveEdge ? null : next;
+    this._refresh();
+  }
+
+  private _goLive(): void {
+    this._anchor = null;
+    this._refresh();
+  }
+
+  private _onDatePick(ev: Event): void {
+    const value = (ev.target as HTMLInputElement).value;
+    if (!value) return;
+    // Treat date picker value as end-of-day local time so users see that day's data.
+    const d = new Date(value + "T23:59:59");
+    this._anchor = d;
+    this._refresh();
   }
 
   private async _loadForecasts(): Promise<void> {
@@ -242,15 +314,59 @@ export class PowerPilotPanel extends LitElement {
           ${this._stat("Koszt horyzontu", plan.total_cost.toFixed(2) + " PLN")}
         </div>
       </div>
+      ${this._renderNavBar()}
       <div class="card">
-        <div class="card-title">Bateria (SoC %) i zużycie — realne dane → prognoza</div>
-        ${this._series ? this._socChart(this._series) : html`<div class="empty">Ładowanie…</div>`}
-        ${this._socLegend()}
+        <div class="card-title">Energia: zużycie, bateria, EV, urządzenia + SoC</div>
+        <div id="pp-chart-energy" class="apex-chart"></div>
       </div>
       <div class="card">
-        <div class="card-title">Ceny (PLN/kWh) — pewne vs prognozowane + cena w baterii</div>
-        ${this._series ? this._priceChart(this._series) : html`<div class="empty">Ładowanie…</div>`}
-        ${this._priceLegend()}
+        <div class="card-title">Koszty: cena zakupu (PLN/kWh) + koszt godziny (PLN)</div>
+        <div id="pp-chart-prices" class="apex-chart"></div>
+      </div>
+    `;
+  }
+
+  private _renderNavBar(): TemplateResult {
+    const { start, end } = this._computeWindow();
+    const isLive = this._anchor === null;
+    const fmtDay = (d: Date) =>
+      d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit", year: "numeric" });
+    const fmtHour = (d: Date) =>
+      d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+    const datePickerValue = (() => {
+      const d = isLive ? new Date() : new Date(this._anchor!);
+      return d.toISOString().slice(0, 10);
+    })();
+    const stepHours = this._rangeMode === "24h" ? 24 : this._rangeMode === "3d" ? 24 : 24;
+    return html`
+      <div class="card nav-card">
+        <div class="nav-row">
+          <button class="nav-btn" @click=${() => this._shiftAnchor(-stepHours)} title="Cofnij o dzień">«</button>
+          <input
+            type="date"
+            class="nav-date"
+            .value=${datePickerValue}
+            @change=${this._onDatePick}
+          />
+          <button class="nav-btn" @click=${() => this._shiftAnchor(stepHours)} title="Następny dzień">»</button>
+          <button class="nav-btn ${isLive ? "active" : ""}" @click=${this._goLive} title="Na żywo">● teraz</button>
+          <div class="nav-spacer"></div>
+          ${(["24h", "3d", "7d"] as RangeMode[]).map(
+            (m) => html`
+              <button
+                class="nav-btn ${this._rangeMode === m ? "active" : ""}"
+                @click=${() => this._setRange(m)}
+              >
+                ${m}
+              </button>
+            `
+          )}
+        </div>
+        <div class="nav-info">
+          Okno: <strong>${fmtDay(start)} ${fmtHour(start)}</strong> →
+          <strong>${fmtDay(end)} ${fmtHour(end)}</strong>
+          ${isLive ? html`<span class="muted"> · tryb live</span>` : nothing}
+        </div>
       </div>
     `;
   }
@@ -260,87 +376,319 @@ export class PowerPilotPanel extends LitElement {
   }
 
   // ------------------------------------------------------------------
-  // Chart engine
+  // ApexCharts integration
   // ------------------------------------------------------------------
-  private _niceTicks(min: number, max: number, count = 5): number[] {
-    if (max <= min) max = min + 1;
-    const span = max - min;
-    const step0 = span / count;
-    const mag = Math.pow(10, Math.floor(Math.log10(step0)));
-    const norm = step0 / mag;
-    const step = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag;
-    const start = Math.ceil(min / step) * step;
-    const ticks: number[] = [];
-    for (let v = start; v <= max + 1e-9; v += step) ticks.push(Math.round(v * 1000) / 1000);
-    return ticks;
-  }
-
-  private _xAt(i: number, n: number): number {
-    const plotW = CW - ML - MR;
-    return n <= 1 ? ML + plotW / 2 : ML + (i * plotW) / (n - 1);
-  }
-
-  /** X grid: hour labels every 3h, day separators + labels at midnight. */
-  private _xAxis(dates: Date[]) {
-    const n = dates.length;
-    const bottom = MT + (CH - MT - MB);
-    const parts: any[] = [];
-    dates.forEach((d, i) => {
-      const x = this._xAt(i, n);
-      const midnight = d.getHours() === 0;
-      if (midnight) {
-        parts.push(
-          svg`<line x1=${x} y1=${MT} x2=${x} y2=${bottom} stroke="var(--divider-color)" stroke-width="1" opacity="0.7" />`
-        );
-        parts.push(
-          svg`<text x=${x + 3} y=${bottom + 30} class="ax day">${d.getDate()}.${d.getMonth() + 1}</text>`
-        );
+  protected updated(changed: Map<string, unknown>): void {
+    if (this._tab !== "overview") {
+      // Tear down charts when switching away to free resources.
+      if (this._energyChart || this._priceChart) {
+        this._energyChart?.destroy();
+        this._priceChart?.destroy();
+        this._energyChart = undefined;
+        this._priceChart = undefined;
       }
-      if (d.getHours() % 3 === 0) {
-        parts.push(
-          svg`<text x=${x} y=${bottom + 14} class="ax xh" text-anchor="middle">${String(d.getHours()).padStart(2, "0")}</text>`
-        );
-      }
+      return;
+    }
+    if (changed.has("_series") || changed.has("_tab") || changed.has("_rangeMode")) {
+      this._mountOrUpdateCharts();
+    }
+  }
+
+  private _mountOrUpdateCharts(): void {
+    const s = this._series;
+    if (!s || !s.hours?.length) return;
+    const energyEl = this.renderRoot.querySelector("#pp-chart-energy") as HTMLElement | null;
+    const priceEl = this.renderRoot.querySelector("#pp-chart-prices") as HTMLElement | null;
+    if (!energyEl || !priceEl) return;
+
+    const energyOpts = this._buildEnergyOptions(s);
+    const priceOpts = this._buildPriceOptions(s);
+
+    if (this._energyChart) {
+      this._energyChart.updateOptions(energyOpts, true, true);
+    } else {
+      this._energyChart = new ApexCharts(energyEl, energyOpts);
+      this._energyChart.render();
+    }
+    if (this._priceChart) {
+      this._priceChart.updateOptions(priceOpts, true, true);
+    } else {
+      this._priceChart = new ApexCharts(priceEl, priceOpts);
+      this._priceChart.render();
+    }
+  }
+
+  /** Build ApexCharts options for the energy chart (kWh bars + SoC %, line). */
+  private _buildEnergyOptions(s: Series): any {
+    const hrs = s.hours;
+    const ts = hrs.map((h) => new Date(h.start).getTime());
+    const pickHasData = (extract: (h: SeriesHour) => number | null) =>
+      hrs.some((h) => extract(h) != null);
+
+    const pair = (extract: (h: SeriesHour) => number | null) =>
+      ts.map((t, i) => ({ x: t, y: extract(hrs[i]) }));
+
+    // Stub modules: per-spec keep them in legend, greyed out.
+    const series: any[] = [];
+
+    // Bars (right axis kWh).
+    series.push({
+      name: "Zużycie real",
+      type: "column",
+      data: pair((h) => (h.is_past ? h.consumption_real : null)),
+      color: "#b5475d",
     });
-    return parts;
-  }
-
-  private _yAxisLeft(ticks: number[], yFn: (v: number) => number, unit: string) {
-    const parts: any[] = [];
-    parts.push(svg`<text x=${ML} y=${MT - 2} class="ax unit" text-anchor="start">${unit}</text>`);
-    ticks.forEach((t) => {
-      const y = yFn(t);
-      parts.push(
-        svg`<line x1=${ML} y1=${y} x2=${CW - MR} y2=${y} stroke="var(--divider-color)" stroke-width="0.5" opacity="0.5" />`
-      );
-      parts.push(svg`<text x=${ML - 6} y=${y + 3} class="ax" text-anchor="end">${t}</text>`);
+    series.push({
+      name: "Zużycie prog.",
+      type: "column",
+      data: pair((h) => (!h.is_past ? h.consumption_forecast : null)),
+      color: "#e08aa0",
     });
-    return parts;
-  }
-
-  private _yAxisRight(ticks: number[], yFn: (v: number) => number, unit: string) {
-    const parts: any[] = [];
-    parts.push(svg`<text x=${CW - MR} y=${MT - 2} class="ax unit" text-anchor="end">${unit}</text>`);
-    ticks.forEach((t) => {
-      const y = yFn(t);
-      parts.push(svg`<text x=${CW - MR + 6} y=${y + 3} class="ax" text-anchor="start">${t}</text>`);
+    series.push({
+      name: "Bateria — ładowanie",
+      type: "column",
+      data: pair((h) => h.battery_charge_kwh),
+      color: "#c98a3a",
     });
-    return parts;
+    series.push({
+      name: "Bateria — rozładowanie",
+      type: "column",
+      data: pair((h) => h.battery_discharge_kwh),
+      color: "#b0a14f",
+    });
+    series.push({
+      name: "Import z sieci",
+      type: "column",
+      data: pair((h) => h.grid_buy_kwh),
+      color: "#8e44ad",
+    });
+    series.push({
+      name: "EV ładowanie",
+      type: "column",
+      data: pair((h) => h.ev_charge_kwh),
+      color: "#3498db",
+    });
+
+    // Per-device — real (past) + forecast (future) joined into one series per device.
+    const deviceIds = s.device_ids ?? [];
+    deviceIds.forEach((eid, idx) => {
+      const color = DEVICE_PALETTE[idx % DEVICE_PALETTE.length];
+      const friendly = eid.split(".").slice(-1)[0];
+      series.push({
+        name: `Urz: ${friendly}`,
+        type: "column",
+        data: pair((h) => {
+          const r = h.devices_real?.[eid];
+          if (r != null) return r;
+          const f = h.devices_forecast?.[eid];
+          return f != null ? f : null;
+        }),
+        color,
+      });
+    });
+
+    // SoC line (left axis %).
+    series.push({
+      name: "SoC %",
+      type: "line",
+      data: pair((h) => h.soc),
+      color: "#2ec4b6",
+    });
+
+    // Stub modules — empty series with greyed legend entry.
+    const stubColor = "var(--secondary-text-color, #888)";
+    if (!pickHasData((h) => h.battery_charge_kwh) && !pickHasData((h) => h.battery_discharge_kwh)) {
+      // Already added above — replaced placeholders are fine.
+    }
+    if (!pickHasData((h) => h.ev_charge_kwh)) {
+      // Series exists but empty → legend shows greyed.
+    }
+    void stubColor;
+
+    const nowTs = Date.now();
+    return {
+      chart: {
+        type: "line",
+        height: 360,
+        stacked: false,
+        animations: { enabled: false },
+        toolbar: { show: true, tools: { download: false, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true } },
+        zoom: { enabled: true, type: "x" },
+        background: "transparent",
+      },
+      theme: { mode: "dark" },
+      stroke: { width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)), curve: "straight" },
+      plotOptions: {
+        bar: { columnWidth: "75%", borderRadius: 1 },
+      },
+      dataLabels: { enabled: false },
+      fill: { opacity: 0.85 },
+      series,
+      xaxis: {
+        type: "datetime",
+        labels: {
+          datetimeUTC: false,
+          format: this._rangeMode === "24h" ? "HH:mm" : "dd.MM HH:mm",
+        },
+      },
+      yaxis: [
+        {
+          seriesName: "SoC %",
+          min: 0,
+          max: 100,
+          title: { text: "SoC (%)" },
+          labels: { formatter: (v: number) => v?.toFixed(0) + " %" },
+        },
+        {
+          seriesName: "Zużycie real",
+          opposite: true,
+          title: { text: "kWh" },
+          labels: { formatter: (v: number) => v?.toFixed(2) },
+          // Make all other column series share this axis.
+          show: true,
+        },
+      ],
+      tooltip: {
+        shared: true,
+        x: { format: "EEEE dd.MM HH:mm" },
+        y: {
+          formatter: (val: number, opts: any) => {
+            if (val == null) return "—";
+            const name = opts?.w?.config?.series?.[opts.seriesIndex]?.name ?? "";
+            if (name === "SoC %") return val.toFixed(0) + " %";
+            return val.toFixed(3) + " kWh";
+          },
+        },
+      },
+      legend: {
+        position: "bottom",
+        showForSingleSeries: true,
+        showForZeroSeries: true,
+        showForNullSeries: true,
+      },
+      annotations: {
+        xaxis: [
+          {
+            x: nowTs,
+            borderColor: "#ffffff",
+            strokeDashArray: 4,
+            label: {
+              borderColor: "#ffffff",
+              style: { background: "rgba(255,255,255,0.15)", color: "#fff" },
+              text: "teraz",
+            },
+          },
+        ],
+      },
+    };
   }
 
-  private _nowMarker(dates: Date[], boundaryIndex: number) {
-    if (boundaryIndex < 0) return nothing;
-    const x = this._xAt(boundaryIndex, dates.length);
-    const bottom = MT + (CH - MT - MB);
-    return svg`
-      <line x1=${x} y1=${MT} x2=${x} y2=${bottom} stroke="var(--primary-text-color)" stroke-width="1.5" stroke-dasharray="3 2" />
-      <text x=${x + 4} y=${MT + 12} class="ax now">Prognoza ▶</text>`;
+  /** Build ApexCharts options for the price chart (PLN/kWh line + PLN/h bars). */
+  private _buildPriceOptions(s: Series): any {
+    const hrs = s.hours;
+    const ts = hrs.map((h) => new Date(h.start).getTime());
+
+    // Split buy_price into confirmed (solid) and forecast (dashed) lines.
+    const confirmedData = ts.map((t, i) => ({
+      x: t,
+      y: hrs[i].price_confirmed && hrs[i].buy_price != null ? hrs[i].buy_price : null,
+    }));
+    const forecastData = ts.map((t, i) => ({
+      x: t,
+      y: !hrs[i].price_confirmed && hrs[i].buy_price != null ? hrs[i].buy_price : null,
+    }));
+    const batCostData = ts.map((t, i) => ({ x: t, y: hrs[i].battery_energy_cost }));
+    const hourCostData = ts.map((t, i) => ({ x: t, y: hrs[i].hour_cost }));
+
+    const series: any[] = [
+      { name: "Cena zakupu (pewne)", type: "line", data: confirmedData, color: "#2ec4b6" },
+      { name: "Cena zakupu (prognoza)", type: "line", data: forecastData, color: "#7ed3c9" },
+      { name: "Cena w baterii", type: "line", data: batCostData, color: "#9e9e9e" },
+      { name: "Koszt godziny (PLN)", type: "column", data: hourCostData, color: "#e67e22" },
+    ];
+
+    const nowTs = Date.now();
+    return {
+      chart: {
+        type: "line",
+        height: 300,
+        stacked: false,
+        animations: { enabled: false },
+        toolbar: { show: true, tools: { download: false, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true } },
+        zoom: { enabled: true, type: "x" },
+        background: "transparent",
+      },
+      theme: { mode: "dark" },
+      stroke: {
+        width: [2.5, 2.5, 2, 0],
+        curve: "straight",
+        dashArray: [0, 5, 3, 0],
+      },
+      plotOptions: { bar: { columnWidth: "55%", borderRadius: 1 } },
+      dataLabels: { enabled: false },
+      fill: { opacity: [1, 1, 1, 0.7] },
+      series,
+      xaxis: {
+        type: "datetime",
+        labels: {
+          datetimeUTC: false,
+          format: this._rangeMode === "24h" ? "HH:mm" : "dd.MM HH:mm",
+        },
+      },
+      yaxis: [
+        {
+          seriesName: "Cena zakupu (pewne)",
+          title: { text: "PLN/kWh" },
+          labels: { formatter: (v: number) => (v != null ? v.toFixed(3) : "") },
+        },
+        {
+          seriesName: "Cena zakupu (prognoza)",
+          show: false,
+        },
+        {
+          seriesName: "Cena w baterii",
+          show: false,
+        },
+        {
+          seriesName: "Koszt godziny (PLN)",
+          opposite: true,
+          title: { text: "PLN/h" },
+          labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
+        },
+      ],
+      tooltip: {
+        shared: true,
+        x: { format: "EEEE dd.MM HH:mm" },
+        y: {
+          formatter: (val: number, opts: any) => {
+            if (val == null) return "—";
+            const name = opts?.w?.config?.series?.[opts.seriesIndex]?.name ?? "";
+            if (name.includes("Koszt godziny")) return val.toFixed(2) + " PLN";
+            return val.toFixed(3) + " PLN/kWh";
+          },
+        },
+      },
+      legend: { position: "bottom" },
+      annotations: {
+        xaxis: [
+          {
+            x: nowTs,
+            borderColor: "#ffffff",
+            strokeDashArray: 4,
+            label: {
+              borderColor: "#ffffff",
+              style: { background: "rgba(255,255,255,0.15)", color: "#fff" },
+              text: "teraz",
+            },
+          },
+        ],
+      },
+    };
   }
 
-  private _path(pts: { x: number; y: number }[]): string {
-    return pts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-  }
-
+  // ------------------------------------------------------------------
+  // Chart engine (for Profiles tab overlay — legacy SVG)
+  // ------------------------------------------------------------------
   /** Simple index-based polyline used by the forecast overlay. */
   private _linePath(values: number[], min: number, max: number, w: number, h: number): string {
     const n = values.length;
@@ -361,133 +709,6 @@ export class PowerPilotPanel extends LitElement {
       started = true;
     });
     return d.trim();
-  }
-
-  private _socChart(s: Series): TemplateResult {
-    const hrs = s.hours;
-    const n = hrs.length;
-    if (!n) return html`<div class="empty">Brak danych szeregu.</div>`;
-    const dates = hrs.map((h) => new Date(h.start));
-    const plotH = CH - MT - MB;
-    const bottom = MT + plotH;
-    const cons = hrs
-      .flatMap((h) => [h.consumption_real, h.consumption_forecast, h.battery_charge_kwh, h.battery_discharge_kwh])
-      .filter((v): v is number => v != null);
-    const cMax = Math.max(0.5, ...cons);
-    const yL = (v: number) => bottom - (v / 100) * plotH;
-    const yR = (v: number) => bottom - (v / cMax) * plotH;
-    const bIdx = hrs.findIndex((h) => !h.is_past);
-    const bw = Math.max(2, ((CW - ML - MR) / n) * 0.5);
-    const half = bw / 2;
-
-    const realBars = hrs.map((h, i) =>
-      h.consumption_real == null
-        ? nothing
-        : svg`<rect x=${(this._xAt(i, n) - bw / 2).toFixed(1)} y=${yR(h.consumption_real).toFixed(1)}
-            width=${half.toFixed(1)} height=${(bottom - yR(h.consumption_real)).toFixed(1)}
-            fill="#b5475d" opacity="0.6" />`
-    );
-    const chargeBars = hrs.map((h, i) =>
-      !h.battery_charge_kwh
-        ? nothing
-        : svg`<rect x=${this._xAt(i, n).toFixed(1)} y=${yR(h.battery_charge_kwh).toFixed(1)}
-            width=${half.toFixed(1)} height=${(bottom - yR(h.battery_charge_kwh)).toFixed(1)}
-            fill="#c98a3a" opacity="0.75" />`
-    );
-    const dischargeBars = hrs.map((h, i) =>
-      !h.battery_discharge_kwh
-        ? nothing
-        : svg`<rect x=${this._xAt(i, n).toFixed(1)} y=${yR(h.battery_discharge_kwh).toFixed(1)}
-            width=${half.toFixed(1)} height=${(bottom - yR(h.battery_discharge_kwh)).toFixed(1)}
-            fill="#b0a14f" opacity="0.75" />`
-    );
-    const fcPts = hrs
-      .map((h, i) => (h.consumption_forecast == null ? null : { x: this._xAt(i, n), y: yR(h.consumption_forecast) }))
-      .filter((p): p is { x: number; y: number } => p != null);
-    const socPts = hrs
-      .map((h, i) => (h.soc == null ? null : { x: this._xAt(i, n), y: yL(h.soc) }))
-      .filter((p): p is { x: number; y: number } => p != null);
-    const modeStrip = hrs.map((h, i) =>
-      !h.inverter_mode
-        ? nothing
-        : svg`<rect x=${(this._xAt(i, n) - bw / 2).toFixed(1)} y=${bottom + 34}
-            width=${bw.toFixed(1)} height="7" rx="1" fill=${MODE_COLORS[h.inverter_mode] ?? "#888"} />`
-    );
-
-    return svg`
-      <svg viewBox="0 0 ${CW} ${CH}" class="chart">
-        ${this._yAxisLeft([0, 25, 50, 75, 100], yL, "SoC %")}
-        ${this._yAxisRight(this._niceTicks(0, cMax, 4), yR, "kWh")}
-        ${this._xAxis(dates)}
-        ${realBars}
-        ${chargeBars}
-        ${dischargeBars}
-        <path d=${this._path(fcPts)} fill="none" stroke="#e08aa0" stroke-width="1.5" stroke-dasharray="4 3" />
-        <path d=${this._path(socPts)} fill="none" stroke="#2ec4b6" stroke-width="2.5" />
-        ${modeStrip}
-        ${this._nowMarker(dates, bIdx)}
-      </svg>`;
-  }
-
-  private _priceChart(s: Series): TemplateResult {
-    const hrs = s.hours;
-    const n = hrs.length;
-    if (!n) return html`<div class="empty">Brak danych szeregu.</div>`;
-    const dates = hrs.map((h) => new Date(h.start));
-    const plotH = CH - MT - MB;
-    const bottom = MT + plotH;
-    const vals = hrs
-      .flatMap((h) => [h.buy_price, h.battery_energy_cost])
-      .filter((v): v is number => v != null);
-    const pmin = Math.min(0, ...vals);
-    const pmax = Math.max(0.1, ...vals);
-    const y = (v: number) => bottom - ((v - pmin) / (pmax - pmin)) * plotH;
-    const bIdx = hrs.findIndex((h) => !h.is_past);
-
-    const buySegs: any[] = [];
-    for (let i = 1; i < n; i++) {
-      const a = hrs[i - 1];
-      const b = hrs[i];
-      if (a.buy_price == null || b.buy_price == null) continue;
-      const dashed = !b.price_confirmed;
-      buySegs.push(
-        svg`<line x1=${this._xAt(i - 1, n).toFixed(1)} y1=${y(a.buy_price).toFixed(1)}
-          x2=${this._xAt(i, n).toFixed(1)} y2=${y(b.buy_price).toFixed(1)}
-          stroke="#2ec4b6" stroke-width="2" stroke-dasharray=${dashed ? "4 3" : "0"} />`
-      );
-    }
-    const costPts = hrs
-      .map((h, i) => (h.battery_energy_cost == null ? null : { x: this._xAt(i, n), y: y(h.battery_energy_cost) }))
-      .filter((p): p is { x: number; y: number } => p != null);
-
-    return svg`
-      <svg viewBox="0 0 ${CW} ${CH}" class="chart">
-        ${this._yAxisLeft(this._niceTicks(pmin, pmax, 5), y, "PLN/kWh")}
-        ${this._xAxis(dates)}
-        ${buySegs}
-        <path d=${this._path(costPts)} fill="none" stroke="var(--secondary-text-color, #9e9e9e)" stroke-width="2" stroke-dasharray="2 2" />
-        ${this._nowMarker(dates, bIdx)}
-      </svg>`;
-  }
-
-  private _socLegend(): TemplateResult {
-    return html`<div class="fc-legend">
-      <span class="fc-key"><span class="swatch" style="background:#2ec4b6"></span>SoC (%)</span>
-      <span class="fc-key"><span class="swatch" style="background:#b5475d"></span>Zużycie realne (kWh)</span>
-      <span class="fc-key"><span class="swatch" style="background:#e08aa0"></span>Zużycie prognoza (kWh)</span>
-      <span class="fc-key"><span class="swatch" style="background:#c98a3a"></span>Ładowanie z sieci (kWh)</span>
-      <span class="fc-key"><span class="swatch" style="background:#b0a14f"></span>Rozładowanie (kWh)</span>
-      <span class="fc-key"><span class="swatch" style="background:#43a047"></span>ład.</span>
-      <span class="fc-key"><span class="swatch" style="background:#c98a3a"></span>rozład.</span>
-      <span class="fc-key"><span class="swatch" style="background:#6b6b6b"></span>przepływ</span>
-    </div>`;
-  }
-
-  private _priceLegend(): TemplateResult {
-    return html`<div class="fc-legend">
-      <span class="fc-key"><span class="swatch" style="background:#2ec4b6"></span>Cena zakupu — ciągła = pewna, przerywana = prognoza</span>
-      <span class="fc-key"><span class="swatch" style="background:#9e9e9e"></span>Cena w baterii (po stratach)</span>
-    </div>`;
   }
 
   // ------------------------------------------------------------------
@@ -880,6 +1101,59 @@ export class PowerPilotPanel extends LitElement {
       height: 12px;
       border-radius: 3px;
       display: inline-block;
+    }
+    /* Date navigation bar */
+    .nav-card {
+      padding: 10px 14px;
+    }
+    .nav-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .nav-btn {
+      border: 1px solid var(--divider-color, #444);
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
+      border-radius: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .nav-btn:hover {
+      background: var(--secondary-background-color, #2a2a2a);
+    }
+    .nav-btn.active {
+      background: var(--primary-color);
+      color: var(--text-primary-color, #fff);
+      border-color: var(--primary-color);
+    }
+    .nav-date {
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
+      border: 1px solid var(--divider-color, #444);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 13px;
+      color-scheme: dark;
+    }
+    .nav-spacer {
+      flex: 1;
+    }
+    .nav-info {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--secondary-text-color);
+    }
+    /* ApexCharts container */
+    .apex-chart {
+      width: 100%;
+      min-height: 300px;
+    }
+    .apex-chart .apexcharts-tooltip {
+      background: var(--card-background-color) !important;
+      color: var(--primary-text-color) !important;
     }
   `;
 }

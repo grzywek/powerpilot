@@ -16,6 +16,8 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_BATTERY_CAPACITY_KWH,
+    CONF_BATTERY_CHARGE_SENSOR,
+    CONF_BATTERY_DISCHARGE_SENSOR,
     CONF_BATTERY_WEAR_COST,
     CONF_BUY_PRICE_SENSOR,
     CONF_CHARGE_EFFICIENCY,
@@ -31,6 +33,7 @@ from .const import (
     CONF_EV_SOC_SENSOR,
     CONF_EV_WEEKLY_KM,
     CONF_GRID_DISCONNECT_SOC,
+    CONF_GRID_IMPORT_SENSOR,
     CONF_INVERTER_MAX_CHARGE_KW,
     CONF_INVERTER_MAX_DISCHARGE_KW,
     CONF_MAIN_FUSE_A,
@@ -41,7 +44,6 @@ from .const import (
     CONF_PRICE_MARKUP,
     CONF_PRICE_SOURCE,
     CONF_PRICE_VAT,
-    CONF_SELL_PRICE_SENSOR,
     CONF_SOC_SENSOR,
     CONF_WEATHER_ENTITY,
     DEFAULTS,
@@ -100,6 +102,15 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
             # Linked entities
             vol.Optional(CONF_SOC_SENSOR, default=d(CONF_SOC_SENSOR) or vol.UNDEFINED): _entity("sensor"),
             vol.Optional(
+                CONF_BATTERY_CHARGE_SENSOR, default=d(CONF_BATTERY_CHARGE_SENSOR) or vol.UNDEFINED
+            ): _entity("sensor"),
+            vol.Optional(
+                CONF_BATTERY_DISCHARGE_SENSOR, default=d(CONF_BATTERY_DISCHARGE_SENSOR) or vol.UNDEFINED
+            ): _entity("sensor"),
+            vol.Optional(
+                CONF_GRID_IMPORT_SENSOR, default=d(CONF_GRID_IMPORT_SENSOR) or vol.UNDEFINED
+            ): _entity("sensor"),
+            vol.Optional(
                 CONF_CONSUMPTION_SENSOR, default=d(CONF_CONSUMPTION_SENSOR) or vol.UNDEFINED
             ): _entity("sensor"),
             vol.Optional(
@@ -112,9 +123,6 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
             ): _NUMBER(_NUM(min=7, max=90, step=1, unit_of_measurement="d", mode="box")),
             vol.Optional(
                 CONF_BUY_PRICE_SENSOR, default=d(CONF_BUY_PRICE_SENSOR) or vol.UNDEFINED
-            ): _entity("sensor"),
-            vol.Optional(
-                CONF_SELL_PRICE_SENSOR, default=d(CONF_SELL_PRICE_SENSOR) or vol.UNDEFINED
             ): _entity("sensor"),
             vol.Optional(
                 CONF_WEATHER_ENTITY, default=d(CONF_WEATHER_ENTITY) or vol.UNDEFINED

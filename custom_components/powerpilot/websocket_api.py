@@ -70,6 +70,8 @@ async def ws_forecasts(hass: HomeAssistant, connection, msg) -> None:
     {
         vol.Required("type"): "powerpilot/series",
         vol.Optional("past_hours", default=24): int,
+        vol.Optional("start"): str,
+        vol.Optional("end"): str,
     }
 )
 @websocket_api.async_response
@@ -78,7 +80,11 @@ async def ws_series(hass: HomeAssistant, connection, msg) -> None:
     if not coordinator:
         connection.send_result(msg["id"], {"hours": []})
         return
-    result = await coordinator.get_series(int(msg.get("past_hours", 24)))
+    result = await coordinator.get_series(
+        past_hours=int(msg.get("past_hours", 24)),
+        start=msg.get("start"),
+        end=msg.get("end"),
+    )
     connection.send_result(msg["id"], result)
 
 

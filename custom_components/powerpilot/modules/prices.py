@@ -137,6 +137,27 @@ class PriceModule(PowerPilotModule):
         await self._maybe_backfill()
         source = self._build_source()
         self._data = await source.async_fetch()
+        confirmed_count = len(self._data.confirmed_hours)
+        total_count = len(self._data.buy)
+        forecast_count = total_count - confirmed_count
+        last_hour = max(self._data.buy) if self._data.buy else None
+        source_label = (
+            "pradcast"
+            if self.config.get(CONF_PRICE_SOURCE) == PRICE_SOURCE_PRADCAST
+            else "sensor"
+        )
+        self.log_info(
+            f"Źródło {source_label}: {confirmed_count}h potwierdzonych + {forecast_count}h prognozy "
+            f"(do {last_hour.isoformat() if last_hour else '–'}). Profil: {self.profile.observed_days} dni / {self.profile.samples} próbek.",
+            extra={
+                "source": source_label,
+                "confirmed_hours": confirmed_count,
+                "forecast_hours": forecast_count,
+                "last_priced_hour": last_hour.isoformat() if last_hour else None,
+                "profile_days": self.profile.observed_days,
+                "profile_samples": self.profile.samples,
+            },
+        )
 
     async def async_fetch_forecasts(self, target_date) -> dict:
         """Horizon-indexed forecasts (D+1..D+3) for the overlay, if supported."""

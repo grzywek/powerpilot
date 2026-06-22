@@ -34,12 +34,15 @@ class WeatherModule(PowerPilotModule):
         self._temps = {}
         entity_id = self.config.get(CONF_WEATHER_ENTITY)
         if not entity_id:
+            self.log_info("Brak skonfigurowanej encji pogody.")
             return
         state = self.hass.states.get(entity_id)
         if state is None:
+            self.log_warning(f"Encja pogody {entity_id} niedostępna.")
             return
         forecast = state.attributes.get("forecast")
         if not isinstance(forecast, (list, tuple)):
+            self.log_warning(f"Encja {entity_id} nie udostępnia atrybutu 'forecast'.")
             return
         for entry in forecast:
             if not isinstance(entry, dict):
@@ -52,6 +55,11 @@ class WeatherModule(PowerPilotModule):
                     self._temps[hour] = float(temp)
                 except (TypeError, ValueError):
                     continue
+        if self._temps:
+            self.log_info(
+                f"Prognoza temperatury: {len(self._temps)} godzin (encja {entity_id}).",
+                extra={"entity": entity_id, "hours": len(self._temps)},
+            )
 
     def contribute(self, forecast: Forecast) -> None:
         if not self._temps:

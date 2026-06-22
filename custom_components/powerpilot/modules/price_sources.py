@@ -126,7 +126,40 @@ class PradcastPriceSource(PriceSource):
     async def async_fetch(self) -> PriceData:
         today = dt_util.now().date()
         days = [today + timedelta(days=offset) for offset in range(PRADCAST_HORIZON_DAYS + 1)]
-        return await self.async_fetch_days(days)
+        data = await self.async_fetch_days(days)
+        # Backfill forward horizon from /prices/forecasts/{today} for any day
+        # whose per-day endpoint returned nothing (Pradcast typically only
+        # publishes RDN for today+tomorrow as confirmed; D+2/D+3 only live
+        # under the multi-horizon forecast endpoint).
+        await self._merge_forward_forecasts(data, today)
+        return data
+
+    async def _merge_forward_forecasts(self, data: PriceData, today: date) -> None:
+        """Fill D+1..D+3 from the multi-horizon forecast endpoint as a backstop."""
+        try:
+            horizons = await self.async_fetch_forecasts(today)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Pradcast forecast backfill failed: %s", err)
+            return
+        if not horizons:
+            return
+        for horizon_label, entries in horizons.items():
+            # "D+1" -> today + 1 day, etc.
+            try:
+                offset = int(horizon_label.replace("D+", ""))
+            except (ValueError, AttributeError):
+                continue
+            day = today + timedelta(days=offset)
+            for entry in entries:
+                hour_idx = entry.get("hour")
+                buy = entry.get("buy")
+                if hour_idx is None or buy is None:
+                    continue
+                start = dt_util.start_of_local_day(day) + timedelta(hours=int(hour_idx))
+                # Don't overwrite confirmed/already-fetched hours.
+                if start in data.buy:
+                    continue
+                data.buy[start] = float(buy)
 
     async def async_fetch_days(self, days: list[date]) -> PriceData:
         """Fetch an explicit list of days (used for the forward horizon and backfill)."""

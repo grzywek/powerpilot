@@ -90,6 +90,16 @@ class ConsumptionModule(PowerPilotModule):
 
     async def async_update(self) -> None:
         await self._maybe_learn()
+        device_count = len(self.devices)
+        self.log_info(
+            f"Profil: baza {self.base.observed_days} dni / {self.base.samples} próbek, urządzeń {device_count}.",
+            extra={
+                "base_days": self.base.observed_days,
+                "base_samples": self.base.samples,
+                "devices": device_count,
+                "device_ids": list(self.devices.keys()),
+            },
+        )
 
     async def async_recent_kwh(self, entity_id: str, hours: int) -> dict:
         """Recent hourly kWh for a sensor (used by the chart's real-data series)."""

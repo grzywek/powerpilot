@@ -49,6 +49,13 @@ class PowerPilotModule:
         """Optional immediate reminders surfaced to the user."""
         return []
 
+    # Convenience: structured log entries surfaced in the panel "Log" tab.
+    def log_info(self, message: str, extra: dict | None = None) -> None:
+        self.coordinator.log_info(self.domain, message, extra)
+
+    def log_warning(self, message: str, extra: dict | None = None) -> None:
+        self.coordinator.log_warning(self.domain, message, extra)
+
 
 class ModuleRegistry:
     """Holds the active modules and runs the contribution pipeline in order."""

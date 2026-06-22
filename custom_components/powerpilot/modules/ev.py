@@ -67,10 +67,15 @@ class EVModule(PowerPilotModule):
     async def async_update(self) -> None:
         if not self.enabled:
             self._request = EVRequest(enabled=False)
+            self.log_info("EV wyłączony w konfiguracji.")
             return
 
         self._soc = self._read_float(self.config.get(CONF_EV_SOC_SENSOR))
         self._home = self._read_home(self.config.get(CONF_EV_LOCATION_SENSOR))
+        self.log_info(
+            f"EV: SoC={self._soc if self._soc is not None else '–'}%, w domu={self._home}.",
+            extra={"soc": self._soc, "home": self._home},
+        )
 
     def _read_float(self, entity_id: str | None) -> float | None:
         if not entity_id:

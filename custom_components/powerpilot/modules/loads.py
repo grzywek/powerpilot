@@ -45,6 +45,7 @@ class LoadsModule(PowerPilotModule):
 
     def contribute(self, forecast: Forecast) -> None:
         if not self._loads:
+            self.log_info("Brak zaplanowanych ładunków na horyzoncie.")
             return
         by_hour: dict[datetime, float] = {}
         labels: dict[datetime, list[str]] = {}
@@ -57,3 +58,8 @@ class LoadsModule(PowerPilotModule):
             if hour in by_hour:
                 slot.extra_load_kwh += by_hour[hour]
                 slot.tags.extend(labels[hour])
+        total_kwh = sum(by_hour.values())
+        self.log_info(
+            f"Załadowano {len(self._loads)} planowanych zadań ({total_kwh:.1f} kWh łącznie).",
+            extra={"count": len(self._loads), "total_kwh": round(total_kwh, 2)},
+        )

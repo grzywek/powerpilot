@@ -45,11 +45,16 @@ interface Status {
 
 interface LogEvent {
   time: string;
-  horizon_hours: number;
-  action: string | null;
-  ev_charge: boolean | null;
-  battery_soc: number | null;
-  errors: string[];
+  type?: "plan" | "info" | "warning";
+  module?: string;
+  message?: string;
+  extra?: Record<string, unknown>;
+  // legacy / plan-event fields
+  horizon_hours?: number;
+  action?: string | null;
+  ev_charge?: boolean | null;
+  battery_soc?: number | null;
+  errors?: string[];
 }
 
 type Matrix = Record<string, (number | null)[]>;
@@ -468,12 +473,10 @@ export class PowerPilotPanel extends LitElement {
 
     // Per-device.
     const deviceIds = s.device_ids ?? [];
-    const deviceSeriesNames: string[] = [];
     deviceIds.forEach((eid, idx) => {
       const color = DEVICE_PALETTE[idx % DEVICE_PALETTE.length];
       const friendly = eid.split(".").slice(-1)[0];
       const name = `Urz: ${friendly}`;
-      deviceSeriesNames.push(name);
       series.push({
         name,
         type: "column",
@@ -487,7 +490,7 @@ export class PowerPilotPanel extends LitElement {
       });
     });
 
-    // SoC line (left axis %).
+    // SoC line — mapped to right axis via yaxis[1].seriesName below.
     series.push({
       name: "SoC %",
       type: "line",
@@ -495,23 +498,11 @@ export class PowerPilotPanel extends LitElement {
       color: "#2ec4b6",
     });
 
-    // All bar (kWh) series share the right axis. We attach the seriesName array
-    // to a single yaxis entry so ApexCharts maps each named series there.
-    const kwhSeriesNames = [
-      "Zużycie real",
-      "Zużycie prog.",
-      "Bateria — ładowanie",
-      "Bateria — rozładowanie",
-      "Import z sieci",
-      "EV ładowanie",
-      ...deviceSeriesNames,
-    ];
-
     const nowTs = Date.now();
     return {
       chart: {
         type: "line",
-        height: 360,
+        height: 460,
         stacked: false,
         animations: { enabled: false },
         toolbar: {
@@ -536,25 +527,27 @@ export class PowerPilotPanel extends LitElement {
       },
       yaxis: [
         {
+          // LEFT axis: kWh — default for all unmapped (bar) series.
+          title: { text: "kWh" },
+          min: 0,
+          forceNiceScale: true,
+          decimalsInFloat: 2,
+          labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
+        },
+        {
+          // RIGHT axis: SoC %.
           seriesName: "SoC %",
+          opposite: true,
           min: 0,
           max: 100,
           title: { text: "SoC (%)" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(0) + " %" : "") },
         },
-        {
-          // Mapping array → all kWh bar series use this axis.
-          seriesName: kwhSeriesNames,
-          opposite: true,
-          title: { text: "kWh" },
-          labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
-          show: true,
-          forceNiceScale: true,
-          min: 0,
-        },
       ],
       tooltip: {
         shared: true,
+        intersect: false,
+        followCursor: false,
         x: { format: "EEEE dd.MM HH:mm" },
         y: {
           formatter: (val: number, opts: any) => {
@@ -567,9 +560,12 @@ export class PowerPilotPanel extends LitElement {
       },
       legend: {
         position: "bottom",
+        horizontalAlign: "center",
+        itemMargin: { horizontal: 14, vertical: 2 },
+        fontSize: "12px",
         showForSingleSeries: true,
-        showForZeroSeries: true,
-        showForNullSeries: true,
+        showForZeroSeries: false,
+        showForNullSeries: false,
       },
       annotations: {
         xaxis: [
@@ -616,10 +612,13 @@ export class PowerPilotPanel extends LitElement {
     return {
       chart: {
         type: "line",
-        height: 300,
+        height: 380,
         stacked: false,
         animations: { enabled: false },
-        toolbar: { show: true, tools: { download: false, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true } },
+        toolbar: {
+          show: true,
+          tools: { download: false, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true },
+        },
         zoom: { enabled: true, type: "x" },
         background: "transparent",
       },
@@ -642,13 +641,14 @@ export class PowerPilotPanel extends LitElement {
       },
       yaxis: [
         {
-          // PLN/kWh axis — shared by all three line series.
-          seriesName: ["Cena zakupu (pewne)", "Cena zakupu (prognoza)", "Cena w baterii"],
+          // LEFT axis: PLN/kWh — default for all line series.
           title: { text: "PLN/kWh" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(3) : "") },
           forceNiceScale: true,
+          decimalsInFloat: 3,
         },
         {
+          // RIGHT axis: PLN/h — only the hour-cost column series.
           seriesName: "Koszt godziny (PLN)",
           opposite: true,
           title: { text: "PLN/h" },
@@ -659,6 +659,8 @@ export class PowerPilotPanel extends LitElement {
       ],
       tooltip: {
         shared: true,
+        intersect: false,
+        followCursor: false,
         x: { format: "EEEE dd.MM HH:mm" },
         y: {
           formatter: (val: number, opts: any) => {
@@ -669,7 +671,12 @@ export class PowerPilotPanel extends LitElement {
           },
         },
       },
-      legend: { position: "bottom" },
+      legend: {
+        position: "bottom",
+        horizontalAlign: "center",
+        itemMargin: { horizontal: 14, vertical: 2 },
+        fontSize: "12px",
+      },
       annotations: {
         xaxis: [
           {
@@ -865,25 +872,73 @@ export class PowerPilotPanel extends LitElement {
   private _renderLogs(): TemplateResult {
     if (!this._log.length) return html`<div class="card empty">Brak zdarzeń.</div>`;
     return html`<div class="card">
-      <div class="card-title">Ostatnie przeliczenia</div>
+      <div class="card-title">Ostatnie zdarzenia</div>
       <table class="log">
         <thead>
-          <tr><th>Czas</th><th>Akcja</th><th>SoC</th><th>EV</th><th>Horyzont</th><th>Błędy</th></tr>
+          <tr>
+            <th>Czas</th>
+            <th>Typ</th>
+            <th>Moduł</th>
+            <th>Wiadomość</th>
+            <th>Szczegóły</th>
+          </tr>
         </thead>
         <tbody>
-          ${this._log.map(
-            (e) => html`<tr>
-              <td>${this._time(e.time)}</td>
-              <td>${e.action ?? "—"}</td>
-              <td>${e.battery_soc ?? "—"}</td>
-              <td>${e.ev_charge ? "tak" : "—"}</td>
-              <td>${e.horizon_hours} h</td>
-              <td class=${e.errors.length ? "err" : ""}>${e.errors.join("; ") || "—"}</td>
-            </tr>`
-          )}
+          ${this._log.map((e) => {
+            const type = e.type ?? "plan";
+            const moduleName = e.module ?? "coordinator";
+            const message = e.message ?? this._planMessage(e);
+            const details = this._eventDetails(e);
+            return html`<tr class=${"log-row log-" + type}>
+              <td class="log-time">${this._time(e.time)}</td>
+              <td><span class=${"log-badge log-badge-" + type}>${this._typeLabel(type)}</span></td>
+              <td class="log-module">${moduleName}</td>
+              <td>${message}</td>
+              <td class="log-extra">${details}</td>
+            </tr>`;
+          })}
         </tbody>
       </table>
     </div>`;
+  }
+
+  private _typeLabel(type: string): string {
+    switch (type) {
+      case "info":
+        return "INFO";
+      case "warning":
+        return "WARN";
+      case "plan":
+        return "PLAN";
+      default:
+        return type.toUpperCase();
+    }
+  }
+
+  private _planMessage(e: LogEvent): string {
+    const parts: string[] = [];
+    if (e.action) parts.push(`akcja=${e.action}`);
+    if (e.battery_soc != null) parts.push(`SoC=${e.battery_soc}%`);
+    if (e.ev_charge) parts.push("EV ładowanie");
+    if (e.horizon_hours != null) parts.push(`horyzont ${e.horizon_hours}h`);
+    return parts.join(", ") || "—";
+  }
+
+  private _eventDetails(e: LogEvent): string {
+    const bits: string[] = [];
+    if (e.errors && e.errors.length) bits.push("⚠ " + e.errors.join("; "));
+    if (e.extra) {
+      for (const [k, v] of Object.entries(e.extra)) {
+        if (v == null) continue;
+        const s = Array.isArray(v)
+          ? `[${v.length}]`
+          : typeof v === "object"
+          ? JSON.stringify(v)
+          : String(v);
+        bits.push(`${k}=${s}`);
+      }
+    }
+    return bits.join(" · ") || "—";
   }
 
   private _time(iso: string): string {
@@ -1032,9 +1087,48 @@ export class PowerPilotPanel extends LitElement {
       text-align: left;
       padding: 6px 8px;
       border-bottom: 1px solid var(--divider-color);
+      vertical-align: top;
     }
     td.err {
       color: var(--error-color, #d33);
+    }
+    .log-time {
+      white-space: nowrap;
+      color: var(--secondary-text-color);
+      font-variant-numeric: tabular-nums;
+    }
+    .log-module {
+      font-weight: 600;
+      color: var(--secondary-text-color);
+    }
+    .log-extra {
+      color: var(--secondary-text-color);
+      font-family: var(--code-font-family, ui-monospace, monospace);
+      font-size: 12px;
+    }
+    .log-badge {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .log-badge-info {
+      background: rgba(33, 150, 243, 0.15);
+      color: #2196f3;
+    }
+    .log-badge-plan {
+      background: rgba(76, 175, 80, 0.18);
+      color: #66bb6a;
+    }
+    .log-badge-warning {
+      background: rgba(255, 152, 0, 0.18);
+      color: #ffa726;
+    }
+    .log-warning .log-extra {
+      color: var(--warning-color, #ffa726);
     }
     .heatmap {
       display: flex;
@@ -1150,11 +1244,33 @@ export class PowerPilotPanel extends LitElement {
     /* ApexCharts container */
     .apex-chart {
       width: 100%;
-      min-height: 300px;
+      min-height: 380px;
     }
-    .apex-chart .apexcharts-tooltip {
-      background: var(--card-background-color) !important;
+    /* Tooltip flicker workaround for ApexCharts inside Shadow DOM:
+       the tooltip element itself catches mouse events and re-triggers
+       enter/leave loops. Disabling pointer events keeps it stable. */
+    .apexcharts-tooltip,
+    .apexcharts-xaxistooltip,
+    .apexcharts-yaxistooltip {
+      pointer-events: none !important;
+      background: var(--card-background-color, #2a2a2a) !important;
       color: var(--primary-text-color) !important;
+      border: 1px solid var(--divider-color, #444) !important;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+    }
+    .apexcharts-tooltip-title {
+      background: var(--secondary-background-color, #1f1f1f) !important;
+      border-bottom: 1px solid var(--divider-color, #444) !important;
+    }
+    /* Force horizontal legend layout even when many series. */
+    .apexcharts-legend {
+      flex-wrap: wrap !important;
+      justify-content: center !important;
+    }
+    .apexcharts-legend-series {
+      display: inline-flex !important;
+      align-items: center !important;
+      margin: 2px 8px !important;
     }
   `;
 }

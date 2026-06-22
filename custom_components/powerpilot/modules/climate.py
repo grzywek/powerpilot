@@ -50,9 +50,18 @@ class ClimateModule(PowerPilotModule):
 
     def contribute(self, forecast: Forecast) -> None:
         if not self.model.enabled:
+            self.log_info("Model klimatu wyłączony.")
             return
+        total = 0.0
+        hits = 0
         for slot in forecast.slots:
             energy = self.model.energy_for(slot.temperature)
             if energy > 0:
                 slot.extra_load_kwh += energy
                 slot.tags.append("climate")
+                total += energy
+                hits += 1
+        self.log_info(
+            f"Klimat dorzucił {total:.1f} kWh na {hits}h horyzontu.",
+            extra={"hours": hits, "total_kwh": round(total, 2)},
+        )

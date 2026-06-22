@@ -160,6 +160,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.events.appendleft(
             {
                 "time": dt_util.now().isoformat(),
+                "type": "plan",
+                "module": "coordinator",
+                "message": f"Plan {len(plan.decisions)}h horizon, action={current.inverter_mode if current else None}",
                 "horizon_hours": len(plan.decisions),
                 "action": current.inverter_mode if current else None,
                 "ev_charge": current.ev_charge if current else None,
@@ -167,6 +170,29 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "errors": errors,
             }
         )
+
+    def log_info(self, module: str, message: str, extra: dict | None = None) -> None:
+        """Push a structured info event (visible in the panel log table)."""
+        event: dict = {
+            "time": dt_util.now().isoformat(),
+            "type": "info",
+            "module": module,
+            "message": message,
+        }
+        if extra:
+            event["extra"] = extra
+        self.events.appendleft(event)
+
+    def log_warning(self, module: str, message: str, extra: dict | None = None) -> None:
+        event: dict = {
+            "time": dt_util.now().isoformat(),
+            "type": "warning",
+            "module": module,
+            "message": message,
+        }
+        if extra:
+            event["extra"] = extra
+        self.events.appendleft(event)
 
     def get_log(self) -> list[dict]:
         return list(self.events)

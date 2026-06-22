@@ -433,43 +433,18 @@ export class PowerPilotPanel extends LitElement {
       ts.map((t, i) => ({ x: t, y: extract(hrs[i]) }));
 
     const series: any[] = [];
-    // Bars (right axis kWh).
-    series.push({
-      name: "Zużycie real",
-      type: "column",
-      data: pair((h) => (h.is_past ? h.consumption_real : null)),
-      color: "#b5475d",
-    });
-    series.push({
-      name: "Zużycie prog.",
-      type: "column",
-      data: pair((h) => (!h.is_past ? h.consumption_forecast : null)),
-      color: "#e08aa0",
-    });
-    series.push({
-      name: "Bateria — ładowanie",
-      type: "column",
-      data: pair((h) => h.battery_charge_kwh),
-      color: "#c98a3a",
-    });
-    series.push({
-      name: "Bateria — rozładowanie",
-      type: "column",
-      data: pair((h) => h.battery_discharge_kwh),
-      color: "#b0a14f",
-    });
-    series.push({
-      name: "Import z sieci",
-      type: "column",
-      data: pair((h) => h.grid_buy_kwh),
-      color: "#8e44ad",
-    });
-    series.push({
-      name: "EV ładowanie",
-      type: "column",
-      data: pair((h) => h.ev_charge_kwh),
-      color: "#3498db",
-    });
+    const kwhNames: string[] = [];
+    const pushKwh = (name: string, color: string, getter: (h: SeriesHour) => number | null) => {
+      series.push({ name, type: "column", data: pair(getter), color });
+      kwhNames.push(name);
+    };
+
+    pushKwh("Zużycie real", "#b5475d", (h) => (h.is_past ? h.consumption_real : null));
+    pushKwh("Zużycie prog.", "#e08aa0", (h) => (!h.is_past ? h.consumption_forecast : null));
+    pushKwh("Bateria — ładowanie", "#c98a3a", (h) => h.battery_charge_kwh);
+    pushKwh("Bateria — rozładowanie", "#b0a14f", (h) => h.battery_discharge_kwh);
+    pushKwh("Import z sieci", "#8e44ad", (h) => h.grid_buy_kwh);
+    pushKwh("EV ładowanie", "#3498db", (h) => h.ev_charge_kwh);
 
     // Per-device.
     const deviceIds = s.device_ids ?? [];
@@ -477,20 +452,15 @@ export class PowerPilotPanel extends LitElement {
       const color = DEVICE_PALETTE[idx % DEVICE_PALETTE.length];
       const friendly = eid.split(".").slice(-1)[0];
       const name = `Urz: ${friendly}`;
-      series.push({
-        name,
-        type: "column",
-        data: pair((h) => {
-          const r = h.devices_real?.[eid];
-          if (r != null) return r;
-          const f = h.devices_forecast?.[eid];
-          return f != null ? f : null;
-        }),
-        color,
+      pushKwh(name, color, (h) => {
+        const r = h.devices_real?.[eid];
+        if (r != null) return r;
+        const f = h.devices_forecast?.[eid];
+        return f != null ? f : null;
       });
     });
 
-    // SoC line — mapped to right axis via yaxis[1].seriesName below.
+    // SoC line on the right axis.
     series.push({
       name: "SoC %",
       type: "line",
@@ -526,16 +496,24 @@ export class PowerPilotPanel extends LitElement {
         },
       },
       yaxis: [
-        {
-          // LEFT axis: kWh — default for all unmapped (bar) series.
-          title: { text: "kWh" },
+        // Each kWh series gets its OWN yaxis entry pointing at the same shared
+        // physical axis (only the first carries title/labels; the rest are
+        // hidden duplicates). This avoids the ApexCharts
+        // `setSeriesYAxisMappings` crash that fires when some series have no
+        // explicit yaxis mapping.
+        ...kwhNames.map((name, idx) => ({
+          seriesName: name,
+          show: idx === 0,
+          showAlways: idx === 0,
+          title: idx === 0 ? { text: "kWh" } : undefined,
           min: 0,
           forceNiceScale: true,
           decimalsInFloat: 2,
-          labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
-        },
+          labels: idx === 0
+            ? { formatter: (v: number) => (v != null ? v.toFixed(2) : "") }
+            : { show: false },
+        })),
         {
-          // RIGHT axis: SoC %.
           seriesName: "SoC %",
           opposite: true,
           min: 0,
@@ -640,12 +618,25 @@ export class PowerPilotPanel extends LitElement {
         },
       },
       yaxis: [
+        // Each PLN/kWh line gets its own yaxis entry sharing the LEFT axis
+        // (only the first carries title/labels) so every series has an
+        // explicit mapping — see _buildEnergyOptions for the rationale.
         {
-          // LEFT axis: PLN/kWh — default for all line series.
+          seriesName: "Cena zakupu (pewne)",
           title: { text: "PLN/kWh" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(3) : "") },
           forceNiceScale: true,
           decimalsInFloat: 3,
+        },
+        {
+          seriesName: "Cena zakupu (prognoza)",
+          show: false,
+          forceNiceScale: true,
+        },
+        {
+          seriesName: "Cena w baterii",
+          show: false,
+          forceNiceScale: true,
         },
         {
           // RIGHT axis: PLN/h — only the hour-cost column series.

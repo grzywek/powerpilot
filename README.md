@@ -56,12 +56,16 @@ modules (prices · consumption · loads · weather · climate · ev · calendar)
    directory (or add this repository to HACS as a custom repository).
 2. Restart Home Assistant.
 3. Add the integration via **Settings → Devices & Services → Add Integration →
-   PowerPilot** and complete the two-step setup (core + EV).
+   PowerPilot** and complete the three-step setup (core → prices → EV).
 
 ## Status
 
-Stage 0 (foundation) is implemented: scaffold, core models, the battery
-cost-after-losses model, the module pipeline, a transparent heuristic optimizer,
-config/options flow, and all output entities. Subsequent stages (real price API,
-consumption learning, EV+calendar, weather/climate, LP optimizer, dashboard) are
-tracked in the roadmap.
+Implemented: **Stage 0** (foundation — models, battery cost-after-losses, module
+pipeline, heuristic optimizer, config flow, entities), **Stage 1** (prądcast.pl
+price source with confirmed/forecast split + learned price profile), **Stage 2**
+(recorder-based consumption learning with per-device breakdown), and **Stage 6**
+(custom Lit sidebar panel + WebSocket API + dashboards).
+
+Pending: Stage 3 (EV + Apple calendar), Stage 4 (weather/climate), Stage 5
+(LP/MILP optimizer). Full plan in [docs/ROADMAP.md](docs/ROADMAP.md); resume guide
+for a fresh session in [docs/HANDOVER.md](docs/HANDOVER.md).

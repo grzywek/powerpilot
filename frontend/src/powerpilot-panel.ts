@@ -378,7 +378,7 @@ export class PowerPilotPanel extends LitElement {
   // ------------------------------------------------------------------
   // ApexCharts integration
   // ------------------------------------------------------------------
-  protected updated(changed: Map<string, unknown>): void {
+  protected updated(_changed: Map<string, unknown>): void {
     if (this._tab !== "overview") {
       // Tear down charts when switching away to free resources.
       if (this._energyChart || this._priceChart) {
@@ -389,9 +389,10 @@ export class PowerPilotPanel extends LitElement {
       }
       return;
     }
-    if (changed.has("_series") || changed.has("_tab") || changed.has("_rangeMode")) {
-      this._mountOrUpdateCharts();
-    }
+    // Always attempt mount/update on overview tab: divs may have only just
+    // appeared (e.g. _plan loaded after _series), and ApexCharts handles
+    // option diffs cheaply.
+    this._mountOrUpdateCharts();
   }
 
   private _mountOrUpdateCharts(): void {
@@ -422,15 +423,11 @@ export class PowerPilotPanel extends LitElement {
   private _buildEnergyOptions(s: Series): any {
     const hrs = s.hours;
     const ts = hrs.map((h) => new Date(h.start).getTime());
-    const pickHasData = (extract: (h: SeriesHour) => number | null) =>
-      hrs.some((h) => extract(h) != null);
 
     const pair = (extract: (h: SeriesHour) => number | null) =>
       ts.map((t, i) => ({ x: t, y: extract(hrs[i]) }));
 
-    // Stub modules: per-spec keep them in legend, greyed out.
     const series: any[] = [];
-
     // Bars (right axis kWh).
     series.push({
       name: "Zużycie real",
@@ -469,13 +466,16 @@ export class PowerPilotPanel extends LitElement {
       color: "#3498db",
     });
 
-    // Per-device — real (past) + forecast (future) joined into one series per device.
+    // Per-device.
     const deviceIds = s.device_ids ?? [];
+    const deviceSeriesNames: string[] = [];
     deviceIds.forEach((eid, idx) => {
       const color = DEVICE_PALETTE[idx % DEVICE_PALETTE.length];
       const friendly = eid.split(".").slice(-1)[0];
+      const name = `Urz: ${friendly}`;
+      deviceSeriesNames.push(name);
       series.push({
-        name: `Urz: ${friendly}`,
+        name,
         type: "column",
         data: pair((h) => {
           const r = h.devices_real?.[eid];
@@ -495,15 +495,17 @@ export class PowerPilotPanel extends LitElement {
       color: "#2ec4b6",
     });
 
-    // Stub modules — empty series with greyed legend entry.
-    const stubColor = "var(--secondary-text-color, #888)";
-    if (!pickHasData((h) => h.battery_charge_kwh) && !pickHasData((h) => h.battery_discharge_kwh)) {
-      // Already added above — replaced placeholders are fine.
-    }
-    if (!pickHasData((h) => h.ev_charge_kwh)) {
-      // Series exists but empty → legend shows greyed.
-    }
-    void stubColor;
+    // All bar (kWh) series share the right axis. We attach the seriesName array
+    // to a single yaxis entry so ApexCharts maps each named series there.
+    const kwhSeriesNames = [
+      "Zużycie real",
+      "Zużycie prog.",
+      "Bateria — ładowanie",
+      "Bateria — rozładowanie",
+      "Import z sieci",
+      "EV ładowanie",
+      ...deviceSeriesNames,
+    ];
 
     const nowTs = Date.now();
     return {
@@ -512,15 +514,16 @@ export class PowerPilotPanel extends LitElement {
         height: 360,
         stacked: false,
         animations: { enabled: false },
-        toolbar: { show: true, tools: { download: false, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true } },
+        toolbar: {
+          show: true,
+          tools: { download: false, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true },
+        },
         zoom: { enabled: true, type: "x" },
         background: "transparent",
       },
       theme: { mode: "dark" },
       stroke: { width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)), curve: "straight" },
-      plotOptions: {
-        bar: { columnWidth: "75%", borderRadius: 1 },
-      },
+      plotOptions: { bar: { columnWidth: "75%", borderRadius: 1 } },
       dataLabels: { enabled: false },
       fill: { opacity: 0.85 },
       series,
@@ -537,15 +540,17 @@ export class PowerPilotPanel extends LitElement {
           min: 0,
           max: 100,
           title: { text: "SoC (%)" },
-          labels: { formatter: (v: number) => v?.toFixed(0) + " %" },
+          labels: { formatter: (v: number) => (v != null ? v.toFixed(0) + " %" : "") },
         },
         {
-          seriesName: "Zużycie real",
+          // Mapping array → all kWh bar series use this axis.
+          seriesName: kwhSeriesNames,
           opposite: true,
           title: { text: "kWh" },
-          labels: { formatter: (v: number) => v?.toFixed(2) },
-          // Make all other column series share this axis.
+          labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
           show: true,
+          forceNiceScale: true,
+          min: 0,
         },
       ],
       tooltip: {
@@ -637,23 +642,19 @@ export class PowerPilotPanel extends LitElement {
       },
       yaxis: [
         {
-          seriesName: "Cena zakupu (pewne)",
+          // PLN/kWh axis — shared by all three line series.
+          seriesName: ["Cena zakupu (pewne)", "Cena zakupu (prognoza)", "Cena w baterii"],
           title: { text: "PLN/kWh" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(3) : "") },
-        },
-        {
-          seriesName: "Cena zakupu (prognoza)",
-          show: false,
-        },
-        {
-          seriesName: "Cena w baterii",
-          show: false,
+          forceNiceScale: true,
         },
         {
           seriesName: "Koszt godziny (PLN)",
           opposite: true,
           title: { text: "PLN/h" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
+          forceNiceScale: true,
+          min: 0,
         },
       ],
       tooltip: {

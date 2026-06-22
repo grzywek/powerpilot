@@ -21,6 +21,7 @@ Outputs per hour: inverter mode (charge/discharge/passthrough), charge power
 | 1 Prices | ✅ | pluggable sources; **prądcast.pl** adapter (confirmed RDN vs D+1..D+3 forecast); retail markup+VAT; learned 7×24 price profile (persisted + daily backfill) |
 | 2 Consumption learning | ✅ | recorder-based weekly base profile = main − Σ(device sensors); per-device profiles; persisted + incremental; energy & power sensors |
 | 6 Frontend | ✅ | **custom Lit panel** auto-registered in sidebar (Overview/Status/Profiles/Logs); WebSocket API; ApexCharts YAML dashboards also shipped |
+| 8 Distribution tariffs | ✅ | `tariff` module: `Tariff(validity_ranges, base_component_kwh, periods)`; OptionsFlow CRUD for tariffs/periods/ranges; `workday.check_date` pre-fetch for future days; H+1 snapshot persisted; optimizer + chart split energy vs distribution |
 | 3 EV + calendar | ⬜ | EV module is a stub (SoC-deficit sizing only); calendar module is a placeholder |
 | 4 Weather + climate | ⬜ | modules are stubs; degree-hour model scaffolded |
 | 5 Optimizer LP/MILP | ⬜ | still the heuristic |
@@ -54,6 +55,13 @@ swappable for an LP solver later.
 
 **Modules** (`custom_components/powerpilot/modules/`)
 - `prices.py` + `price_sources.py` — Sensor & **Pradcast** sources, `PriceProfile`
+- `tariff.py` — distribution tariff (commodity ≠ delivered cost). Resolves the
+  active `Tariff` per day via `models.tariff_for_day`, writes
+  `slot.distribution_price_kwh = base_component_kwh + period.price_kwh` for every
+  future hour, snapshots the current hour into a persistent `Store` (90-day
+  prune, 30 s `async_delay_save`). Future-day workday classification is
+  pre-fetched in `async_update` via the `workday.check_date` HA service and
+  cached per `(entity_id, date)` for the 4-day horizon.
 - `consumption.py` — recorder learner (base + per-device)
 - `ev.py` — `EVRequest` (SoC-deficit sizing) — **stub, expand in Stage 3**
 - `loads.py`, `weather.py`, `climate.py`, `calendar.py` — **stubs/scaffolds**
@@ -135,11 +143,14 @@ Validate JSON with the miniconda python (`/opt/miniconda3/bin/python`); the base
 
 1. **Interactive chart tooltip** (hover → hour values) — pure frontend.
 2. **EV bars on the SoC chart** (`ev_charge_kwh` already in plan/series-able).
-3. **Stage 3 — EV + Apple calendar**: real EV need from calendar trips
+3. **Unit tests for distribution tariffs** (ValidityRange, `tariff_for_day`,
+   base-component arithmetic, `workday.check_date` cache fallback, snapshot
+   lazy create + 90-day prune).
+4. **Stage 3 — EV + Apple calendar**: real EV need from calendar trips
    (home→event→home km), 3-phase shared-phase power coupling, "away" SoC band,
    hourly appliance events (washing 3 kWh/h, ironing 2 kWh/h), reminders.
-4. **Options flow polish**: group into sections + menu; editable charge curve.
-5. **Stage 4** weather/climate; **Stage 5** LP/MILP optimizer.
+5. **Options flow polish**: editable charge curve.
+6. **Stage 4** weather/climate; **Stage 5** LP/MILP optimizer.
 
 ## 10. Quick resume checklist
 
@@ -147,3 +158,6 @@ Validate JSON with the miniconda python (`/opt/miniconda3/bin/python`); the base
 - [ ] `cd frontend && npm install` (node_modules is gitignored).
 - [ ] `source .venv/bin/activate && pytest -q` to confirm green baseline.
 - [ ] Rotate the Pradcast API key if testing live prices.
+- [ ] In HA, configure at least one Tariff (Options → "Taryfy dystrybucyjne").
+      Add a catch-all *Pozaszczyt* period (0–24 h, no day_sensor) before any
+      time-of-day periods so every hour resolves to some price.

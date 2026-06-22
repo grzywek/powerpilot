@@ -18,8 +18,8 @@ decisions.
                                        │ reads
                   ┌────────────────────▼─────────────────────┐
                   │                MODULES                    │
-                  │  prices · consumption · loads · weather   │
-                  │  climate · ev · calendar                  │
+                  │  prices · tariff · consumption · loads ·  │
+                  │  weather · climate · ev · calendar        │
                   └────────────────────┬─────────────────────┘
                                        │ contribute to
                   ┌────────────────────▼─────────────────────┐
@@ -51,6 +51,30 @@ price data is available** (typically D+1 confirmed + several days of forecast).
 A `Forecast` is an ordered list of `HourSlot`s, each carrying everything a module
 knew about that hour: buy/sell price (and whether it is *confirmed* or
 *forecast*), base consumption, extra loads (EV + scheduled), PV, temperature.
+
+### Energy price vs distribution price
+The price from prądcast (or any sensor) is only the **commodity** price of
+energy. The household actually pays `energy + distribution`, where distribution
+depends on time-of-day, workday vs weekend/holiday and the calendar season.
+PowerPilot models this split explicitly:
+
+- `HourSlot.buy_price` is the commodity price (set by the `prices` module).
+- `HourSlot.distribution_price_kwh` is the regulated distribution surcharge
+  for the hour (set by the `tariff` module).
+- `HourSlot.total_price_kwh = buy_price + distribution_price_kwh` is what the
+  optimizer uses for every cost decision.
+
+A `Tariff` carries:
+- a list of `ValidityRange`s — one tariff can cover several seasons (e.g.
+  "G12 zima" active for 2024/25 *and* 2025/26 winters);
+- a flat `base_component_kwh` surcharge added to every matching period
+  (jakościowa + kogeneracyjna + OZE);
+- a list of `TariffPeriod`s, each pinned to an optional `binary_sensor`
+  (`workday` etc.) and a `start_hour..end_hour` window (wrap-around safe).
+
+Future-day workday classification is pre-fetched via the HA
+`workday.check_date` service so the same `binary_sensor.workday` entity can
+report on each day in the 4-day horizon.
 
 ### BatteryModel and cost-after-losses
 A central requirement: **PowerPilot must always know the price of the energy
@@ -117,6 +141,7 @@ custom_components/powerpilot/
   modules/
     base.py            PowerPilotModule + registry
     prices.py          dynamic-tariff price sources (confirmed > forecast)
+    tariff.py          distribution-tariff module (energy + distribution split)
     consumption.py     weekly consumption profile from a power sensor
     loads.py           scheduled extra loads (washer, dishwasher, ironing)
     ev.py              EV SoC / location / range → charging need

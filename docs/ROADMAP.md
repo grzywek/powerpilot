@@ -70,3 +70,38 @@ integration installable and working.
 ## Stage 7 – Hardening
 - [ ] Tests for battery math, optimizer decisions, module contributions.
 - [ ] HACS release metadata, diagnostics, repair issues.
+
+## Stage 8 – Distribution tariffs ✅
+The price coming from prądcast (or any sensor) is only the **commodity** price
+of energy. The household actually pays `energy + distribution`, where the
+distribution component depends on time-of-day, day-of-week (workday vs
+weekend/holiday) and the calendar season. PowerPilot models this as a separate
+`tariff` module so a single Tariff definition can cover multiple validity
+ranges (e.g. one "G12 zima" tariff active for both 2024/25 and 2025/26 winters).
+
+- [x] **Etap A** — Data model: `Tariff` (with `list[ValidityRange]` and a flat
+      `base_component_kwh` surcharge applied to every period) and `TariffPeriod`
+      (day-sensor + start/end hour with wrap-around). `HourSlot` gained
+      `distribution_price_kwh` and a computed `total_price_kwh = buy_price +
+      distribution_price_kwh`.
+- [x] **Etap B** — Multi-step OptionsFlow (`tariff_list → tariff_form →
+      period_list → {period_form | range_list → range_form}`). Catch-all
+      "Pozaszczyt" is modelled as an explicit 0–24 h period without a
+      `day_sensor` so the user can see and adjust it.
+- [x] **Etap C** — `TariffModule` writes `slot.distribution_price_kwh` for every
+      future hour and snapshots the current hour to a persistent `Store` so the
+      historical cost stays stable. Future-day workday classification is
+      pre-fetched in `async_update` via the `workday.check_date` service and
+      cached per `(entity_id, date)`.
+- [x] **Etap D** — Optimizer percentiles + battery decisions now run on
+      `total_price`, and `Decision.energy_cost / Decision.distribution_cost`
+      break the per-hour cost into its two components. `coordinator.get_series`
+      exposes both prices and both costs (past via the snapshot, future via the
+      decision). The frontend price chart shows five PLN/kWh lines (energy
+      confirmed/forecast, distribution, total confirmed/forecast) and two
+      stacked PLN/h columns that sum to the hour total. The Status tab gains a
+      "Taryfa dystrybucyjna" check.
+
+## Stage 9 – Hardening (continued)
+- [ ] Unit tests for the new tariff model (validity ranges, base component,
+      `tariff_for_day`, `workday.check_date` cache hits/misses).

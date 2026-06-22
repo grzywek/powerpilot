@@ -167,6 +167,10 @@ export class PowerPilotPanel extends LitElement {
   private _timer?: number;
   private _energyChart?: ApexCharts;
   private _priceChart?: ApexCharts;
+  /** Reference to the last Series payload mounted into the charts. Used to
+   *  short-circuit Lit updates that don't actually change the data, so user
+   *  interactions (zoom, tooltip) survive periodic refreshes. */
+  private _lastMountedSeries?: Series;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -391,12 +395,13 @@ export class PowerPilotPanel extends LitElement {
         this._priceChart?.destroy();
         this._energyChart = undefined;
         this._priceChart = undefined;
+        this._lastMountedSeries = undefined;
       }
       return;
     }
-    // Always attempt mount/update on overview tab: divs may have only just
-    // appeared (e.g. _plan loaded after _series), and ApexCharts handles
-    // option diffs cheaply.
+    // Mount or update on overview tab. _mountOrUpdateCharts short-circuits
+    // when the Series reference hasn't changed, so unrelated state updates
+    // (legend hover, tooltip show/hide, log polling) don't trash zoom state.
     this._mountOrUpdateCharts();
   }
 
@@ -407,21 +412,31 @@ export class PowerPilotPanel extends LitElement {
     const priceEl = this.renderRoot.querySelector("#pp-chart-prices") as HTMLElement | null;
     if (!energyEl || !priceEl) return;
 
+    // If the Series reference hasn't changed since the last mount AND both
+    // charts already exist, skip — this prevents the periodic 60s refresh
+    // (and any unrelated Lit update) from resetting zoom/tooltip state.
+    if (s === this._lastMountedSeries && this._energyChart && this._priceChart) {
+      return;
+    }
+
     const energyOpts = this._buildEnergyOptions(s);
     const priceOpts = this._buildPriceOptions(s);
 
     if (this._energyChart) {
-      this._energyChart.updateOptions(energyOpts, true, true);
+      // `redrawPaths=false, animate=false` keeps zoom + tooltip state alive
+      // through the data refresh; ApexCharts patches the SVG in place.
+      this._energyChart.updateOptions(energyOpts, false, false);
     } else {
       this._energyChart = new ApexCharts(energyEl, energyOpts);
       this._energyChart.render();
     }
     if (this._priceChart) {
-      this._priceChart.updateOptions(priceOpts, true, true);
+      this._priceChart.updateOptions(priceOpts, false, false);
     } else {
       this._priceChart = new ApexCharts(priceEl, priceOpts);
       this._priceChart.render();
     }
+    this._lastMountedSeries = s;
   }
 
   /** Build ApexCharts options for the energy chart (kWh bars + SoC %, line). */

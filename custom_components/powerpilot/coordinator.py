@@ -45,6 +45,7 @@ from .modules import (
     LoadsModule,
     ModuleRegistry,
     PriceModule,
+    TariffModule,
     WeatherModule,
 )
 from .optimizer import ChargeCurve, Optimizer, OptimizerConfig
@@ -71,6 +72,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.registry = ModuleRegistry()
         self.consumption = ConsumptionModule(hass, self)
         self.prices = PriceModule(hass, self)
+        self.tariff = TariffModule(hass, self)
         self.loads = LoadsModule(hass, self)
         self.weather = WeatherModule(hass, self)
         self.climate = ClimateModule(hass, self)
@@ -80,6 +82,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # Order matters: prices/weather first, then derived loads, then EV.
         for module in (
             self.prices,
+            self.tariff,
             self.consumption,
             self.weather,
             self.climate,

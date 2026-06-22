@@ -9,6 +9,7 @@ from .consumption import ConsumptionModule
 from .ev import EVModule, EVRequest
 from .loads import LoadsModule, ScheduledLoad
 from .prices import PriceModule
+from .tariff import TariffModule
 from .weather import WeatherModule
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "LoadsModule",
     "ScheduledLoad",
     "PriceModule",
+    "TariffModule",
     "WeatherModule",
 ]

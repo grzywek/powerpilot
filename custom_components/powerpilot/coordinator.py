@@ -1,0 +1,146 @@
+"""PowerPilot DataUpdateCoordinator.
+
+Runs the full pipeline on a fixed interval:
+
+    modules.update → ForecastBuilder.build → Optimizer.optimize → Plan
+
+and exposes the resulting :class:`Plan` to the entities.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from .battery import BatteryModel
+from .const import (
+    CONF_BATTERY_CAPACITY_KWH,
+    CONF_BATTERY_WEAR_COST,
+    CONF_CHARGE_CURVE,
+    CONF_CHARGE_EFFICIENCY,
+    CONF_DISCHARGE_EFFICIENCY,
+    CONF_GRID_DISCONNECT_SOC,
+    CONF_INVERTER_MAX_CHARGE_KW,
+    CONF_INVERTER_MAX_DISCHARGE_KW,
+    CONF_MAX_SOC,
+    CONF_MIN_SOC,
+    CONF_SOC_SENSOR,
+    DEFAULT_UPDATE_INTERVAL_MINUTES,
+    DEFAULTS,
+    DOMAIN,
+)
+from .forecast import ForecastBuilder
+from .models import Plan
+from .modules import (
+    CalendarModule,
+    ClimateModule,
+    ConsumptionModule,
+    EVModule,
+    LoadsModule,
+    ModuleRegistry,
+    PriceModule,
+    WeatherModule,
+)
+from .optimizer import ChargeCurve, Optimizer, OptimizerConfig
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
+    """Coordinates modules, forecast and optimizer."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.entry = entry
+        self.config: dict = {**DEFAULTS, **entry.data, **entry.options}
+        self._battery_energy_cost = 0.0
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=timedelta(minutes=DEFAULT_UPDATE_INTERVAL_MINUTES),
+        )
+
+        self.registry = ModuleRegistry()
+        self.consumption = ConsumptionModule(hass, self)
+        self.prices = PriceModule(hass, self)
+        self.loads = LoadsModule(hass, self)
+        self.weather = WeatherModule(hass, self)
+        self.climate = ClimateModule(hass, self)
+        self.ev = EVModule(hass, self)
+        self.calendar = CalendarModule(hass, self)
+
+        # Order matters: prices/weather first, then derived loads, then EV.
+        for module in (
+            self.prices,
+            self.consumption,
+            self.weather,
+            self.climate,
+            self.loads,
+            self.ev,
+            self.calendar,
+        ):
+            self.registry.register(module)
+
+        self.forecast_builder = ForecastBuilder(self.registry)
+
+    async def async_setup_modules(self) -> None:
+        await self.registry.async_setup_all()
+
+    def _build_battery(self) -> BatteryModel:
+        soc = self._read_soc()
+        return BatteryModel(
+            capacity_kwh=float(self.config[CONF_BATTERY_CAPACITY_KWH]),
+            charge_efficiency=float(self.config[CONF_CHARGE_EFFICIENCY]),
+            discharge_efficiency=float(self.config[CONF_DISCHARGE_EFFICIENCY]),
+            wear_cost=float(self.config[CONF_BATTERY_WEAR_COST]),
+            min_soc=float(self.config[CONF_MIN_SOC]),
+            max_soc=float(self.config[CONF_MAX_SOC]),
+            soc=soc,
+            energy_cost=self._battery_energy_cost,
+        )
+
+    def _read_soc(self) -> float:
+        entity_id = self.config.get(CONF_SOC_SENSOR)
+        if entity_id:
+            state = self.hass.states.get(entity_id)
+            if state is not None:
+                try:
+                    return float(state.state)
+                except (TypeError, ValueError):
+                    pass
+        return 50.0
+
+    def _build_optimizer(self) -> Optimizer:
+        curve = ChargeCurve(
+            default_kw=float(self.config[CONF_INVERTER_MAX_CHARGE_KW]),
+            segments=list(self.config.get(CONF_CHARGE_CURVE) or []),
+        )
+        return Optimizer(
+            OptimizerConfig(
+                inverter_max_charge_kw=float(self.config[CONF_INVERTER_MAX_CHARGE_KW]),
+                inverter_max_discharge_kw=float(self.config[CONF_INVERTER_MAX_DISCHARGE_KW]),
+                grid_disconnect_soc=float(self.config[CONF_GRID_DISCONNECT_SOC]),
+                charge_curve=curve,
+            )
+        )
+
+    async def _async_update_data(self) -> Plan:
+        await self.registry.async_update_all()
+
+        forecast = await self.hass.async_add_executor_job(self.forecast_builder.build)
+        ev_request = self.ev.get_request(forecast)
+        reminders = self.registry.collect_reminders()
+
+        battery = self._build_battery()
+        optimizer = self._build_optimizer()
+        plan = optimizer.optimize(forecast, battery, ev_request, reminders)
+
+        if plan.current is not None:
+            self._battery_energy_cost = plan.current.battery_energy_cost
+
+        return plan

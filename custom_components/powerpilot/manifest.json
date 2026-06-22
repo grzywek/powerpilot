@@ -1,0 +1,14 @@
+{
+  "domain": "powerpilot",
+  "name": "PowerPilot",
+  "version": "0.1.0",
+  "documentation": "https://github.com/dawid/powerpilot",
+  "issue_tracker": "https://github.com/dawid/powerpilot/issues",
+  "dependencies": [],
+  "after_dependencies": ["recorder", "weather", "calendar"],
+  "codeowners": ["@dawid"],
+  "config_flow": true,
+  "iot_class": "calculated",
+  "integration_type": "service",
+  "requirements": []
+}

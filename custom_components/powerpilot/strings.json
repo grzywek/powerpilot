@@ -1,0 +1,119 @@
+{
+  "config": {
+    "single_instance_allowed": "PowerPilot is already configured.",
+    "step": {
+      "user": {
+        "title": "PowerPilot – core setup",
+        "description": "Grid, battery and inverter parameters, plus the sensors PowerPilot should read.",
+        "data": {
+          "phases": "Grid phases (1 or 3)",
+          "main_fuse_a": "Main breaker rating (A)",
+          "battery_capacity_kwh": "Battery capacity (kWh)",
+          "inverter_max_charge_kw": "Inverter max charge power (kW)",
+          "inverter_max_discharge_kw": "Inverter max discharge power (kW)",
+          "charge_efficiency": "Charge efficiency",
+          "discharge_efficiency": "Discharge efficiency",
+          "battery_wear_cost": "Battery wear cost (PLN/kWh)",
+          "min_soc": "Minimum SoC (%)",
+          "max_soc": "Maximum SoC (%)",
+          "grid_disconnect_soc": "Grid-disconnect SoC (%)",
+          "soc_sensor": "Battery SoC sensor",
+          "consumption_sensor": "Household consumption sensor",
+          "buy_price_sensor": "Buy price sensor",
+          "sell_price_sensor": "Sell price sensor",
+          "weather_entity": "Weather entity"
+        }
+      },
+      "prices": {
+        "title": "PowerPilot – prices",
+        "description": "Choose where dynamic prices come from. Pradcast pulls confirmed RDN + D+1..D+3 forecasts from api.pradcast.pl.",
+        "data": {
+          "price_source": "Price source",
+          "pradcast_api_key": "Pradcast API key",
+          "price_markup": "Retail markup (PLN/kWh)",
+          "price_vat": "VAT multiplier"
+        }
+      },
+      "ev": {
+        "title": "PowerPilot – EV",
+        "description": "Optional electric-vehicle charging optimization.",
+        "data": {
+          "ev_enabled": "Enable EV optimization",
+          "ev_soc_sensor": "EV SoC sensor",
+          "ev_location_sensor": "EV location (home/away)",
+          "ev_range_km": "Range on a full charge (km)",
+          "ev_battery_kwh": "EV battery capacity (kWh)",
+          "ev_weekly_km": "Weekly off-calendar km",
+          "ev_charger_kw": "Charger power per phase (kW)"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "PowerPilot – core setup",
+        "data": {
+          "phases": "Grid phases (1 or 3)",
+          "main_fuse_a": "Main breaker rating (A)",
+          "battery_capacity_kwh": "Battery capacity (kWh)",
+          "inverter_max_charge_kw": "Inverter max charge power (kW)",
+          "inverter_max_discharge_kw": "Inverter max discharge power (kW)",
+          "charge_efficiency": "Charge efficiency",
+          "discharge_efficiency": "Discharge efficiency",
+          "battery_wear_cost": "Battery wear cost (PLN/kWh)",
+          "min_soc": "Minimum SoC (%)",
+          "max_soc": "Maximum SoC (%)",
+          "grid_disconnect_soc": "Grid-disconnect SoC (%)",
+          "soc_sensor": "Battery SoC sensor",
+          "consumption_sensor": "Household consumption sensor",
+          "buy_price_sensor": "Buy price sensor",
+          "sell_price_sensor": "Sell price sensor",
+          "weather_entity": "Weather entity"
+        }
+      },
+      "prices": {
+        "title": "PowerPilot – prices",
+        "data": {
+          "price_source": "Price source",
+          "pradcast_api_key": "Pradcast API key",
+          "price_markup": "Retail markup (PLN/kWh)",
+          "price_vat": "VAT multiplier"
+        }
+      },
+      "ev": {
+        "title": "PowerPilot – EV",
+        "data": {
+          "ev_enabled": "Enable EV optimization",
+          "ev_soc_sensor": "EV SoC sensor",
+          "ev_location_sensor": "EV location (home/away)",
+          "ev_range_km": "Range on a full charge (km)",
+          "ev_battery_kwh": "EV battery capacity (kWh)",
+          "ev_weekly_km": "Weekly off-calendar km",
+          "ev_charger_kw": "Charger power per phase (kW)"
+        }
+      }
+    }
+  },
+  "selector": {
+    "price_source": {
+      "options": {
+        "sensor": "Home Assistant sensor",
+        "pradcast": "prądcast.pl API"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "inverter_mode": { "name": "Inverter mode" },
+      "charge_power": { "name": "Charge power" },
+      "battery_energy_cost": { "name": "Battery energy cost" },
+      "plan": { "name": "Optimization plan" },
+      "next_action": { "name": "Next action" }
+    },
+    "binary_sensor": {
+      "grid_connected": { "name": "Grid connected" },
+      "ev_charge": { "name": "EV charge" }
+    }
+  }
+}

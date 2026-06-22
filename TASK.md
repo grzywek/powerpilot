@@ -1,4 +1,4 @@
-robimy rozszerzenie do home assistant, które ma mi pomóc optymalizować wykorzystanie energy storage w mieszkaniu.
+robimy rozszerzenie do home assistant, które ma mi pomóc optymalizować wykorzystanie energy storage w mieszkaniu. celem jest takie sterowanie ładowaniem, rozładowaniem, passthrough żeby zminimalizować koszt energii w mieszkaniu. dodatkowym utrudnieniem jest kalkulacja EV i godzin jego ładowania.
 
 zaplanuj core i moduły, tak żebysmy sobie mogli rozwijac to rozwiązanie elastycznie o kolejne funkcje. zaplanuj pracę i podziel na etapy. wykorzystaj istniejące biblioteki jesli moga sie do czegos przydać oraz best practice pisania rozerzen do home assistant. jesli cos jest nie jasne, zapytaj i sprobuj uszczegolowic.
 
@@ -8,6 +8,8 @@ głównym ekranem programu ma być wykres:
 - widoczny soc, zużycie, ładowanie, tryb falownika itp.
 i drugi wykres cen:
 - cena zakupu energii, cena energii w baterii po stratach itp
+
+prognoza ma być tak daleka jak pozwalają informacje o cenach w systemie
 
 potrzebne są różne moduły, między innymi:
 ceny - mam taryfę dynamiczną. każdej godziny jest inna cena. mam źródła tych cen - jedne to prognozy (na d+1, d+2, d+3), a drugie to ceny pewne (potwierdzone), zwykle na 24 godziny do przodu publikowane około godz. 11. czyli cena pewna > cena prognozowana. czyli w konfiguracji będą różne źródła cen i potem zajmiemy się konkretnym źródłem (integrcja API)

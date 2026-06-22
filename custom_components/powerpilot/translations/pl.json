@@ -1,0 +1,121 @@
+{
+  "config": {
+    "abort": {
+      "single_instance_allowed": "PowerPilot jest już skonfigurowany."
+    },
+    "step": {
+      "user": {
+        "title": "PowerPilot – konfiguracja podstawowa",
+        "description": "Parametry sieci, baterii i falownika oraz sensory, które PowerPilot ma odczytywać.",
+        "data": {
+          "phases": "Liczba faz (1 lub 3)",
+          "main_fuse_a": "Zabezpieczenie przedlicznikowe (A)",
+          "battery_capacity_kwh": "Pojemność baterii (kWh)",
+          "inverter_max_charge_kw": "Maks. moc ładowania falownika (kW)",
+          "inverter_max_discharge_kw": "Maks. moc rozładowania falownika (kW)",
+          "charge_efficiency": "Sprawność ładowania",
+          "discharge_efficiency": "Sprawność rozładowania",
+          "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh)",
+          "min_soc": "Minimalny SoC (%)",
+          "max_soc": "Maksymalny SoC (%)",
+          "grid_disconnect_soc": "SoC odłączenia od sieci (%)",
+          "soc_sensor": "Sensor SoC baterii",
+          "consumption_sensor": "Sensor zużycia mieszkania",
+          "buy_price_sensor": "Sensor ceny zakupu",
+          "sell_price_sensor": "Sensor ceny sprzedaży",
+          "weather_entity": "Encja pogody"
+        }
+      },
+      "prices": {
+        "title": "PowerPilot – ceny",
+        "description": "Wybierz źródło cen dynamicznych. Pradcast pobiera potwierdzone ceny RDN oraz prognozy D+1..D+3 z api.pradcast.pl.",
+        "data": {
+          "price_source": "Źródło cen",
+          "pradcast_api_key": "Klucz API Pradcast",
+          "price_markup": "Narzut detaliczny (PLN/kWh)",
+          "price_vat": "Mnożnik VAT"
+        }
+      },
+      "ev": {
+        "title": "PowerPilot – samochód elektryczny",
+        "description": "Opcjonalna optymalizacja ładowania EV.",
+        "data": {
+          "ev_enabled": "Włącz optymalizację EV",
+          "ev_soc_sensor": "Sensor SoC EV",
+          "ev_location_sensor": "Lokalizacja EV (dom/poza domem)",
+          "ev_range_km": "Zasięg na pełnej baterii (km)",
+          "ev_battery_kwh": "Pojemność baterii EV (kWh)",
+          "ev_weekly_km": "Tygodniowe km poza kalendarzem",
+          "ev_charger_kw": "Moc ładowarki na fazę (kW)"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "PowerPilot – konfiguracja podstawowa",
+        "data": {
+          "phases": "Liczba faz (1 lub 3)",
+          "main_fuse_a": "Zabezpieczenie przedlicznikowe (A)",
+          "battery_capacity_kwh": "Pojemność baterii (kWh)",
+          "inverter_max_charge_kw": "Maks. moc ładowania falownika (kW)",
+          "inverter_max_discharge_kw": "Maks. moc rozładowania falownika (kW)",
+          "charge_efficiency": "Sprawność ładowania",
+          "discharge_efficiency": "Sprawność rozładowania",
+          "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh)",
+          "min_soc": "Minimalny SoC (%)",
+          "max_soc": "Maksymalny SoC (%)",
+          "grid_disconnect_soc": "SoC odłączenia od sieci (%)",
+          "soc_sensor": "Sensor SoC baterii",
+          "consumption_sensor": "Sensor zużycia mieszkania",
+          "buy_price_sensor": "Sensor ceny zakupu",
+          "sell_price_sensor": "Sensor ceny sprzedaży",
+          "weather_entity": "Encja pogody"
+        }
+      },
+      "prices": {
+        "title": "PowerPilot – ceny",
+        "data": {
+          "price_source": "Źródło cen",
+          "pradcast_api_key": "Klucz API Pradcast",
+          "price_markup": "Narzut detaliczny (PLN/kWh)",
+          "price_vat": "Mnożnik VAT"
+        }
+      },
+      "ev": {
+        "title": "PowerPilot – samochód elektryczny",
+        "data": {
+          "ev_enabled": "Włącz optymalizację EV",
+          "ev_soc_sensor": "Sensor SoC EV",
+          "ev_location_sensor": "Lokalizacja EV (dom/poza domem)",
+          "ev_range_km": "Zasięg na pełnej baterii (km)",
+          "ev_battery_kwh": "Pojemność baterii EV (kWh)",
+          "ev_weekly_km": "Tygodniowe km poza kalendarzem",
+          "ev_charger_kw": "Moc ładowarki na fazę (kW)"
+        }
+      }
+    }
+  },
+  "selector": {
+    "price_source": {
+      "options": {
+        "sensor": "Sensor Home Assistant",
+        "pradcast": "API prądcast.pl"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "inverter_mode": { "name": "Tryb falownika" },
+      "charge_power": { "name": "Moc ładowania" },
+      "battery_energy_cost": { "name": "Cena energii w baterii" },
+      "plan": { "name": "Plan optymalizacji" },
+      "next_action": { "name": "Następna akcja" }
+    },
+    "binary_sensor": {
+      "grid_connected": { "name": "Połączenie z siecią" },
+      "ev_charge": { "name": "Ładowanie EV" }
+    }
+  }
+}

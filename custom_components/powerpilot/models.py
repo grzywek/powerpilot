@@ -222,21 +222,19 @@ class TariffPeriod:
 
 
 @dataclass
-class Tariff:
-    """A distribution tariff, valid on a date range, composed of TOU periods.
+class ValidityRange:
+    """A closed/half-open calendar range when a tariff (season) is in force.
 
-    Periods are evaluated *in order* — the first matching period wins. If no
-    period matches, ``fallback_price_kwh`` is used.
+    ``valid_from`` / ``valid_to`` are inclusive dates. ``None`` means open-ended.
+    A tariff may have several disjoint ranges to model recurring seasons
+    (e.g. winter 2024/25 + winter 2025/26 share one definition).
     """
 
-    name: str
-    fallback_price_kwh: float  # PLN/kWh, used when no period matches
-    valid_from: date | None = None  # inclusive, ``None`` = open-ended past
-    valid_to: date | None = None  # inclusive, ``None`` = open-ended future
-    periods: list[TariffPeriod] = field(default_factory=list)
+    valid_from: date | None = None
+    valid_to: date | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
 
-    def is_active_on(self, day: date) -> bool:
+    def contains(self, day: date) -> bool:
         if self.valid_from is not None and day < self.valid_from:
             return False
         if self.valid_to is not None and day > self.valid_to:
@@ -246,21 +244,75 @@ class Tariff:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
-            "name": self.name,
-            "fallback_price_kwh": self.fallback_price_kwh,
             "valid_from": self.valid_from.isoformat() if self.valid_from else None,
             "valid_to": self.valid_to.isoformat() if self.valid_to else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ValidityRange":
+        return cls(
+            id=str(data.get("id") or uuid4().hex),
+            valid_from=_parse_date(data.get("valid_from")),
+            valid_to=_parse_date(data.get("valid_to")),
+        )
+
+
+@dataclass
+class Tariff:
+    """A distribution tariff with TOU periods and one or more validity ranges.
+
+    Pricing model: ``base_component_kwh`` is a flat surcharge added to the
+    matching period's ``price_kwh`` for every hour. The user is responsible for
+    adding a catch-all "pozaszczyt" period (``day_sensor=None``, hours 0-24) so
+    that *some* period always matches.
+    """
+
+    name: str
+    base_component_kwh: float  # PLN/kWh, flat surcharge added to every hour
+    periods: list[TariffPeriod] = field(default_factory=list)
+    validity_ranges: list[ValidityRange] = field(default_factory=list)
+    id: str = field(default_factory=lambda: uuid4().hex)
+
+    def is_active_on(self, day: date) -> bool:
+        if not self.validity_ranges:
+            return True  # No ranges declared → always active.
+        return any(r.contains(day) for r in self.validity_ranges)
+
+    def earliest_active_start(self, day: date) -> date | None:
+        """Return the ``valid_from`` of the range covering ``day`` (or None)."""
+        for r in self.validity_ranges:
+            if r.contains(day):
+                return r.valid_from
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "base_component_kwh": self.base_component_kwh,
+            "validity_ranges": [r.to_dict() for r in self.validity_ranges],
             "periods": [p.to_dict() for p in self.periods],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Tariff":
+        # Back-compat: pre-C.1 stored a single (valid_from, valid_to) + fallback_price_kwh.
+        validity_raw = data.get("validity_ranges")
+        if not validity_raw:
+            legacy_from = data.get("valid_from")
+            legacy_to = data.get("valid_to")
+            if legacy_from or legacy_to:
+                validity_raw = [{"valid_from": legacy_from, "valid_to": legacy_to}]
+            else:
+                validity_raw = []
+        base = data.get("base_component_kwh")
+        if base is None:
+            base = data.get("fallback_price_kwh", 0.0)
         return cls(
             id=str(data.get("id") or uuid4().hex),
             name=str(data.get("name") or ""),
-            fallback_price_kwh=float(data.get("fallback_price_kwh", 0.0)),
-            valid_from=_parse_date(data.get("valid_from")),
-            valid_to=_parse_date(data.get("valid_to")),
+            base_component_kwh=float(base),
+            validity_ranges=[ValidityRange.from_dict(r) for r in validity_raw],
             periods=[TariffPeriod.from_dict(p) for p in (data.get("periods") or [])],
         )
 
@@ -268,18 +320,17 @@ class Tariff:
 def tariff_for_day(tariffs: list[Tariff], day: date) -> Tariff | None:
     """Pick the tariff active on ``day``.
 
-    When multiple tariffs overlap (shouldn't happen but is possible if the user
-    misconfigured ranges), the one with the *most specific* ``valid_from`` wins,
-    falling back to declaration order.
+    When multiple tariffs overlap, the one whose covering range has the latest
+    ``valid_from`` wins; declaration order breaks final ties.
     """
     candidates = [t for t in tariffs if t.is_active_on(day)]
     if not candidates:
         return None
-    candidates.sort(
-        key=lambda t: (
-            t.valid_from is None,  # bounded ranges sort first
-            -(t.valid_from.toordinal() if t.valid_from else 0),
-        )
-    )
+
+    def _sort_key(t: Tariff) -> tuple[bool, int]:
+        start = t.earliest_active_start(day)
+        return (start is None, -(start.toordinal() if start else 0))
+
+    candidates.sort(key=_sort_key)
     return candidates[0]
 

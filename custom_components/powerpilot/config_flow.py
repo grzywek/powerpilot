@@ -48,14 +48,12 @@ from .const import (
     CONF_SOC_SENSOR,
     CONF_TARIFFS,
     CONF_WEATHER_ENTITY,
-    CONF_WORKDAY_PLUS_N_SENSORS,
     DEFAULTS,
     DOMAIN,
-    MAX_WORKDAY_PLUS_N,
     PRICE_SOURCE_PRADCAST,
     PRICE_SOURCE_SENSOR,
 )
-from .models import Tariff, TariffPeriod
+from .models import Tariff, TariffPeriod, ValidityRange
 
 _NUMBER = selector.NumberSelector
 _NUM = selector.NumberSelectorConfig
@@ -228,15 +226,16 @@ class PowerPilotConfigFlow(ConfigFlow, domain=DOMAIN):
 class PowerPilotOptionsFlow(OptionsFlow):
     """Menu-based options flow.
 
-    The init step shows a menu; each sub-section (core, prices, EV, tariffs,
-    workday sensors) saves into ``self._data`` and returns to the menu. The
-    user finalises by picking *Save & exit* from the menu.
+    The init step shows a menu; each sub-section (core, prices, EV, tariffs)
+    saves into ``self._data`` and returns to the menu. The user finalises by
+    picking *Save & exit* from the menu.
 
     Tariff editing is multi-level:
 
         tariff_list ──► tariff_form ──► period_list ──► period_form
-                ▲           │              ▲   │
-                └───────────┘              └───┘  (loops until ← Back)
+                ▲                          │   │
+                │                          │   └► range_list ──► range_form
+                └──────────────────────────┘
     """
 
     def __init__(self) -> None:
@@ -245,6 +244,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
         # Edit context for the tariff sub-flow.
         self._editing_tariff_id: str | None = None
         self._editing_period_id: str | None = None
+        self._editing_range_id: str | None = None
 
     # ------------------------------------------------------------------ utils
 
@@ -280,7 +280,6 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 "prices",
                 "ev",
                 "tariff_list",
-                "workday_sensors",
                 "finish",
             ],
         )
@@ -312,32 +311,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
             return await self.async_step_init()
         return self.async_show_form(step_id="ev", data_schema=_ev_schema(self._data))
 
-    # ------------------------------------------------------------- workday D+N
-
-    async def async_step_workday_sensors(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        self._ensure_loaded()
-        existing = self._data.get(CONF_WORKDAY_PLUS_N_SENSORS) or []
-        if user_input is not None:
-            sensors: list[str] = []
-            for n in range(1, MAX_WORKDAY_PLUS_N + 1):
-                value = user_input.get(f"d{n}")
-                sensors.append(value or "")
-            # Strip trailing empties so we don't persist [..., "", "", ""].
-            while sensors and not sensors[-1]:
-                sensors.pop()
-            self._data[CONF_WORKDAY_PLUS_N_SENSORS] = sensors
-            return await self.async_step_init()
-
-        schema_dict: dict[Any, Any] = {}
-        for n in range(1, MAX_WORKDAY_PLUS_N + 1):
-            current = existing[n - 1] if n - 1 < len(existing) else None
-            schema_dict[vol.Optional(f"d{n}", default=current or vol.UNDEFINED)] = _entity("binary_sensor")
-        return self.async_show_form(
-            step_id="workday_sensors",
-            data_schema=vol.Schema(schema_dict),
-        )
-
-    # -------------------------------------------------------------- tariff list
+    # ------------------------------------------------------------- tariff list
 
     async def async_step_tariff_list(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._ensure_loaded()
@@ -364,12 +338,8 @@ class PowerPilotOptionsFlow(OptionsFlow):
             selector.SelectOptionDict(value="__add__", label="➕ Dodaj nową taryfę"),
         ]
         for t in tariffs:
-            range_label = ""
-            if t.valid_from or t.valid_to:
-                range_label = (
-                    f" ({t.valid_from.isoformat() if t.valid_from else '…'}"
-                    f" → {t.valid_to.isoformat() if t.valid_to else '…'})"
-                )
+            range_count = len(t.validity_ranges)
+            range_label = f" ({range_count} zakr.)" if range_count else " (zawsze)"
             options.append(
                 selector.SelectOptionDict(
                     value=f"edit:{t.id}",
@@ -406,22 +376,12 @@ class PowerPilotOptionsFlow(OptionsFlow):
         existing = self._current_tariff()
 
         if user_input is not None:
-            from datetime import date as _date
-
-            def _to_date(value: Any) -> _date | None:
-                if not value:
-                    return None
-                if isinstance(value, _date):
-                    return value
-                return _date.fromisoformat(str(value))
-
             tariffs = self._tariffs()
             new_tariff = Tariff(
                 id=existing.id if existing else uuid4().hex,
                 name=str(user_input["name"]).strip(),
-                fallback_price_kwh=float(user_input["fallback_price_kwh"]),
-                valid_from=_to_date(user_input.get("valid_from")),
-                valid_to=_to_date(user_input.get("valid_to")),
+                base_component_kwh=float(user_input["base_component_kwh"]),
+                validity_ranges=existing.validity_ranges if existing else [],
                 periods=existing.periods if existing else [],
             )
             if existing:
@@ -434,18 +394,14 @@ class PowerPilotOptionsFlow(OptionsFlow):
 
         defaults = {
             "name": existing.name if existing else "",
-            "fallback_price_kwh": existing.fallback_price_kwh if existing else 0.0392,
-            "valid_from": existing.valid_from.isoformat() if existing and existing.valid_from else vol.UNDEFINED,
-            "valid_to": existing.valid_to.isoformat() if existing and existing.valid_to else vol.UNDEFINED,
+            "base_component_kwh": existing.base_component_kwh if existing else 0.0435,
         }
         schema = vol.Schema(
             {
                 vol.Required("name", default=defaults["name"]): selector.TextSelector(),
-                vol.Required("fallback_price_kwh", default=defaults["fallback_price_kwh"]): _NUMBER(
+                vol.Required("base_component_kwh", default=defaults["base_component_kwh"]): _NUMBER(
                     _NUM(min=0, max=5, step="any", unit_of_measurement="PLN/kWh", mode="box")
                 ),
-                vol.Optional("valid_from", default=defaults["valid_from"]): selector.DateSelector(),
-                vol.Optional("valid_to", default=defaults["valid_to"]): selector.DateSelector(),
             }
         )
         return self.async_show_form(
@@ -473,6 +429,8 @@ class PowerPilotOptionsFlow(OptionsFlow):
             if action == "__add__":
                 self._editing_period_id = None
                 return await self.async_step_period_form()
+            if action == "__ranges__":
+                return await self.async_step_range_list()
             kind, _, pid = action.partition(":")
             if kind == "edit":
                 self._editing_period_id = pid
@@ -488,6 +446,10 @@ class PowerPilotOptionsFlow(OptionsFlow):
 
         options: list[selector.SelectOptionDict] = [
             selector.SelectOptionDict(value="__add__", label="➕ Dodaj okres"),
+            selector.SelectOptionDict(
+                value="__ranges__",
+                label=f"📅 Daty obowiązywania ({len(tariff.validity_ranges)})",
+            ),
         ]
         for p in tariff.periods:
             options.append(
@@ -515,7 +477,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
             ),
             description_placeholders={
                 "tariff_name": tariff.name,
-                "fallback_price": f"{tariff.fallback_price_kwh:.4f}",
+                "base_component": f"{tariff.base_component_kwh:.4f}",
                 "count": str(len(tariff.periods)),
             },
         )
@@ -555,7 +517,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
             "name": existing.name if existing else "",
             "hour_from": existing.hour_from if existing else 0,
             "hour_to": existing.hour_to if existing else 24,
-            "price_kwh": existing.price_kwh if existing else tariff.fallback_price_kwh,
+            "price_kwh": existing.price_kwh if existing else 0.0,
             "day_sensor": existing.day_sensor if existing and existing.day_sensor else vol.UNDEFINED,
         }
         schema = vol.Schema(
@@ -575,6 +537,136 @@ class PowerPilotOptionsFlow(OptionsFlow):
         )
         return self.async_show_form(
             step_id="period_form",
+            data_schema=schema,
+            description_placeholders={
+                "mode": "edycja" if existing else "nowy",
+                "tariff_name": tariff.name,
+            },
+        )
+
+    # ---------------------------------------------------------- validity ranges
+
+    async def async_step_range_list(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        tariff = self._current_tariff()
+        if tariff is None:
+            return await self.async_step_tariff_list()
+
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "__back__":
+                return await self.async_step_period_list()
+            if action == "__add__":
+                self._editing_range_id = None
+                return await self.async_step_range_form()
+            kind, _, rid = action.partition(":")
+            if kind == "edit":
+                self._editing_range_id = rid
+                return await self.async_step_range_form()
+            if kind == "del":
+                tariffs = self._tariffs()
+                for t in tariffs:
+                    if t.id == tariff.id:
+                        t.validity_ranges = [r for r in t.validity_ranges if r.id != rid]
+                self._save_tariffs(tariffs)
+                return await self.async_step_range_list()
+            return await self.async_step_range_list()
+
+        options: list[selector.SelectOptionDict] = [
+            selector.SelectOptionDict(value="__add__", label="➕ Dodaj zakres dat"),
+        ]
+        if not tariff.validity_ranges:
+            options.append(
+                selector.SelectOptionDict(
+                    value="__noop__",
+                    label="ℹ Brak zakresów — taryfa obowiązuje zawsze",
+                )
+            )
+        for r in tariff.validity_ranges:
+            label_from = r.valid_from.isoformat() if r.valid_from else "…"
+            label_to = r.valid_to.isoformat() if r.valid_to else "…"
+            options.append(
+                selector.SelectOptionDict(
+                    value=f"edit:{r.id}",
+                    label=f"✎ {label_from} → {label_to}",
+                )
+            )
+            options.append(
+                selector.SelectOptionDict(value=f"del:{r.id}", label=f"🗑 Usuń: {label_from} → {label_to}")
+            )
+        options.append(selector.SelectOptionDict(value="__back__", label="← Powrót do okresów"))
+
+        return self.async_show_form(
+            step_id="range_list",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    )
+                }
+            ),
+            description_placeholders={
+                "tariff_name": tariff.name,
+                "count": str(len(tariff.validity_ranges)),
+            },
+        )
+
+    async def async_step_range_form(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        tariff = self._current_tariff()
+        if tariff is None:
+            return await self.async_step_tariff_list()
+        existing = next(
+            (r for r in tariff.validity_ranges if r.id == self._editing_range_id), None
+        )
+
+        if user_input is not None:
+            from datetime import date as _date
+
+            def _to_date(value: Any) -> _date | None:
+                if not value:
+                    return None
+                if isinstance(value, _date):
+                    return value
+                return _date.fromisoformat(str(value))
+
+            new_range = ValidityRange(
+                id=existing.id if existing else uuid4().hex,
+                valid_from=_to_date(user_input.get("valid_from")),
+                valid_to=_to_date(user_input.get("valid_to")),
+            )
+            tariffs = self._tariffs()
+            for t in tariffs:
+                if t.id == tariff.id:
+                    if existing:
+                        t.validity_ranges = [
+                            new_range if r.id == existing.id else r for r in t.validity_ranges
+                        ]
+                    else:
+                        t.validity_ranges.append(new_range)
+            self._save_tariffs(tariffs)
+            self._editing_range_id = None
+            return await self.async_step_range_list()
+
+        defaults = {
+            "valid_from": existing.valid_from.isoformat()
+            if existing and existing.valid_from
+            else vol.UNDEFINED,
+            "valid_to": existing.valid_to.isoformat()
+            if existing and existing.valid_to
+            else vol.UNDEFINED,
+        }
+        schema = vol.Schema(
+            {
+                vol.Optional("valid_from", default=defaults["valid_from"]): selector.DateSelector(),
+                vol.Optional("valid_to", default=defaults["valid_to"]): selector.DateSelector(),
+            }
+        )
+        return self.async_show_form(
+            step_id="range_form",
             data_schema=schema,
             description_placeholders={
                 "mode": "edycja" if existing else "nowy",

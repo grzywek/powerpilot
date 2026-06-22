@@ -8,44 +8,53 @@ Resolves the distribution price (PLN/kWh) per hour using user-configured
 This means:
   - ``slot[0]`` (the hour we are currently in) → use a **snapshot** of the
     distribution price; lazily created on first access from the current config.
-  - ``slot[1..]`` (future hours) → **live**-evaluated from the current config
-    using the matching day classifier sensor.
+  - ``slot[1..]`` (future hours) → **live**-evaluated from the current config.
 
-For day-of-week classification we honour ``period.day_sensor``. For future days
-D+1..D+7 we substitute ``binary_sensor.workday_today`` with the corresponding
-``CONF_WORKDAY_PLUS_N_SENSORS`` entry; other custom day sensors are evaluated
-as-is (with the caveat that their *current* state is used, not the future
-state).
+Day-of-week classification:
+  - For "today" (D+0): read ``period.day_sensor`` state directly from HA.
+  - For future days (D+1..D+N): pre-fetch the ``workday.check_date`` service
+    response in :meth:`async_update` for every (day_sensor, date) pair in the
+    horizon, cache the booleans, and use the cache from :meth:`contribute`.
+    Day sensors that don't support ``workday.check_date`` (e.g. custom helpers)
+    fall back to *today's* state with a warning.
 
-Snapshots are persisted to a dedicated ``Store`` keyed by ISO hour timestamp,
-pruned to the last 90 days on every load.
+Pricing per hour:
+  ``total_distribution = tariff.base_component_kwh + matching_period.price_kwh``
+
+The user is responsible for adding a catch-all ``Pozaszczyt`` period
+(``day_sensor=None``, hours 0-24) so that some period always matches. If none
+matches, the price for that hour is ``None`` and a warning is logged.
+
+Snapshots are persisted to a dedicated ``Store`` keyed by UTC-ISO hour
+timestamp, pruned to the last 90 days on every load.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import (
     CONF_TARIFFS,
-    CONF_WORKDAY_PLUS_N_SENSORS,
     DOMAIN,
-    MAX_WORKDAY_PLUS_N,
     STORAGE_VERSION_TARIFF_SNAPSHOTS,
 )
 from ..models import Forecast, Tariff, tariff_for_day
 from .base import PowerPilotModule
 
-# Names that we transparently re-map to D+N sensors for future days. Anything
-# else is read as-is (effectively today's state for future days).
-_WORKDAY_ALIASES = ("binary_sensor.workday_today", "binary_sensor.workday")
-
 # How many days of past snapshots to keep.
 _SNAPSHOT_RETENTION_DAYS = 90
+
+# How many future days to pre-fetch workday.check_date for.
+_FUTURE_DAYS_TO_PREFETCH = 4
+
+_WORKDAY_DOMAIN = "workday"
+_CHECK_DATE_SERVICE = "check_date"
 
 
 class TariffModule(PowerPilotModule):
@@ -56,11 +65,16 @@ class TariffModule(PowerPilotModule):
     def __init__(self, hass: HomeAssistant, coordinator) -> None:
         super().__init__(hass, coordinator)
         self._store: Store | None = None
-        # Snapshot dict: {iso_hour_str: {"price": float, "tariff_id": str,
+        # Snapshot dict: {utc_iso_hour: {"price": float, "tariff_id": str,
         #                                "period_id": str | None, "backfilled": bool}}
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._tariffs: list[Tariff] = []
-        self._workday_plus_n: list[str] = []
+        # Pre-fetched day-sensor results: {(entity_id, date): bool}.
+        # date == today is read live from hass.states.
+        self._future_day_cache: dict[tuple[str, date], bool] = {}
+        # Day sensors known to *not* support workday.check_date — we warn once
+        # and fall back to today's state for them.
+        self._unsupported_sensors: set[str] = set()
 
     # ------------------------------------------------------------------ setup
 
@@ -75,20 +89,12 @@ class TariffModule(PowerPilotModule):
         self._reload_config()
 
     def _reload_config(self) -> None:
-        """Re-parse tariffs + workday sensors from the current entry options."""
         raw_tariffs = self.config.get(CONF_TARIFFS) or []
         self._tariffs = [Tariff.from_dict(t) for t in raw_tariffs]
-        raw_sensors = self.config.get(CONF_WORKDAY_PLUS_N_SENSORS) or []
-        # Pad to MAX so index access is safe; treat empty strings as "missing".
-        padded = list(raw_sensors)[:MAX_WORKDAY_PLUS_N]
-        while len(padded) < MAX_WORKDAY_PLUS_N:
-            padded.append("")
-        self._workday_plus_n = padded
 
     # ------------------------------------------------------------------ update
 
     async def async_update(self) -> None:
-        # Picks up live config changes the OptionsFlow may have written.
         self._reload_config()
 
         today = dt_util.now().date()
@@ -97,7 +103,7 @@ class TariffModule(PowerPilotModule):
             if self._tariffs:
                 self.log_warning(
                     f"Brak aktywnej taryfy dla {today.isoformat()} "
-                    f"(skonfigurowanych taryf: {len(self._tariffs)}).",
+                    f"(skonfigurowanych: {len(self._tariffs)}).",
                     extra={"configured_tariffs": len(self._tariffs)},
                 )
             else:
@@ -107,29 +113,97 @@ class TariffModule(PowerPilotModule):
                     "w Konfiguracji → PowerPilot → Konfiguruj → Taryfy.",
                     extra={"configured_tariffs": 0},
                 )
+            self._future_day_cache.clear()
             return
 
+        await self._prefetch_future_days(today)
+
         self.log_info(
-            f"Aktywna taryfa: {active.name} ({len(active.periods)} okresów, "
-            f"baza {active.fallback_price_kwh:.4f} PLN/kWh). "
-            f"Snapshot: {len(self._snapshots)} godzin.",
+            f"Aktywna taryfa: {active.name} "
+            f"(składnik bazowy {active.base_component_kwh:.4f} PLN/kWh, "
+            f"{len(active.periods)} okresów). "
+            f"Snapshot: {len(self._snapshots)} godzin. "
+            f"Cache klasyfikacji dni: {len(self._future_day_cache)}.",
             extra={
                 "tariff_name": active.name,
                 "periods": len(active.periods),
-                "fallback_price_kwh": active.fallback_price_kwh,
+                "base_component_kwh": active.base_component_kwh,
                 "snapshot_hours": len(self._snapshots),
-                "valid_from": active.valid_from.isoformat() if active.valid_from else None,
-                "valid_to": active.valid_to.isoformat() if active.valid_to else None,
+                "future_day_cache": len(self._future_day_cache),
             },
         )
+
+    async def _prefetch_future_days(self, today: date) -> None:
+        """Call ``workday.check_date`` for every (sensor, future_date) pair."""
+        needed: set[tuple[str, date]] = set()
+        for offset in range(1, _FUTURE_DAYS_TO_PREFETCH + 1):
+            day = today + timedelta(days=offset)
+            tariff = tariff_for_day(self._tariffs, day)
+            if tariff is None:
+                continue
+            for period in tariff.periods:
+                if period.day_sensor:
+                    needed.add((period.day_sensor, day))
+
+        # Drop stale cache entries.
+        valid_dates = {today + timedelta(days=d) for d in range(1, _FUTURE_DAYS_TO_PREFETCH + 1)}
+        self._future_day_cache = {
+            k: v for k, v in self._future_day_cache.items() if k[1] in valid_dates
+        }
+
+        for entity_id, day in needed:
+            if (entity_id, day) in self._future_day_cache:
+                continue
+            if entity_id in self._unsupported_sensors:
+                continue
+            try:
+                response = await self.hass.services.async_call(
+                    _WORKDAY_DOMAIN,
+                    _CHECK_DATE_SERVICE,
+                    {"check_date": day.isoformat()},
+                    target={"entity_id": entity_id},
+                    blocking=True,
+                    return_response=True,
+                )
+            except HomeAssistantError as exc:
+                self._unsupported_sensors.add(entity_id)
+                self.log_warning(
+                    f"Sensor {entity_id} nie wspiera workday.check_date "
+                    f"({type(exc).__name__}: {exc}). Dla przyszłych dni użyję "
+                    f"stanu z dziś — przekonfiguruj period jeśli to nie pasuje.",
+                    extra={"day_sensor": entity_id, "error": str(exc)},
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 — defensive: voluptuous etc.
+                self._unsupported_sensors.add(entity_id)
+                self.log_warning(
+                    f"Błąd workday.check_date dla {entity_id}: "
+                    f"{type(exc).__name__}: {exc}.",
+                    extra={"day_sensor": entity_id, "error": str(exc)},
+                )
+                continue
+            result = self._parse_check_date_response(response, entity_id)
+            if result is None:
+                continue
+            self._future_day_cache[(entity_id, day)] = result
+
+    @staticmethod
+    def _parse_check_date_response(response: Any, entity_id: str) -> bool | None:
+        """``workday.check_date`` returns ``{<entity_id>: {"workday": bool}}``."""
+        if not isinstance(response, dict):
+            return None
+        per_entity = response.get(entity_id)
+        if isinstance(per_entity, dict) and "workday" in per_entity:
+            return bool(per_entity["workday"])
+        if "workday" in response:
+            return bool(response["workday"])
+        return None
 
     # -------------------------------------------------------------- contribute
 
     def contribute(self, forecast: Forecast) -> None:
-        if not forecast.slots:
+        if not forecast.slots or not self._tariffs:
             return
-        if not self._tariffs:
-            return  # No tariffs → leave slot.distribution_price_kwh as None
 
         now = dt_util.now()
         today = now.date()
@@ -139,8 +213,6 @@ class TariffModule(PowerPilotModule):
         for index, slot in enumerate(forecast.slots):
             slot_dt = slot.start
             if slot_dt.tzinfo is None:
-                # Shouldn't happen — forecast.build uses tz-aware datetimes — but
-                # defend against bad fixtures.
                 slot_dt = dt_util.as_local(slot_dt)
             day_offset = (slot_dt.date() - today).days
             is_current_or_past = slot_dt <= current_hour_start
@@ -162,7 +234,6 @@ class TariffModule(PowerPilotModule):
                 else:
                     slot.distribution_price_kwh = snap["price"]
             else:
-                # Future hour: live evaluation.
                 price, _, _ = self._resolve_price(slot_dt, day_offset)
                 slot.distribution_price_kwh = price
 
@@ -183,44 +254,40 @@ class TariffModule(PowerPilotModule):
             if not period.matches_hour(slot_dt.hour):
                 continue
             if period.day_sensor is None:
-                return period.price_kwh, tariff.id, period.id
-            actual_sensor = self._effective_day_sensor(period.day_sensor, day_offset)
-            if not actual_sensor:
+                return tariff.base_component_kwh + period.price_kwh, tariff.id, period.id
+            if not self._is_day_sensor_on(period.day_sensor, slot_dt.date(), day_offset):
                 continue
-            state = self.hass.states.get(actual_sensor)
-            if state is None:
-                continue
-            if state.state == "on":
-                return period.price_kwh, tariff.id, period.id
+            return tariff.base_component_kwh + period.price_kwh, tariff.id, period.id
 
-        return tariff.fallback_price_kwh, tariff.id, None
+        self.log_warning(
+            f"Brak pasującego okresu dla {slot_dt.isoformat()} "
+            f"(taryfa: {tariff.name}). Dodaj jawny okres typu pozaszczyt "
+            f"(0–24h, bez sensora dnia).",
+            extra={"tariff": tariff.name, "hour": slot_dt.isoformat()},
+        )
+        return None, tariff.id, None
 
-    def _effective_day_sensor(self, sensor_id: str, day_offset: int) -> str | None:
-        """Map period.day_sensor to the right entity for the given day offset.
-
-        For "today-context" workday sensors we substitute with the configured
-        ``binary_sensor.workday_plus_N`` for D+1..D+7. Beyond 7 days we return
-        ``None`` to skip the period (no classification possible). Other custom
-        day sensors are returned as-is — their *current* state will be used,
-        which is the best we can do without extra config.
-        """
+    def _is_day_sensor_on(self, sensor_id: str, day: date, day_offset: int) -> bool:
+        """Resolve whether ``sensor_id`` is ON for ``day``."""
         if day_offset == 0:
-            return sensor_id
-        is_workday_alias = sensor_id in _WORKDAY_ALIASES
-        if 1 <= day_offset <= MAX_WORKDAY_PLUS_N:
-            if is_workday_alias:
-                configured = self._workday_plus_n[day_offset - 1]
-                return configured or None
-            return sensor_id
-        # Beyond D+7: only non-workday-alias sensors get evaluated (best-effort,
-        # using today's state). Workday-alias periods are skipped.
-        return None if is_workday_alias else sensor_id
+            state = self.hass.states.get(sensor_id)
+            return state is not None and state.state == "on"
+        if day_offset > 0:
+            cached = self._future_day_cache.get((sensor_id, day))
+            if cached is not None:
+                return cached
+            # Cache miss → sensor likely doesn't support check_date.
+            # Best effort: today's state.
+            state = self.hass.states.get(sensor_id)
+            return state is not None and state.state == "on"
+        # Past day: best effort, use today's state.
+        state = self.hass.states.get(sensor_id)
+        return state is not None and state.state == "on"
 
     # --------------------------------------------------------------- snapshot
 
     @staticmethod
     def _snapshot_key(slot_dt: datetime) -> str:
-        # Normalise to UTC ISO so DST transitions don't collide.
         return dt_util.as_utc(slot_dt).replace(minute=0, second=0, microsecond=0).isoformat()
 
     @staticmethod
@@ -239,7 +306,6 @@ class TariffModule(PowerPilotModule):
     def _schedule_save(self) -> None:
         if self._store is None:
             return
-        # Coalesce rapid contribute() bursts into a single disk write.
         self._store.async_delay_save(self._serialise_snapshots, 30.0)
 
     def _serialise_snapshots(self) -> dict[str, Any]:

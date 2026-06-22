@@ -68,13 +68,6 @@ CONF_EV_CHARGER_PHASE: Final = "ev_charger_phase"  # shared phase index 1..3
 # Snapshots of resolved per-hour distribution prices live in their own
 # ``Store(version=STORAGE_VERSION_TARIFF_SNAPSHOTS, key=f"{DOMAIN}_{entry_id}_tariff_snapshots")``.
 CONF_TARIFFS: Final = "tariffs"
-# Optional binary_sensors that classify *future* days (D+1..D+7) — usually a
-# workday/weekend sensor for that calendar date. Stored as a list of entity ids
-# where index 0 is D+1, index 1 is D+2, ..., index 6 is D+7.
-CONF_WORKDAY_PLUS_N_SENSORS: Final = "workday_plus_n_sensors"
-
-# Maximum number of future-day classifier sensors we accept (D+1..D+7).
-MAX_WORKDAY_PLUS_N: Final = 7
 
 # Storage version for the per-entry tariff snapshot store.
 STORAGE_VERSION_TARIFF_SNAPSHOTS: Final = 1

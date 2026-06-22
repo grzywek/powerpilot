@@ -63,7 +63,6 @@
           "prices": "💰 Energy prices",
           "ev": "🚗 EV",
           "tariff_list": "🧾 Distribution tariffs",
-          "workday_sensors": "📆 Future-day classifier sensors (D+1..D+7)",
           "finish": "✅ Save & exit"
         }
       },
@@ -122,24 +121,22 @@
       },
       "tariff_form": {
         "title": "Tariff ({mode})",
-        "description": "Editing: {name}. Periods are added in the next step.",
+        "description": "Editing: {name}. The base component is added to every period's price. Configure validity ranges and periods in the next steps.",
         "data": {
           "name": "Tariff name (e.g. Tauron G12)",
-          "fallback_price_kwh": "Fallback price for unmatched hours (PLN/kWh)",
-          "valid_from": "Valid from (optional)",
-          "valid_to": "Valid to (optional)"
+          "base_component_kwh": "Base component added to every hour (PLN/kWh)"
         }
       },
       "period_list": {
         "title": "Periods of {tariff_name}",
-        "description": "Tariff: **{tariff_name}** · fallback {fallback_price} PLN/kWh · {count} periods. Periods are evaluated in order — first match wins.",
+        "description": "Tariff: **{tariff_name}** · base component {base_component} PLN/kWh · {count} periods. Periods are evaluated in order — first match wins. Add a catch-all \"Pozaszczyt\" period covering hours 0–24 without a day classifier.",
         "data": {
           "action": "Action"
         }
       },
       "period_form": {
         "title": "Period ({mode}) in {tariff_name}",
-        "description": "Hour range is half-open: [from, to). For a night band crossing midnight (e.g. 22→6) set from=22 to=6.",
+        "description": "Hour range is half-open: [from, to). For a night band crossing midnight (e.g. 22→6) set from=22 to=6. For future days a referenced workday sensor is resolved via the `workday.check_date` service.",
         "data": {
           "name": "Period name (e.g. Afternoon peak)",
           "hour_from": "Hour from (0–23, inclusive)",
@@ -148,17 +145,19 @@
           "day_sensor": "Day classifier (binary_sensor, optional)"
         }
       },
-      "workday_sensors": {
-        "title": "Future-day classifier sensors",
-        "description": "Optional binary sensors that classify each future day. Used by periods that reference *workday_today* for D+1..D+7. Leave blank if you don't need future-day classification.",
+      "range_list": {
+        "title": "Validity ranges of {tariff_name}",
+        "description": "Tariff: **{tariff_name}** · {count} ranges. Add as many ranges as you need (e.g. winter 2024/25 + winter 2025/26). With no ranges the tariff is always active.",
         "data": {
-          "d1": "D+1 (tomorrow)",
-          "d2": "D+2",
-          "d3": "D+3",
-          "d4": "D+4",
-          "d5": "D+5",
-          "d6": "D+6",
-          "d7": "D+7"
+          "action": "Action"
+        }
+      },
+      "range_form": {
+        "title": "Validity range ({mode}) for {tariff_name}",
+        "description": "Both dates are optional and inclusive. Leave a date blank for open-ended.",
+        "data": {
+          "valid_from": "Valid from (optional)",
+          "valid_to": "Valid to (optional)"
         }
       }
     }

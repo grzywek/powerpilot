@@ -65,7 +65,6 @@
           "prices": "💰 Ceny energii",
           "ev": "🚗 Samochód elektryczny",
           "tariff_list": "🧾 Taryfy dystrybucyjne",
-          "workday_sensors": "📆 Sensory klasyfikacji dni (D+1..D+7)",
           "finish": "✅ Zapisz i zakończ"
         }
       },
@@ -124,24 +123,22 @@
       },
       "tariff_form": {
         "title": "Taryfa ({mode})",
-        "description": "Edycja: {name}. Okresy dodajesz w kolejnym kroku.",
+        "description": "Edycja: {name}. Składnik bazowy dodawany jest do ceny każdego okresu. Zakresy obowiązywania i okresy konfigurujesz w kolejnych krokach.",
         "data": {
           "name": "Nazwa taryfy (np. Tauron G12)",
-          "fallback_price_kwh": "Cena bazowa (gdy żaden okres nie pasuje) (PLN/kWh)",
-          "valid_from": "Obowiązuje od (opcjonalnie)",
-          "valid_to": "Obowiązuje do (opcjonalnie)"
+          "base_component_kwh": "Składnik bazowy dodawany do każdej godziny (PLN/kWh)"
         }
       },
       "period_list": {
         "title": "Okresy taryfy {tariff_name}",
-        "description": "Taryfa: **{tariff_name}** · cena bazowa {fallback_price} PLN/kWh · {count} okresów. Okresy są sprawdzane po kolei — pierwszy pasujący wygrywa.",
+        "description": "Taryfa: **{tariff_name}** · składnik bazowy {base_component} PLN/kWh · {count} okresów. Okresy są sprawdzane po kolei — pierwszy pasujący wygrywa. Dodaj okres typu \"Pozaszczyt\" 0–24h bez sensora dnia jako catch-all.",
         "data": {
           "action": "Akcja"
         }
       },
       "period_form": {
         "title": "Okres ({mode}) w taryfie {tariff_name}",
-        "description": "Zakres godzin półotwarty: [od, do). Dla nocnego okresu przez północ (np. 22→6) ustaw od=22, do=6.",
+        "description": "Zakres godzin półotwarty: [od, do). Dla nocnego okresu przez północ (np. 22→6) ustaw od=22, do=6. Dla przyszłych dni sensor workday jest rozwiązywany przez serwis `workday.check_date`.",
         "data": {
           "name": "Nazwa okresu (np. Szczyt popołudniowy)",
           "hour_from": "Godzina od (0–23, włącznie)",
@@ -150,17 +147,19 @@
           "day_sensor": "Klasyfikator dnia (binary_sensor, opcjonalnie)"
         }
       },
-      "workday_sensors": {
-        "title": "Sensory klasyfikacji przyszłych dni",
-        "description": "Opcjonalne sensory binarne klasyfikujące każdy przyszły dzień. Używane gdy okres odwołuje się do *workday_today* dla D+1..D+7. Zostaw puste jeśli nie potrzebujesz klasyfikacji.",
+      "range_list": {
+        "title": "Zakresy obowiązywania taryfy {tariff_name}",
+        "description": "Taryfa: **{tariff_name}** · {count} zakresów. Dodaj dowolną liczbę zakresów (np. zima 2024/25 + zima 2025/26). Bez zakresów taryfa obowiązuje zawsze.",
         "data": {
-          "d1": "D+1 (jutro)",
-          "d2": "D+2",
-          "d3": "D+3",
-          "d4": "D+4",
-          "d5": "D+5",
-          "d6": "D+6",
-          "d7": "D+7"
+          "action": "Akcja"
+        }
+      },
+      "range_form": {
+        "title": "Zakres obowiązywania ({mode}) dla {tariff_name}",
+        "description": "Obie daty są opcjonalne i włączne. Pustą datą oznaczasz brak ograniczenia.",
+        "data": {
+          "valid_from": "Obowiązuje od (opcjonalnie)",
+          "valid_to": "Obowiązuje do (opcjonalnie)"
         }
       }
     }

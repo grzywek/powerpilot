@@ -89,6 +89,11 @@ class Decision:
 
     reminders: list[str] = field(default_factory=list)
 
+    # Debug trace: the inputs the optimizer compared when picking the mode for
+    # this hour (thresholds, demand, battery state before the action, branch
+    # reason). Populated by the optimizer; surfaced via the debug export.
+    trace: dict = field(default_factory=dict)
+
     def as_dict(self) -> dict:
         """Serialise for sensor attributes / charts."""
         return {
@@ -108,6 +113,7 @@ class Decision:
             "distribution_cost": round(self.distribution_cost, 4),
             "battery_use_cost": round(self.battery_use_cost, 4),
             "reminders": list(self.reminders),
+            "trace": dict(self.trace),
         }
 
 

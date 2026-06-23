@@ -212,6 +212,37 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             },
         }
 
+    async def get_debug(self) -> dict:
+        """Full diagnostic snapshot for troubleshooting optimizer decisions.
+
+        Bundles the (secret-redacted) config, the current plan with per-hour
+        decision traces, feature status, learned profiles and the recent + full
+        forecast series — everything needed to reason about why the optimizer
+        made a given decision, in one copy/paste-able JSON blob.
+        """
+        secret_hints = ("api_key", "token", "password", "secret")
+
+        def _redact(cfg: dict) -> dict:
+            out: dict = {}
+            for key, value in cfg.items():
+                if any(hint in str(key).lower() for hint in secret_hints):
+                    out[key] = "***redacted***" if value else None
+                else:
+                    out[key] = value
+            return out
+
+        plan = self.data
+        series = await self.get_series(past_hours=48)
+        return {
+            "generated_at": dt_util.now().isoformat(),
+            "config": _redact(dict(self.config)),
+            "plan": plan.as_dict() if plan else None,
+            "status": self.get_status(),
+            "profiles": self.get_profiles(),
+            "series": series,
+            "log": self.get_log(),
+        }
+
     async def get_forecasts(self, date_str: str | None) -> dict:
         """Horizon-indexed price forecasts (D+1..D+3) for a target date."""
         from datetime import date as _date, timedelta as _td

@@ -117,6 +117,16 @@ class Optimizer:
 
             grid_buy = ev_kwh  # EV is always grid-fed
 
+            # Snapshot the battery state *before* this hour's action and the
+            # threshold comparisons, so the debug trace can explain the branch.
+            soc_before = battery.soc
+            energy_cost_before = battery.energy_cost
+            headroom_before = battery.usable_charge_headroom_kwh
+            usable_discharge_before = battery.usable_discharge_kwh
+            is_cheap = total_price <= cheap
+            is_expensive = total_price >= expensive
+            battery_cheaper = energy_cost_before < total_price
+
             if total_price <= cheap and battery.usable_charge_headroom_kwh > 0:
                 # Cheap hour: charge the battery and serve the house from grid.
                 max_kw = self.config.charge_curve.max_kw(battery.soc)
@@ -163,6 +173,60 @@ class Optimizer:
             decision.battery_use_cost = (
                 decision.battery_discharge_kwh * decision.battery_energy_cost
             )
+
+            # Human-readable reason for the chosen branch (for the debug export).
+            if decision.inverter_mode == InverterMode.CHARGE:
+                reason = (
+                    f"tania godzina (cena {total_price:.3f} ≤ próg taniej {cheap:.3f}) "
+                    f"i jest miejsce w baterii ({headroom_before:.2f} kWh) → ładowanie"
+                )
+            elif decision.inverter_mode == InverterMode.DISCHARGE:
+                reason = (
+                    f"droga godzina (cena {total_price:.3f} ≥ próg drogiej {expensive:.3f}), "
+                    f"energia w baterii ({energy_cost_before:.3f}) tańsza niż sieć "
+                    f"({total_price:.3f}) i jest co rozładować "
+                    f"({usable_discharge_before:.2f} kWh) → rozładowanie"
+                )
+            else:
+                blocks: list[str] = []
+                if is_cheap and headroom_before <= 0:
+                    blocks.append("tania godzina, ale bateria pełna (brak miejsca)")
+                elif not is_cheap:
+                    blocks.append(
+                        f"cena {total_price:.3f} > próg taniej {cheap:.3f} (nie ładuje)"
+                    )
+                if is_expensive and usable_discharge_before <= 0:
+                    blocks.append("droga godzina, ale bateria pusta (brak energii)")
+                elif is_expensive and not battery_cheaper:
+                    blocks.append(
+                        f"droga godzina, ale energia w baterii ({energy_cost_before:.3f}) "
+                        f"≥ cena sieci ({total_price:.3f}) — taniej z sieci"
+                    )
+                elif not is_expensive:
+                    blocks.append(
+                        f"cena {total_price:.3f} < próg drogiej {expensive:.3f} "
+                        f"(nie rozładowuje)"
+                    )
+                reason = "; ".join(blocks) + " → passthrough"
+
+            decision.trace = {
+                "total_price": round(total_price, 4),
+                "energy_price": round(energy_price, 4),
+                "distribution": round(distribution, 4),
+                "cheap_threshold": round(cheap, 4),
+                "expensive_threshold": round(expensive, 4),
+                "is_cheap": is_cheap,
+                "is_expensive": is_expensive,
+                "demand_kwh": round(demand, 3),
+                "ev_kwh": round(ev_kwh, 3),
+                "soc_before": round(soc_before, 1),
+                "soc_after": round(battery.soc, 1),
+                "battery_energy_cost_before": round(energy_cost_before, 4),
+                "battery_cheaper_than_grid": battery_cheaper,
+                "charge_headroom_before_kwh": round(headroom_before, 3),
+                "usable_discharge_before_kwh": round(usable_discharge_before, 3),
+                "reason": reason,
+            }
 
             if index == 0 and reminders:
                 decision.reminders = list(reminders)

@@ -114,7 +114,7 @@ interface Series {
   hours: SeriesHour[];
 }
 
-type Tab = "overview" | "prices" | "status" | "profiles" | "logs";
+type Tab = "overview" | "prices" | "status" | "profiles" | "logs" | "debug";
 
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const WEEKDAY_PL: Record<string, string> = {
@@ -172,6 +172,12 @@ export class PowerPilotPanel extends LitElement {
   @state() private _forecasts: Forecasts | null = null;
   @state() private _series: Series | null = null;
   @state() private _error: string | null = null;
+
+  /** Debug dump state (generated on demand from the Debug tab). */
+  @state() private _debug: unknown = null;
+  @state() private _debugLoading = false;
+  @state() private _debugError: string | null = null;
+  @state() private _debugCopied = false;
 
   /** Active range preset. */
   @state() private _rangeMode: RangeMode = "3d";
@@ -317,6 +323,7 @@ export class PowerPilotPanel extends LitElement {
         ${this._tabButton("status", "Status")}
         ${this._tabButton("profiles", "Profile")}
         ${this._tabButton("logs", "Logi")}
+        ${this._tabButton("debug", "Debug")}
       </div>
       ${this._error ? html`<div class="error">Błąd: ${this._error}</div>` : nothing}
       <div class="content">
@@ -325,6 +332,7 @@ export class PowerPilotPanel extends LitElement {
         ${this._tab === "status" ? this._renderStatus() : nothing}
         ${this._tab === "profiles" ? this._renderProfiles() : nothing}
         ${this._tab === "logs" ? this._renderLogs() : nothing}
+        ${this._tab === "debug" ? this._renderDebug() : nothing}
       </div>
     `;
   }
@@ -586,6 +594,15 @@ export class PowerPilotPanel extends LitElement {
     const pair = (extract: (h: SeriesHour) => number | null) =>
       ts.map((t, i) => ({ x: t, y: extract(hrs[i]) }));
 
+    // ApexCharts centres datetime columns on their x value, so a bar plotted at
+    // the hour start would straddle the hour line. Plot bars at the hour
+    // *midpoint* so the column spans [H, H+1] and visually starts on the hour
+    // gridline. The SoC line stays on the boundaries (hour starts) via `pair`,
+    // so its points land exactly on the bar edges.
+    const HALF_HOUR = 1800 * 1000;
+    const pairBar = (extract: (h: SeriesHour) => number | null) =>
+      ts.map((t, i) => ({ x: t + HALF_HOUR, y: extract(hrs[i]) }));
+
     // Sum of sub-metered devices for an hour (real preferred, forecast fallback).
     const deviceSum = (h: SeriesHour): number =>
       Object.values(h.devices_real ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0) ||
@@ -642,7 +659,7 @@ export class PowerPilotPanel extends LitElement {
         const v = getter(h);
         return v == null ? null : sign * v;
       };
-      series.push({ name, type: "column", data: pair(signed), color });
+      series.push({ name, type: "column", data: pairBar(signed), color });
       kwhNames.push(name);
     };
 
@@ -698,7 +715,9 @@ export class PowerPilotPanel extends LitElement {
       },
       theme: { mode: dark ? "dark" : "light" },
       stroke: { width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)), curve: "straight" },
-      plotOptions: { bar: { columnWidth: "70%", borderRadius: 0 } },
+      // Near-full width so each midpoint-plotted bar fills its hour [H, H+1]
+      // and its left edge lands on the hour gridline.
+      plotOptions: { bar: { columnWidth: "95%", borderRadius: 0 } },
       dataLabels: { enabled: false },
       fill: { opacity: 0.85 },
       series,
@@ -1258,6 +1277,82 @@ export class PowerPilotPanel extends LitElement {
     </div>`;
   }
 
+  private async _generateDebug(): Promise<void> {
+    this._debugLoading = true;
+    this._debugError = null;
+    this._debugCopied = false;
+    try {
+      this._debug = await this.hass.callWS({ type: "powerpilot/debug" });
+    } catch (err: unknown) {
+      this._debugError = err instanceof Error ? err.message : String(err);
+      this._debug = null;
+    } finally {
+      this._debugLoading = false;
+    }
+  }
+
+  private _debugJson(): string {
+    return JSON.stringify(this._debug, null, 2);
+  }
+
+  private _downloadDebug(): void {
+    const json = this._debugJson();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `powerpilot-debug-${stamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  private async _copyDebug(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(this._debugJson());
+      this._debugCopied = true;
+      window.setTimeout(() => {
+        this._debugCopied = false;
+      }, 2000);
+    } catch {
+      this._debugError = "Nie udało się skopiować do schowka.";
+    }
+  }
+
+  private _renderDebug(): TemplateResult {
+    const json = this._debug != null ? this._debugJson() : "";
+    const sizeKb = json ? (new Blob([json]).size / 1024).toFixed(1) : "0";
+    return html`
+      <div class="card">
+        <div class="card-title">Zrzut diagnostyczny</div>
+        <p class="debug-intro">
+          Generuje pełny zrzut JSON: konfiguracja (bez sekretów), bieżący plan
+          z uzasadnieniem każdej decyzji (<code>trace</code>: progi taniej/drogiej,
+          stan baterii przed godziną, powód trybu), status, profile zużycia,
+          serię (48 h wstecz + horyzont) oraz log. Pobierz lub skopiuj i wklej do
+          analizy.
+        </p>
+        <div class="debug-actions">
+          <button class="debug-btn primary" @click=${this._generateDebug} ?disabled=${this._debugLoading}>
+            ${this._debugLoading ? "Generowanie…" : "Generuj zrzut"}
+          </button>
+          ${this._debug != null
+            ? html`
+                <button class="debug-btn" @click=${this._downloadDebug}>⬇ Pobierz JSON (${sizeKb} kB)</button>
+                <button class="debug-btn" @click=${this._copyDebug}>
+                  ${this._debugCopied ? "✓ Skopiowano" : "⧉ Kopiuj do schowka"}
+                </button>
+              `
+            : nothing}
+        </div>
+        ${this._debugError ? html`<div class="error">Błąd: ${this._debugError}</div>` : nothing}
+        ${this._debug != null
+          ? html`<pre class="debug-json">${json}</pre>`
+          : html`<div class="empty">Kliknij „Generuj zrzut", aby pobrać dane.</div>`}
+      </div>
+    `;
+  }
+
   private _typeLabel(type: string): string {
     switch (type) {
       case "info":
@@ -1374,6 +1469,59 @@ export class PowerPilotPanel extends LitElement {
     .error {
       color: var(--error-color, #d33);
       margin-bottom: 12px;
+    }
+    .debug-intro {
+      color: var(--secondary-text-color);
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 0 0 12px;
+    }
+    .debug-intro code {
+      font-family: var(--code-font-family, monospace);
+      font-size: 12px;
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.15));
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .debug-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .debug-btn {
+      background: var(--card-background-color, #fff);
+      color: var(--primary-text-color);
+      border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.3));
+      border-radius: 6px;
+      padding: 7px 14px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .debug-btn:hover {
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.12));
+    }
+    .debug-btn.primary {
+      background: var(--primary-color, #03a9f4);
+      color: var(--text-primary-color, #fff);
+      border-color: transparent;
+    }
+    .debug-btn[disabled] {
+      opacity: 0.6;
+      cursor: default;
+    }
+    .debug-json {
+      max-height: 420px;
+      overflow: auto;
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.1));
+      border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.3));
+      border-radius: 6px;
+      padding: 10px;
+      font-family: var(--code-font-family, monospace);
+      font-size: 11px;
+      line-height: 1.4;
+      white-space: pre;
+      margin: 0;
     }
     .chart {
       width: 100%;

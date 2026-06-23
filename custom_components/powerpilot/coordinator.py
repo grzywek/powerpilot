@@ -26,10 +26,13 @@ from .const import (
     CONF_CHARGE_EFFICIENCY,
     CONF_DISCHARGE_EFFICIENCY,
     CONF_GRID_DISCONNECT_SOC,
+    CONF_GRID_VOLTAGE,
     CONF_INVERTER_MAX_CHARGE_KW,
     CONF_INVERTER_MAX_DISCHARGE_KW,
+    CONF_MAIN_FUSE_A,
     CONF_MAX_SOC,
     CONF_MIN_SOC,
+    CONF_PHASES,
     CONF_SOC_SENSOR,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DEFAULTS,
@@ -126,12 +129,18 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             default_kw=float(self.config[CONF_INVERTER_MAX_CHARGE_KW]),
             segments=list(self.config.get(CONF_CHARGE_CURVE) or []),
         )
+        # Physical grid connection power: phases × phase voltage × main fuse.
+        phases = float(self.config.get(CONF_PHASES, 0) or 0)
+        voltage = float(self.config.get(CONF_GRID_VOLTAGE, 0) or 0)
+        fuse_a = float(self.config.get(CONF_MAIN_FUSE_A, 0) or 0)
+        connection_power_kw = phases * voltage * fuse_a / 1000.0
         return Optimizer(
             OptimizerConfig(
                 inverter_max_charge_kw=float(self.config[CONF_INVERTER_MAX_CHARGE_KW]),
                 inverter_max_discharge_kw=float(self.config[CONF_INVERTER_MAX_DISCHARGE_KW]),
                 grid_disconnect_soc=float(self.config[CONF_GRID_DISCONNECT_SOC]),
                 charge_curve=curve,
+                connection_power_kw=connection_power_kw,
             )
         )
 

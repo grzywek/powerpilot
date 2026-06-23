@@ -1,22 +1,55 @@
-"""Heuristic optimization engine.
+"""Cost-minimising battery optimizer (HiGHS linear program).
 
-Transforms the hourly :class:`Forecast` plus the live battery state and EV request
-into a per-hour schedule of :class:`Decision` objects.
+The optimizer turns the hourly :class:`Forecast`, the live battery state and the
+EV request into a per-hour :class:`Plan`. Instead of the old price-percentile
+heuristic it solves a single linear program over the **whole horizon** with the
+HiGHS solver, so charge/discharge decisions are globally cost-optimal and coupled
+across days (the battery can be drained through an expensive day to reach a much
+cheaper one and be refilled there).
 
-This first implementation is a transparent, SoC-aware, price-percentile heuristic.
-Its inputs and outputs are deliberately shaped so the heuristic can later be
-swapped for an LP/MILP cost-minimizer (ROADMAP Stage 5) without touching the
-modules, coordinator or entities.
+Model (one continuous LP, no binaries needed)
+---------------------------------------------
+For every hour ``t`` we solve for two non-negative flows:
 
-Key modelling choices:
-* The household demand of each slot (``total_consumption_kwh``) can be served from
-  the grid (passthrough) or from the battery (discharge).
-* The EV charger sits *before* the inverter, so EV energy is always drawn from the
-  grid. When the EV charges, the inverter charge power is forced to ``LIMITED``
-  because the EV occupies the shared phase.
-* The battery is only discharged to cover load when the stored energy cost
-  (after losses) is below the current grid price — otherwise it is cheaper to use
-  the grid and keep the stored energy for a more expensive hour.
+* ``c[t]`` – energy drawn from the grid to charge the battery (AC kWh).
+* ``d[t]`` – energy delivered from the battery to the house (AC kWh).
+
+The stored energy (kWh) evolves as a prefix sum::
+
+    E[t] = E0 + Σ_{k≤t} (c[k]·η_ch − d[k]/η_dis)
+
+and is bounded by the usable SoC band ``[E_min, E_max]``. The household demand of
+each hour is served either from the grid or from the battery (no export, so
+``d[t] ≤ demand[t]``). The EV charger sits before the inverter and is always
+grid-fed; its per-hour energy ``ev[t]`` is planned separately into the cheapest
+available hours and enters the LP as a fixed extra grid load.
+
+Grid energy imported in an hour is ``grid[t] = demand[t] − d[t] + c[t] + ev[t]``
+and is capped by the physical connection power.
+
+Objective – minimise total spend over the horizon::
+
+    Σ_t  total_price[t]·grid[t]              (energy + distribution paid)
+       + wear·(c[t]·η_ch + d[t])             (battery cycling wear)
+       − v_terminal·E[T-1]                   (value of energy left at the end)
+
+Two economic facts make a *pure* LP correct here:
+
+* Buy-only (no export) plus round-trip losses (η_ch·η_dis < 1) and a positive
+  wear cost mean it is never optimal to charge and discharge in the same hour,
+  so no integer variables are required to forbid it.
+* The energy already in the battery at the start is a **sunk cost** – using it
+  only costs wear – so the optimizer naturally spends stored energy on the most
+  expensive hours instead of hoarding it at a high SoC.
+
+The terminal value ``v_terminal`` prices the energy left in the pack at the end
+of the horizon (so the LP does not irrationally dump the battery on the last
+hour). It is the discharge-adjusted average grid price of the horizon, i.e. the
+realistic price at which that energy would otherwise be replaced.
+
+The solver output is replayed through :class:`BatteryModel` so the reported
+``battery_energy_cost`` / ``battery_use_cost`` and the per-hour cost breakdown
+stay consistent with the rest of the integration.
 """
 
 from __future__ import annotations
@@ -26,6 +59,8 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import highspy
+import numpy as np
 from homeassistant.util import dt as dt_util
 
 from .battery import BatteryModel
@@ -35,10 +70,12 @@ from .modules.ev import EVRequest
 
 _LOGGER = logging.getLogger(__name__)
 
+_EPS = 1e-6
+
 
 @dataclass
 class ChargeCurve:
-    """Maps SoC to the maximum allowed charge power."""
+    """Maps SoC to the maximum allowed charge power (kW)."""
 
     default_kw: float
     segments: list[dict] = field(default_factory=list)  # {soc_from, soc_to, max_kw}
@@ -52,30 +89,76 @@ class ChargeCurve:
 
 @dataclass
 class OptimizerConfig:
-    """Tunable parameters for the heuristic."""
+    """Static, hardware-derived parameters for the LP."""
 
     inverter_max_charge_kw: float
     inverter_max_discharge_kw: float
     grid_disconnect_soc: float
     charge_curve: ChargeCurve
-    cheap_percentile: float = 0.33
-    expensive_percentile: float = 0.66
+    # Maximum grid import power (kW). 0 disables the connection-power limit.
+    connection_power_kw: float = 0.0
+    # Explicit terminal price (PLN/kWh) for energy left at the end of the
+    # horizon. ``None`` → use the horizon-average total grid price.
+    terminal_price: float | None = None
 
 
-def _percentile(values: list[float], pct: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, int(round(pct * (len(ordered) - 1)))))
-    return ordered[index]
+def _upper_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Upper (concave) hull of points sorted by x, via the monotone chain."""
+    hull: list[tuple[float, float]] = []
+    for p in points:
+        while len(hull) >= 2:
+            (x1, y1), (x2, y2) = hull[-2], hull[-1]
+            # Pop while the last turn is not a right turn (keeps the upper hull).
+            if (x2 - x1) * (p[1] - y1) - (y2 - y1) * (p[0] - x1) >= 0:
+                hull.pop()
+            else:
+                break
+        hull.append(p)
+    return hull
+
+
+def _charge_curve_cuts(
+    curve: ChargeCurve, capacity_kwh: float
+) -> list[tuple[float, float]]:
+    """Affine upper bounds ``max_charge_kw(E) ≤ slope·E + intercept``.
+
+    The SoC-dependent charge curve is represented by its concave envelope, which
+    is exact for the usual monotonically-tapering curves and keeps the model a
+    pure LP. An empty curve returns no cuts (the flat inverter limit, applied as
+    a simple variable bound, is enough).
+    """
+    if not curve.segments or capacity_kwh <= 0:
+        return []
+
+    points: set[tuple[float, float]] = {(0.0, curve.default_kw)}
+    for seg in curve.segments:
+        e_from = capacity_kwh * float(seg["soc_from"]) / 100.0
+        e_to = capacity_kwh * float(seg["soc_to"]) / 100.0
+        power = float(seg["max_kw"])
+        points.add((e_from, power))
+        points.add((e_to, power))
+    points.add((capacity_kwh, curve.max_kw(curve.segments[-1]["soc_to"])))
+
+    hull = _upper_hull(sorted(points))
+    cuts: list[tuple[float, float]] = []
+    for (e1, p1), (e2, p2) in zip(hull, hull[1:]):
+        if e2 - e1 <= _EPS:
+            continue
+        slope = (p2 - p1) / (e2 - e1)
+        intercept = p1 - slope * e1
+        cuts.append((slope, intercept))
+    return cuts
 
 
 class Optimizer:
-    """Produces a :class:`Plan` from a forecast and the current battery state."""
+    """Produces a cost-optimal :class:`Plan` via a HiGHS linear program."""
 
     def __init__(self, config: OptimizerConfig) -> None:
         self.config = config
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     def optimize(
         self,
         forecast: Forecast,
@@ -84,158 +167,303 @@ class Optimizer:
         reminders: list[str] | None = None,
     ) -> Plan:
         battery = battery.copy()  # never mutate the live state
-        ev_hours = self._plan_ev(forecast, ev_request)
+        slots = forecast.slots
+        n = len(slots)
+        if n == 0:
+            return Plan(forecast=forecast, decisions=[], created_at=dt_util.now())
 
-        # Decisions (cheap/expensive thresholds, "battery vs grid" comparisons)
-        # all use *total* price = energy + distribution, because that is what
-        # the household actually pays per kWh imported from the grid.
-        energy_prices = forecast.buy_prices
-        median_energy = statistics.median(energy_prices) if energy_prices else 0.0
-        total_prices = [
-            (slot.buy_price or 0.0) + (slot.distribution_price_kwh or 0.0)
-            for slot in forecast.slots
-            if slot.buy_price is not None
+        ev_hours = self._plan_ev(forecast, ev_request)
+        ev_charger_kw = ev_request.charger_kw if ev_request else 0.0
+
+        # Per-hour prices and demand. Missing energy prices fall back to the
+        # median so the SoC chain stays continuous.
+        prices = [s.buy_price for s in slots if s.buy_price is not None]
+        median_price = statistics.median(prices) if prices else 0.0
+        energy_price = [
+            s.buy_price if s.buy_price is not None else median_price for s in slots
         ]
-        cheap = _percentile(total_prices, self.config.cheap_percentile)
-        expensive = _percentile(total_prices, self.config.expensive_percentile)
+        distribution = [s.distribution_price_kwh or 0.0 for s in slots]
+        total_price = [energy_price[t] + distribution[t] for t in range(n)]
+        demand = [max(0.0, s.total_consumption_kwh) for s in slots]
+        ev_kwh = [ev_hours.get(slots[t].start, 0.0) for t in range(n)]
+
+        x = self._solve_lp(
+            battery=battery,
+            total_price=total_price,
+            demand=demand,
+            ev_kwh=ev_kwh,
+            ev_charger_kw=ev_charger_kw,
+        )
+        charge = x[:n]
+        discharge = x[n:]
+
+        return self._build_plan(
+            forecast=forecast,
+            battery=battery,
+            charge=charge,
+            discharge=discharge,
+            energy_price=energy_price,
+            distribution=distribution,
+            total_price=total_price,
+            demand=demand,
+            ev_kwh=ev_kwh,
+            reminders=reminders,
+        )
+
+    # ------------------------------------------------------------------
+    # Linear program
+    # ------------------------------------------------------------------
+    def _solve_lp(
+        self,
+        battery: BatteryModel,
+        total_price: list[float],
+        demand: list[float],
+        ev_kwh: list[float],
+        ev_charger_kw: float,
+    ) -> list[float]:
+        cfg = self.config
+        n = len(total_price)
+        ceff = max(battery.charge_efficiency, _EPS)
+        deff = max(battery.discharge_efficiency, _EPS)
+        wear = battery.wear_cost
+        cap = battery.capacity_kwh
+        e_min = cap * battery.min_soc / 100.0
+        e_max = cap * battery.max_soc / 100.0
+        e0 = min(max(battery.energy_kwh, e_min), e_max)
+
+        p_term = (
+            cfg.terminal_price
+            if cfg.terminal_price is not None
+            else (sum(total_price) / n if n else 0.0)
+        )
+        # Value of one stored kWh left at the end: it later delivers ``deff`` kWh
+        # to the house, displacing grid energy worth ``p_term`` each.
+        tv = deff * p_term
+
+        h = highspy.Highs()
+        h.setOptionValue("output_flag", False)
+        inf = highspy.kHighsInf
+
+        # Columns: c[0..n-1] (charge), then d[0..n-1] (discharge).
+        for t in range(n):
+            charge_cap = cfg.inverter_max_charge_kw
+            if ev_kwh[t] > 0:
+                # EV shares a phase with the inverter; leave it head-room.
+                charge_cap = max(0.0, charge_cap - ev_charger_kw)
+            h.addVar(0.0, charge_cap)
+        for t in range(n):
+            discharge_cap = min(demand[t], cfg.inverter_max_discharge_kw)
+            h.addVar(0.0, max(0.0, discharge_cap))
+
+        cost = np.empty(2 * n, dtype=np.float64)
+        for t in range(n):
+            cost[t] = total_price[t] + wear * ceff - tv * ceff
+            cost[n + t] = -total_price[t] + wear + tv / deff
+        h.changeColsCost(2 * n, np.arange(2 * n, dtype=np.int32), cost)
+
+        # SoC band on the running reservoir level after each hour.
+        for t in range(n):
+            idx: list[int] = []
+            val: list[float] = []
+            for k in range(t + 1):
+                idx.append(k)
+                val.append(ceff)
+                idx.append(n + k)
+                val.append(-1.0 / deff)
+            h.addRow(
+                e_min - e0,
+                e_max - e0,
+                len(idx),
+                np.array(idx, dtype=np.int32),
+                np.array(val, dtype=np.float64),
+            )
+
+        # Connection-power limit on grid import.
+        if cfg.connection_power_kw and cfg.connection_power_kw > 0:
+            for t in range(n):
+                rhs = cfg.connection_power_kw - demand[t] - ev_kwh[t]
+                h.addRow(
+                    -inf,
+                    rhs,
+                    2,
+                    np.array([t, n + t], dtype=np.int32),
+                    np.array([1.0, -1.0], dtype=np.float64),
+                )
+
+        # SoC-dependent charge curve (only when actually configured).
+        for slope, intercept in _charge_curve_cuts(cfg.charge_curve, cap):
+            if abs(slope) <= _EPS:
+                continue
+            for t in range(n):
+                idx = [t]
+                val = [1.0]
+                for k in range(t):
+                    idx.append(k)
+                    val.append(-slope * ceff)
+                    idx.append(n + k)
+                    val.append(slope / deff)
+                h.addRow(
+                    -inf,
+                    intercept + slope * e0,
+                    len(idx),
+                    np.array(idx, dtype=np.int32),
+                    np.array(val, dtype=np.float64),
+                )
+
+        h.run()
+        status = h.getModelStatus()
+        if status != highspy.HighsModelStatus.kOptimal:
+            raise RuntimeError(f"HiGHS did not find an optimal plan: {status}")
+        return list(h.getSolution().col_value)
+
+    # ------------------------------------------------------------------
+    # Replay the LP solution into Decisions + cost reporting
+    # ------------------------------------------------------------------
+    def _build_plan(
+        self,
+        forecast: Forecast,
+        battery: BatteryModel,
+        charge: list[float],
+        discharge: list[float],
+        energy_price: list[float],
+        distribution: list[float],
+        total_price: list[float],
+        demand: list[float],
+        ev_kwh: list[float],
+        reminders: list[str] | None,
+    ) -> Plan:
+        cfg = self.config
+        ceff = max(battery.charge_efficiency, _EPS)
+        deff = max(battery.discharge_efficiency, _EPS)
+        wear = battery.wear_cost
+        n = len(total_price)
+        p_term = (
+            cfg.terminal_price
+            if cfg.terminal_price is not None
+            else (sum(total_price) / n if n else 0.0)
+        )
+        # Economic thresholds implied by the objective (for the human-readable
+        # trace; the actual decisions come from the global LP, which may deviate
+        # because of SoC limits or because the energy is needed elsewhere).
+        charge_threshold = ceff * (deff * p_term - wear)
+        discharge_threshold = p_term + wear
 
         decisions: list[Decision] = []
-        for index, slot in enumerate(forecast.slots):
-            energy_price = (
-                slot.buy_price if slot.buy_price is not None else median_energy
-            )
-            distribution = slot.distribution_price_kwh or 0.0
-            total_price = energy_price + distribution
-            demand = slot.total_consumption_kwh
-            ev_kwh = ev_hours.get(slot.start, 0.0)
+        for t, slot in enumerate(forecast.slots):
+            c = charge[t] if charge[t] > _EPS else 0.0
+            d = discharge[t] if discharge[t] > _EPS else 0.0
+            ev = ev_kwh[t]
+            tp = total_price[t]
+
+            soc_before = battery.soc
+            cost_before = battery.energy_cost
+
+            stored = 0.0
+            delivered = 0.0
+            if c > 0:
+                stored = battery.charge_from_grid(c, tp)
+            if d > 0:
+                delivered, _ = battery.discharge_to_load(d)
+
+            if stored > _EPS and stored >= delivered:
+                mode = InverterMode.CHARGE
+            elif delivered > _EPS:
+                mode = InverterMode.DISCHARGE
+            else:
+                mode = InverterMode.PASSTHROUGH
+
+            grid_buy = max(0.0, demand[t] - delivered + c + ev)
 
             decision = Decision(start=slot.start)
-            decision.ev_charge = ev_kwh > 0
-            decision.ev_charge_kwh = ev_kwh
-            if decision.ev_charge:
-                decision.charge_power = ChargePower.LIMITED
-
-            grid_buy = ev_kwh  # EV is always grid-fed
-
-            # Snapshot the battery state *before* this hour's action and the
-            # threshold comparisons, so the debug trace can explain the branch.
-            soc_before = battery.soc
-            energy_cost_before = battery.energy_cost
-            headroom_before = battery.usable_charge_headroom_kwh
-            usable_discharge_before = battery.usable_discharge_kwh
-            is_cheap = total_price <= cheap
-            is_expensive = total_price >= expensive
-            battery_cheaper = energy_cost_before < total_price
-
-            if total_price <= cheap and battery.usable_charge_headroom_kwh > 0:
-                # Cheap hour: charge the battery and serve the house from grid.
-                max_kw = self.config.charge_curve.max_kw(battery.soc)
-                if decision.ev_charge:
-                    max_kw = max(0.0, max_kw - ev_request.charger_kw) if ev_request else max_kw
-                charge_grid_kwh = min(
-                    max_kw,
-                    battery.usable_charge_headroom_kwh / max(battery.charge_efficiency, 0.01),
-                )
-                # Battery energy cost tracking includes distribution: the
-                # household paid full grid price for every kWh that ends up
-                # stored. Without this, discharge decisions would prefer the
-                # battery even on hours where the stored energy is actually
-                # more expensive than the grid.
-                stored = battery.charge_from_grid(charge_grid_kwh, total_price)
-                decision.inverter_mode = InverterMode.CHARGE
-                decision.battery_charge_kwh = stored
-                grid_buy += charge_grid_kwh + demand
-            elif (
-                total_price >= expensive
-                and battery.energy_cost < total_price
-                and battery.usable_discharge_kwh > 0
-            ):
-                # Expensive hour and stored energy is cheaper than the grid: discharge.
-                delivered, _cost = battery.discharge_to_load(demand)
-                decision.inverter_mode = InverterMode.DISCHARGE
-                decision.battery_discharge_kwh = delivered
-                grid_buy += max(0.0, demand - delivered)
-            else:
-                # Passthrough: house served from grid, battery idle.
-                decision.inverter_mode = InverterMode.PASSTHROUGH
-                grid_buy += demand
-
+            decision.inverter_mode = mode
+            decision.ev_charge = ev > 0
+            decision.ev_charge_kwh = ev
+            decision.charge_power = (
+                ChargePower.LIMITED if ev > 0 else ChargePower.FULL
+            )
+            decision.battery_charge_kwh = stored
+            decision.battery_discharge_kwh = delivered
             decision.grid_buy_kwh = grid_buy
             decision.battery_soc = battery.soc
             decision.battery_energy_cost = battery.energy_cost
-            decision.grid_connected = battery.soc >= self.config.grid_disconnect_soc
-            decision.energy_cost = grid_buy * energy_price
-            decision.distribution_cost = grid_buy * distribution
+            decision.grid_connected = battery.soc >= cfg.grid_disconnect_soc
+            decision.energy_cost = grid_buy * energy_price[t]
+            decision.distribution_cost = grid_buy * distribution[t]
             decision.hour_cost = decision.energy_cost + decision.distribution_cost
-            # Value of energy drawn from the battery this hour (after losses
-            # are already baked into battery.energy_cost). Used by the chart
-            # to show "served from grid" vs "served from battery".
-            decision.battery_use_cost = (
-                decision.battery_discharge_kwh * decision.battery_energy_cost
-            )
-
-            # Human-readable reason for the chosen branch (for the debug export).
-            if decision.inverter_mode == InverterMode.CHARGE:
-                reason = (
-                    f"tania godzina (cena {total_price:.3f} ≤ próg taniej {cheap:.3f}) "
-                    f"i jest miejsce w baterii ({headroom_before:.2f} kWh) → ładowanie"
-                )
-            elif decision.inverter_mode == InverterMode.DISCHARGE:
-                reason = (
-                    f"droga godzina (cena {total_price:.3f} ≥ próg drogiej {expensive:.3f}), "
-                    f"energia w baterii ({energy_cost_before:.3f}) tańsza niż sieć "
-                    f"({total_price:.3f}) i jest co rozładować "
-                    f"({usable_discharge_before:.2f} kWh) → rozładowanie"
-                )
-            else:
-                blocks: list[str] = []
-                if is_cheap and headroom_before <= 0:
-                    blocks.append("tania godzina, ale bateria pełna (brak miejsca)")
-                elif not is_cheap:
-                    blocks.append(
-                        f"cena {total_price:.3f} > próg taniej {cheap:.3f} (nie ładuje)"
-                    )
-                if is_expensive and usable_discharge_before <= 0:
-                    blocks.append("droga godzina, ale bateria pusta (brak energii)")
-                elif is_expensive and not battery_cheaper:
-                    blocks.append(
-                        f"droga godzina, ale energia w baterii ({energy_cost_before:.3f}) "
-                        f"≥ cena sieci ({total_price:.3f}) — taniej z sieci"
-                    )
-                elif not is_expensive:
-                    blocks.append(
-                        f"cena {total_price:.3f} < próg drogiej {expensive:.3f} "
-                        f"(nie rozładowuje)"
-                    )
-                reason = "; ".join(blocks) + " → passthrough"
+            decision.battery_use_cost = delivered * decision.battery_energy_cost
 
             decision.trace = {
-                "total_price": round(total_price, 4),
-                "energy_price": round(energy_price, 4),
-                "distribution": round(distribution, 4),
-                "cheap_threshold": round(cheap, 4),
-                "expensive_threshold": round(expensive, 4),
-                "is_cheap": is_cheap,
-                "is_expensive": is_expensive,
-                "demand_kwh": round(demand, 3),
-                "ev_kwh": round(ev_kwh, 3),
+                "total_price": round(tp, 4),
+                "energy_price": round(energy_price[t], 4),
+                "distribution": round(distribution[t], 4),
+                "terminal_price": round(p_term, 4),
+                "charge_threshold": round(charge_threshold, 4),
+                "discharge_threshold": round(discharge_threshold, 4),
+                "demand_kwh": round(demand[t], 3),
+                "ev_kwh": round(ev, 3),
+                "charge_kwh": round(stored, 3),
+                "discharge_kwh": round(delivered, 3),
+                "grid_buy_kwh": round(grid_buy, 3),
                 "soc_before": round(soc_before, 1),
                 "soc_after": round(battery.soc, 1),
-                "battery_energy_cost_before": round(energy_cost_before, 4),
-                "battery_cheaper_than_grid": battery_cheaper,
-                "charge_headroom_before_kwh": round(headroom_before, 3),
-                "usable_discharge_before_kwh": round(usable_discharge_before, 3),
-                "reason": reason,
+                "battery_energy_cost_before": round(cost_before, 4),
+                "reason": self._reason(
+                    mode, tp, charge_threshold, discharge_threshold, stored, delivered
+                ),
             }
 
-            if index == 0 and reminders:
+            if t == 0 and reminders:
                 decision.reminders = list(reminders)
 
             decisions.append(decision)
 
         return Plan(forecast=forecast, decisions=decisions, created_at=dt_util.now())
 
-    def _plan_ev(self, forecast: Forecast, ev_request: EVRequest | None) -> dict[datetime, float]:
+    @staticmethod
+    def _reason(
+        mode: str,
+        total_price: float,
+        charge_threshold: float,
+        discharge_threshold: float,
+        stored: float,
+        delivered: float,
+    ) -> str:
+        if mode == InverterMode.CHARGE:
+            return (
+                f"ładowanie {stored:.2f} kWh: cena {total_price:.3f} ≤ próg "
+                f"opłacalnego magazynowania {charge_threshold:.3f} — energia "
+                f"z tej godziny pokryje droższe godziny w horyzoncie"
+            )
+        if mode == InverterMode.DISCHARGE:
+            return (
+                f"rozładowanie {delivered:.2f} kWh: cena {total_price:.3f} ≥ próg "
+                f"opłacalnego rozładowania {discharge_threshold:.3f} — taniej "
+                f"z baterii niż z sieci"
+            )
+        if total_price < charge_threshold:
+            return (
+                f"cena {total_price:.3f} < próg ładowania {charge_threshold:.3f}, "
+                f"ale optymalizator nie ładuje (bateria pełna albo brak droższych "
+                f"godzin do pokrycia tą energią) → passthrough"
+            )
+        if total_price > discharge_threshold:
+            return (
+                f"cena {total_price:.3f} > próg rozładowania "
+                f"{discharge_threshold:.3f}, ale energia z baterii jest "
+                f"potrzebna na jeszcze droższe godziny → passthrough"
+            )
+        return (
+            f"cena {total_price:.3f} pomiędzy progiem ładowania "
+            f"({charge_threshold:.3f}) a rozładowania ({discharge_threshold:.3f}) "
+            f"→ passthrough"
+        )
+
+    # ------------------------------------------------------------------
+    # EV planning (grid-fed, cheapest available hours)
+    # ------------------------------------------------------------------
+    def _plan_ev(
+        self, forecast: Forecast, ev_request: EVRequest | None
+    ) -> dict[datetime, float]:
         """Allocate EV charging into the cheapest available hours."""
         if ev_request is None or not ev_request.is_actionable:
             return {}

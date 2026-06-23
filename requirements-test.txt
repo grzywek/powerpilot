@@ -3,3 +3,4 @@
 #   pip install -r requirements-test.txt
 #   pytest -q
 pytest-homeassistant-custom-component
+highspy>=1.7

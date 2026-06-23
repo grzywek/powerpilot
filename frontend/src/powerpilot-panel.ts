@@ -142,6 +142,13 @@ const DEVICE_PALETTE = [
   "#f1c40f",
 ];
 
+/** Inverter operating mode → human label + background tint for the energy chart. */
+const INVERTER_MODE_META: Record<string, { label: string; fill: string }> = {
+  charge: { label: "ładowanie", fill: "rgba(46, 196, 182, 0.12)" },
+  discharge: { label: "rozładowanie", fill: "rgba(233, 138, 160, 0.12)" },
+  passthrough: { label: "passthrough", fill: "rgba(255, 255, 255, 0.05)" },
+};
+
 type RangeMode = "24h" | "3d" | "7d";
 
 const RANGE_HOURS: Record<RangeMode, number> = {
@@ -352,7 +359,7 @@ export class PowerPilotPanel extends LitElement {
       </div>
       ${this._renderNavBar()}
       <div class="card">
-        <div class="card-title">Energia: zużycie, bateria, EV, urządzenia + SoC</div>
+        <div class="card-title">Energia: ↑ sieć/bateria · ↓ zużycie (stack) + tryb falownika + SoC</div>
         <div id="pp-chart-energy" class="apex-chart"></div>
       </div>
       <div class="card">
@@ -496,7 +503,71 @@ export class PowerPilotPanel extends LitElement {
     return annotations;
   }
 
-  /** Build ApexCharts options for the energy chart (kWh bars + SoC %, line). */
+  /**
+   * Colored background bands showing the inverter operating mode
+   * (charge / discharge / passthrough). Consecutive hours sharing the same
+   * mode are merged into a single region so the chart stays readable.
+   */
+  private _inverterModeAnnotations(s: Series): any[] {
+    const regions: any[] = [];
+    let runStart: number | null = null;
+    let runMode: string | null = null;
+
+    const flush = (endTs: number) => {
+      if (runStart == null || runMode == null) return;
+      const meta = INVERTER_MODE_META[runMode];
+      if (meta) {
+        regions.push({
+          x: runStart,
+          x2: endTs,
+          fillColor: meta.fill,
+          opacity: 1,
+          borderColor: "transparent",
+          label: {
+            text: meta.label,
+            orientation: "horizontal",
+            position: "bottom",
+            offsetY: 14,
+            borderColor: "transparent",
+            style: {
+              background: "transparent",
+              color: "rgba(255,255,255,0.55)",
+              fontSize: "9px",
+            },
+          },
+        });
+      }
+    };
+
+    for (const h of s.hours) {
+      const startTs = new Date(h.start).getTime();
+      const mode = h.inverter_mode;
+      if (mode !== runMode) {
+        // Close the previous run where this hour begins, then open a new one.
+        flush(startTs);
+        runStart = mode ? startTs : null;
+        runMode = mode;
+      }
+    }
+    // Close the trailing run at the last hour's end.
+    if (runStart != null && runMode != null) {
+      const last = s.hours[s.hours.length - 1];
+      flush(new Date(last.start).getTime() + 3600 * 1000);
+    }
+    return regions;
+  }
+
+  /**
+   * Build ApexCharts options for the energy chart.
+   *
+   * Diverging stacked columns + SoC line:
+   *   - UP (positive)   = energy supply, stacked into one bar:
+   *                       grid import (charging the battery *or* passthrough)
+   *                       + battery discharge.
+   *   - DOWN (negative) = consumption, stacked into one bar:
+   *                       base household load + per-device + EV + battery charge.
+   * Background bands show the inverter mode (charge / discharge / passthrough).
+   */
   private _buildEnergyOptions(s: Series): any {
     const hrs = s.hours;
     const ts = hrs.map((h) => new Date(h.start).getTime());
@@ -504,33 +575,78 @@ export class PowerPilotPanel extends LitElement {
     const pair = (extract: (h: SeriesHour) => number | null) =>
       ts.map((t, i) => ({ x: t, y: extract(hrs[i]) }));
 
+    // Sum of sub-metered devices for an hour (real preferred, forecast fallback).
+    const deviceSum = (h: SeriesHour): number =>
+      Object.values(h.devices_real ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0) ||
+      Object.values(h.devices_forecast ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0);
+
+    // Base household load = total consumption minus the sub-metered devices,
+    // so stacking base + devices does not double-count.
+    const baseConsumption = (h: SeriesHour): number | null => {
+      if (h.is_past) {
+        if (h.consumption_real == null) return null;
+        return Math.max(0, h.consumption_real - deviceSum(h));
+      }
+      if (h.consumption_forecast == null) return h.base_consumption_forecast;
+      return h.base_consumption_forecast ?? Math.max(0, h.consumption_forecast - deviceSum(h));
+    };
+
+    const device = (eid: string) => (h: SeriesHour): number | null => {
+      const r = h.devices_real?.[eid];
+      if (r != null) return r;
+      const f = h.devices_forecast?.[eid];
+      return f != null ? f : null;
+    };
+
     const series: any[] = [];
     const kwhNames: string[] = [];
-    const pushKwh = (name: string, color: string, getter: (h: SeriesHour) => number | null) => {
-      series.push({ name, type: "column", data: pair(getter), color });
+    // sign = +1 for supply (up), -1 for consumption (down). Consumption values
+    // are negated so they stack below zero on the shared diverging axis.
+    const pushKwh = (
+      name: string,
+      color: string,
+      sign: 1 | -1,
+      getter: (h: SeriesHour) => number | null,
+    ) => {
+      const signed = (h: SeriesHour) => {
+        const v = getter(h);
+        return v == null ? null : sign * v;
+      };
+      series.push({ name, type: "column", data: pair(signed), color });
       kwhNames.push(name);
     };
 
-    pushKwh("Zużycie real", "#b5475d", (h) => (h.is_past ? h.consumption_real : null));
-    pushKwh("Zużycie prog.", "#e08aa0", (h) => (!h.is_past ? h.consumption_forecast : null));
-    pushKwh("Bateria — ładowanie", "#c98a3a", (h) => h.battery_charge_kwh);
-    pushKwh("Bateria — rozładowanie", "#b0a14f", (h) => h.battery_discharge_kwh);
-    pushKwh("Import z sieci", "#8e44ad", (h) => h.grid_buy_kwh);
-    pushKwh("EV ładowanie", "#3498db", (h) => h.ev_charge_kwh);
+    // --- Supply (stacks up) ---
+    pushKwh("Import z sieci", "#8e44ad", 1, (h) => h.grid_buy_kwh);
+    pushKwh("Bateria — rozładowanie", "#b0a14f", 1, (h) => h.battery_discharge_kwh);
 
-    // Per-device.
+    // --- Consumption (stacks down) ---
+    pushKwh("Zużycie bazowe", "#b5475d", -1, baseConsumption);
     const deviceIds = s.device_ids ?? [];
     deviceIds.forEach((eid, idx) => {
       const color = DEVICE_PALETTE[idx % DEVICE_PALETTE.length];
       const friendly = eid.split(".").slice(-1)[0];
-      const name = `Urz: ${friendly}`;
-      pushKwh(name, color, (h) => {
-        const r = h.devices_real?.[eid];
-        if (r != null) return r;
-        const f = h.devices_forecast?.[eid];
-        return f != null ? f : null;
-      });
+      pushKwh(`Urz: ${friendly}`, color, -1, device(eid));
     });
+    pushKwh("EV ładowanie", "#3498db", -1, (h) => h.ev_charge_kwh);
+    pushKwh("Bateria — ładowanie", "#c98a3a", -1, (h) => h.battery_charge_kwh);
+
+    // Shared symmetric-ish scale so every per-series axis aligns and the
+    // stacked bars line up. Compute the largest up-stack and down-stack.
+    let posMax = 0;
+    let negMax = 0;
+    for (const h of hrs) {
+      const up = (h.grid_buy_kwh ?? 0) + (h.battery_discharge_kwh ?? 0);
+      const down =
+        (baseConsumption(h) ?? 0) +
+        deviceSum(h) +
+        (h.ev_charge_kwh ?? 0) +
+        (h.battery_charge_kwh ?? 0);
+      posMax = Math.max(posMax, up);
+      negMax = Math.max(negMax, down);
+    }
+    const axMax = posMax > 0 ? posMax * 1.1 : 1;
+    const axMin = negMax > 0 ? -negMax * 1.1 : -1;
 
     // SoC line on the right axis.
     series.push({
@@ -540,12 +656,21 @@ export class PowerPilotPanel extends LitElement {
       color: "#2ec4b6",
     });
 
+    // Map timestamp → inverter mode so the tooltip title can show it.
+    const modeByTs = new Map<number, string | null>();
+    hrs.forEach((h, i) => modeByTs.set(ts[i], h.inverter_mode));
+    const fmtX = (val: number): string => {
+      const d = new Date(val);
+      const p = (n: number) => String(n).padStart(2, "0");
+      return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    };
+
     const nowTs = Date.now();
     return {
       chart: {
         type: "line",
         height: 460,
-        stacked: false,
+        stacked: true,
         animations: { enabled: false },
         toolbar: {
           show: true,
@@ -556,7 +681,7 @@ export class PowerPilotPanel extends LitElement {
       },
       theme: { mode: "dark" },
       stroke: { width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)), curve: "straight" },
-      plotOptions: { bar: { columnWidth: "75%", borderRadius: 1 } },
+      plotOptions: { bar: { columnWidth: "70%", borderRadius: 0 } },
       dataLabels: { enabled: false },
       fill: { opacity: 0.85 },
       series,
@@ -572,17 +697,19 @@ export class PowerPilotPanel extends LitElement {
         // physical axis (only the first carries title/labels; the rest are
         // hidden duplicates). This avoids the ApexCharts
         // `setSeriesYAxisMappings` crash that fires when some series have no
-        // explicit yaxis mapping.
+        // explicit yaxis mapping. All entries share identical min/max so the
+        // diverging stacks stay aligned.
         ...kwhNames.map((name, idx) => ({
           seriesName: name,
           show: idx === 0,
           showAlways: idx === 0,
-          title: idx === 0 ? { text: "kWh" } : undefined,
-          min: 0,
-          forceNiceScale: true,
+          title: idx === 0 ? { text: "kWh  (↑ sieć/bateria · ↓ zużycie)" } : undefined,
+          min: axMin,
+          max: axMax,
+          forceNiceScale: false,
           decimalsInFloat: 2,
           labels: idx === 0
-            ? { formatter: (v: number) => (v != null ? v.toFixed(2) : "") }
+            ? { formatter: (v: number) => (v != null ? Math.abs(v).toFixed(2) : "") }
             : { show: false },
         })),
         {
@@ -598,13 +725,20 @@ export class PowerPilotPanel extends LitElement {
         shared: true,
         intersect: false,
         followCursor: false,
-        x: { format: "EEEE dd.MM HH:mm" },
+        x: {
+          formatter: (val: number) => {
+            const mode = modeByTs.get(val);
+            const meta = mode ? INVERTER_MODE_META[mode] : null;
+            return fmtX(val) + (meta ? `  •  falownik: ${meta.label}` : "");
+          },
+        },
         y: {
           formatter: (val: number, opts: any) => {
             if (val == null) return "—";
             const name = opts?.w?.config?.series?.[opts.seriesIndex]?.name ?? "";
             if (name === "SoC %") return val.toFixed(0) + " %";
-            return val.toFixed(3) + " kWh";
+            // Consumption series are stored negative; show magnitude.
+            return Math.abs(val).toFixed(3) + " kWh";
           },
         },
       },
@@ -619,6 +753,7 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
+          ...this._inverterModeAnnotations(s),
           ...this._dayBoundaryAnnotations(s),
           {
             x: nowTs,

@@ -36,7 +36,7 @@
         "data": {
           "price_source": "Price source",
           "pradcast_api_key": "Pradcast API key",
-          "price_markup": "Retail markup (PLN/kWh)",
+          "price_markup": "Seller markup net (PLN/kWh)",
           "price_vat": "VAT multiplier"
         }
       },
@@ -98,7 +98,7 @@
         "data": {
           "price_source": "Price source",
           "pradcast_api_key": "Pradcast API key",
-          "price_markup": "Retail markup (PLN/kWh)",
+          "price_markup": "Seller markup net (PLN/kWh)",
           "price_vat": "VAT multiplier"
         }
       },

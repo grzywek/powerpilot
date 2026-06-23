@@ -46,8 +46,8 @@ CONF_WEATHER_ENTITY: Final = "weather_entity"
 # --- Price source ---
 CONF_PRICE_SOURCE: Final = "price_source"  # "sensor" | "pradcast"
 CONF_PRADCAST_API_KEY: Final = "pradcast_api_key"
-# Retail conversion of wholesale RDN prices to what you actually pay.
-CONF_PRICE_MARKUP: Final = "price_markup"  # additive PLN/kWh (distribution etc.)
+# Net seller markup added to wholesale RDN price before VAT.
+CONF_PRICE_MARKUP: Final = "price_markup"  # additive PLN/kWh (seller's net fee)
 CONF_PRICE_VAT: Final = "price_vat"  # multiplier applied after markup (e.g. 1.23)
 
 PRICE_SOURCE_SENSOR: Final = "sensor"

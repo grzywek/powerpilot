@@ -36,7 +36,7 @@
         "data": {
           "price_source": "Źródło cen",
           "pradcast_api_key": "Klucz API Pradcast",
-          "price_markup": "Narzut detaliczny (PLN/kWh)",
+          "price_markup": "Narzut sprzedawcy netto (PLN/kWh)",
           "price_vat": "Mnożnik VAT"
         }
       },
@@ -98,7 +98,7 @@
         "data": {
           "price_source": "Źródło cen",
           "pradcast_api_key": "Klucz API Pradcast",
-          "price_markup": "Narzut detaliczny (PLN/kWh)",
+          "price_markup": "Narzut sprzedawcy netto (PLN/kWh)",
           "price_vat": "Mnożnik VAT"
         }
       },

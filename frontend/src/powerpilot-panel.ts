@@ -466,6 +466,36 @@ export class PowerPilotPanel extends LitElement {
     this._lastMountedSeries = s;
   }
 
+  /** Generate xaxis annotations for midnight boundaries within the visible series. */
+  private _dayBoundaryAnnotations(s: Series): any[] {
+    const DAY_PL = ["niedz.", "pon.", "wt.", "śr.", "czw.", "pt.", "sob."];
+    const annotations: any[] = [];
+    const seen = new Set<string>();
+    for (const h of s.hours) {
+      const day = h.start.slice(0, 10);
+      if (seen.has(day)) continue;
+      seen.add(day);
+      const midnight = new Date(day + "T00:00:00").getTime();
+      // Skip if midnight is before the first hour in series.
+      const firstTs = new Date(s.hours[0].start).getTime();
+      if (midnight <= firstTs) continue;
+      const d = new Date(midnight);
+      annotations.push({
+        x: midnight,
+        borderColor: "rgba(255,255,255,0.25)",
+        strokeDashArray: 0,
+        label: {
+          borderColor: "transparent",
+          style: { background: "transparent", color: "rgba(255,255,255,0.5)", fontSize: "10px" },
+          text: `${DAY_PL[d.getDay()]} ${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`,
+          orientation: "horizontal",
+          position: "top",
+        },
+      });
+    }
+    return annotations;
+  }
+
   /** Build ApexCharts options for the energy chart (kWh bars + SoC %, line). */
   private _buildEnergyOptions(s: Series): any {
     const hrs = s.hours;
@@ -589,6 +619,7 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
+          ...this._dayBoundaryAnnotations(s),
           {
             x: nowTs,
             borderColor: "#ffffff",
@@ -722,6 +753,7 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
+          ...this._dayBoundaryAnnotations(s),
           {
             x: nowTs,
             borderColor: "#ffffff",

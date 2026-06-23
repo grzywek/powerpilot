@@ -113,7 +113,7 @@ interface Series {
   hours: SeriesHour[];
 }
 
-type Tab = "overview" | "status" | "profiles" | "logs";
+type Tab = "overview" | "prices" | "status" | "profiles" | "logs";
 
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const WEEKDAY_PL: Record<string, string> = {
@@ -168,6 +168,8 @@ export class PowerPilotPanel extends LitElement {
   @state() private _rangeMode: RangeMode = "3d";
   /** Right edge of the visible window. Defaults to "live" (now + horizon). */
   @state() private _anchor: Date | null = null;
+  /** Selected day on the Prices tab (ISO string YYYY-MM-DD). Null = today. */
+  @state() private _pricesDay: string | null = null;
 
   private _timer?: number;
   private _energyChart?: ApexCharts;
@@ -302,6 +304,7 @@ export class PowerPilotPanel extends LitElement {
       </div>
       <div class="tabs">
         ${this._tabButton("overview", "Przegląd")}
+        ${this._tabButton("prices", "Ceny")}
         ${this._tabButton("status", "Status")}
         ${this._tabButton("profiles", "Profile")}
         ${this._tabButton("logs", "Logi")}
@@ -309,6 +312,7 @@ export class PowerPilotPanel extends LitElement {
       ${this._error ? html`<div class="error">Błąd: ${this._error}</div>` : nothing}
       <div class="content">
         ${this._tab === "overview" ? this._renderOverview() : nothing}
+        ${this._tab === "prices" ? this._renderPrices() : nothing}
         ${this._tab === "status" ? this._renderStatus() : nothing}
         ${this._tab === "profiles" ? this._renderProfiles() : nothing}
         ${this._tab === "logs" ? this._renderLogs() : nothing}
@@ -605,18 +609,9 @@ export class PowerPilotPanel extends LitElement {
     const hrs = s.hours;
     const ts = hrs.map((h) => new Date(h.start).getTime());
 
-    // Single price line per slot = TOTAL gross price (energy + distribution).
-    // Split into "confirmed" (solid) and "forecast" (dashed) so the user can
-    // tell where real RDN ends and the projection begins. The breakdown into
-    // energy vs distribution is shown in the tooltip.
-    const confirmedData = ts.map((t, i) => ({
-      x: t,
-      y: hrs[i].price_confirmed ? hrs[i].total_price_kwh : null,
-    }));
-    const forecastData = ts.map((t, i) => ({
-      x: t,
-      y: !hrs[i].price_confirmed ? hrs[i].total_price_kwh : null,
-    }));
+    // Single continuous line for total price (energy + distribution).
+    // Tooltip shows the breakdown + confirmed/forecast indicator.
+    const priceData = ts.map((t, i) => ({ x: t, y: hrs[i].total_price_kwh }));
     const batCostData = ts.map((t, i) => ({ x: t, y: hrs[i].battery_energy_cost }));
     // Two PLN/h stacked columns: cost served from the grid vs cost served
     // from the battery. Sum = total cost of meeting demand this hour.
@@ -624,8 +619,7 @@ export class PowerPilotPanel extends LitElement {
     const batUseCostData = ts.map((t, i) => ({ x: t, y: hrs[i].battery_use_cost }));
 
     const series: any[] = [
-      { name: "Cena zakupu (pewne)", type: "line", data: confirmedData, color: "#facc15" },
-      { name: "Cena zakupu (prognoza)", type: "line", data: forecastData, color: "#fde68a" },
+      { name: "Cena pełna", type: "line", data: priceData, color: "#facc15" },
       { name: "Cena w baterii", type: "line", data: batCostData, color: "#9e9e9e" },
       { name: "Koszt energii - sieć", type: "column", data: gridCostData, color: "#e67e22" },
       { name: "Koszt energii - bateria", type: "column", data: batUseCostData, color: "#3b82f6" },
@@ -647,14 +641,14 @@ export class PowerPilotPanel extends LitElement {
       },
       theme: { mode: "dark" },
       stroke: {
-        // 3 lines + 2 columns = 5 series total.
-        width: [3, 3, 2, 0, 0],
+        // 2 lines + 2 columns = 4 series total.
+        width: [3, 2, 0, 0],
         curve: "straight",
-        dashArray: [0, 5, 3, 0, 0],
+        dashArray: [0, 3, 0, 0],
       },
       plotOptions: { bar: { columnWidth: "55%", borderRadius: 1 } },
       dataLabels: { enabled: false },
-      fill: { opacity: [1, 1, 1, 0.75, 0.7] },
+      fill: { opacity: [1, 1, 0.75, 0.7] },
       series,
       xaxis: {
         type: "datetime",
@@ -665,13 +659,12 @@ export class PowerPilotPanel extends LitElement {
       },
       yaxis: [
         {
-          seriesName: "Cena zakupu (pewne)",
+          seriesName: "Cena pełna",
           title: { text: "PLN/kWh" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(3) : "") },
           forceNiceScale: true,
           decimalsInFloat: 3,
         },
-        { seriesName: "Cena zakupu (prognoza)", show: false, forceNiceScale: true },
         { seriesName: "Cena w baterii", show: false, forceNiceScale: true },
         {
           seriesName: "Koszt energii - sieć",
@@ -767,6 +760,86 @@ export class PowerPilotPanel extends LitElement {
       started = true;
     });
     return d.trim();
+  }
+
+  // ------------------------------------------------------------------
+  // Prices tab (table + day switcher)
+  // ------------------------------------------------------------------
+  private _renderPrices(): TemplateResult {
+    const s = this._series;
+    if (!s || !s.hours?.length) {
+      return html`<div class="card empty">Brak danych cenowych. Poczekaj na pierwsze przeliczenie.</div>`;
+    }
+
+    // Determine which days are available in the series data.
+    const daySet = new Set<string>();
+    for (const h of s.hours) {
+      daySet.add(h.start.slice(0, 10));
+    }
+    const days = [...daySet].sort();
+    const today = new Date().toISOString().slice(0, 10);
+    const selectedDay = this._pricesDay && days.includes(this._pricesDay) ? this._pricesDay : (days.includes(today) ? today : days[0]);
+
+    const filtered = s.hours.filter((h) => h.start.slice(0, 10) === selectedDay);
+
+    const fmtHour = (iso: string) => {
+      const d = new Date(iso);
+      return d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+    };
+    const fmt3 = (v: number | null) => (v == null ? "—" : v.toFixed(3));
+    const fmt2 = (v: number | null) => (v == null ? "—" : v.toFixed(2));
+    const fmtDayLabel = (iso: string) => {
+      const d = new Date(iso + "T12:00:00");
+      return d.toLocaleDateString("pl-PL", { weekday: "short", day: "2-digit", month: "2-digit" });
+    };
+
+    return html`
+      <div class="card">
+        <div class="card-title">Ceny godzinowe</div>
+        <div class="prices-day-nav">
+          ${days.map(
+            (d) => html`
+              <button
+                class="nav-btn ${d === selectedDay ? "active" : ""}"
+                @click=${() => { this._pricesDay = d; }}
+              >
+                ${fmtDayLabel(d)}
+              </button>
+            `
+          )}
+        </div>
+        <div class="prices-table-wrap">
+          <table class="prices-table">
+            <thead>
+              <tr>
+                <th>Godzina</th>
+                <th>Energia</th>
+                <th>Dystrybucja</th>
+                <th>Cena pełna</th>
+                <th>Bateria</th>
+                <th>Koszt/h</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtered.map(
+                (h) => html`
+                  <tr class="${h.is_past ? "past" : ""}">
+                    <td>${fmtHour(h.start)}</td>
+                    <td>${fmt3(h.buy_price)}</td>
+                    <td>${fmt3(h.distribution_price_kwh)}</td>
+                    <td class="bold">${fmt3(h.total_price_kwh)}</td>
+                    <td>${fmt3(h.battery_energy_cost)}</td>
+                    <td>${fmt2(h.hour_cost)}</td>
+                    <td class="muted">${h.price_confirmed ? "✓" : "~"}</td>
+                  </tr>
+                `
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
   }
 
   // ------------------------------------------------------------------
@@ -1321,6 +1394,45 @@ export class PowerPilotPanel extends LitElement {
       display: inline-flex !important;
       align-items: center !important;
       margin: 2px 8px !important;
+    }
+    /* Prices tab */
+    .prices-day-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+    .prices-table-wrap {
+      overflow-x: auto;
+    }
+    .prices-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+    .prices-table th,
+    .prices-table td {
+      padding: 5px 8px;
+      text-align: right;
+      border-bottom: 1px solid var(--divider-color, #333);
+    }
+    .prices-table th {
+      font-weight: 600;
+      text-align: right;
+      opacity: 0.7;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .prices-table th:first-child,
+    .prices-table td:first-child {
+      text-align: left;
+    }
+    .prices-table tr.past td {
+      opacity: 0.5;
+    }
+    .prices-table .bold {
+      font-weight: 600;
     }
   `;
 }

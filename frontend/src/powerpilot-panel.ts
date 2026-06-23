@@ -90,6 +90,7 @@ interface SeriesHour {
   consumption_forecast: number | null;
   base_consumption_forecast: number | null;
   soc: number | null;
+  battery_soc_start: number | null;
   inverter_mode: string | null;
   battery_charge_kwh: number | null;
   battery_discharge_kwh: number | null;
@@ -142,11 +143,12 @@ const DEVICE_PALETTE = [
   "#f1c40f",
 ];
 
-/** Inverter operating mode → human label + background tint for the energy chart. */
+/** Inverter operating mode → human label + background tint for the energy chart.
+ *  Tints use mid-opacity colors that read on both light and dark HA themes. */
 const INVERTER_MODE_META: Record<string, { label: string; fill: string }> = {
-  charge: { label: "ładowanie", fill: "rgba(46, 196, 182, 0.12)" },
-  discharge: { label: "rozładowanie", fill: "rgba(233, 138, 160, 0.12)" },
-  passthrough: { label: "passthrough", fill: "rgba(255, 255, 255, 0.05)" },
+  charge: { label: "ładowanie", fill: "rgba(46, 196, 182, 0.16)" },
+  discharge: { label: "rozładowanie", fill: "rgba(233, 138, 160, 0.18)" },
+  passthrough: { label: "passthrough", fill: "rgba(128, 128, 128, 0.10)" },
 };
 
 type RangeMode = "24h" | "3d" | "7d";
@@ -473,9 +475,17 @@ export class PowerPilotPanel extends LitElement {
     this._lastMountedSeries = s;
   }
 
+  /** Whether Home Assistant is currently in dark mode (drives chart theme). */
+  private _isDark(): boolean {
+    return !!this.hass?.themes?.darkMode;
+  }
+
   /** Generate xaxis annotations for midnight boundaries within the visible series. */
   private _dayBoundaryAnnotations(s: Series): any[] {
     const DAY_PL = ["niedz.", "pon.", "wt.", "śr.", "czw.", "pt.", "sob."];
+    const dark = this._isDark();
+    const borderColor = dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.18)";
+    const textColor = dark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.45)";
     const annotations: any[] = [];
     const seen = new Set<string>();
     for (const h of s.hours) {
@@ -489,11 +499,11 @@ export class PowerPilotPanel extends LitElement {
       const d = new Date(midnight);
       annotations.push({
         x: midnight,
-        borderColor: "rgba(255,255,255,0.25)",
+        borderColor,
         strokeDashArray: 0,
         label: {
           borderColor: "transparent",
-          style: { background: "transparent", color: "rgba(255,255,255,0.5)", fontSize: "10px" },
+          style: { background: "transparent", color: textColor, fontSize: "10px" },
           text: `${DAY_PL[d.getDay()]} ${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`,
           orientation: "horizontal",
           position: "top",
@@ -510,6 +520,7 @@ export class PowerPilotPanel extends LitElement {
    */
   private _inverterModeAnnotations(s: Series): any[] {
     const regions: any[] = [];
+    const labelColor = this._isDark() ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.55)";
     let runStart: number | null = null;
     let runMode: string | null = null;
 
@@ -531,7 +542,7 @@ export class PowerPilotPanel extends LitElement {
             borderColor: "transparent",
             style: {
               background: "transparent",
-              color: "rgba(255,255,255,0.55)",
+              color: labelColor,
               fontSize: "9px",
             },
           },
@@ -598,6 +609,25 @@ export class PowerPilotPanel extends LitElement {
       return f != null ? f : null;
     };
 
+    // Stack component definitions — the single source of truth for both the
+    // chart series and the custom tooltip breakdown.
+    type Row = { label: string; color: string; get: (h: SeriesHour) => number | null };
+    const deviceIds = s.device_ids ?? [];
+    const upRows: Row[] = [
+      { label: "Import z sieci", color: "#8e44ad", get: (h) => h.grid_buy_kwh },
+      { label: "Bateria — rozładowanie", color: "#b0a14f", get: (h) => h.battery_discharge_kwh },
+    ];
+    const downRows: Row[] = [
+      { label: "Zużycie bazowe", color: "#b5475d", get: baseConsumption },
+      ...deviceIds.map((eid, idx) => ({
+        label: `Urz: ${eid.split(".").slice(-1)[0]}`,
+        color: DEVICE_PALETTE[idx % DEVICE_PALETTE.length],
+        get: device(eid),
+      })),
+      { label: "EV ładowanie", color: "#3498db", get: (h) => h.ev_charge_kwh },
+      { label: "Bateria — ładowanie", color: "#c98a3a", get: (h) => h.battery_charge_kwh },
+    ];
+
     const series: any[] = [];
     const kwhNames: string[] = [];
     // sign = +1 for supply (up), -1 for consumption (down). Consumption values
@@ -616,20 +646,8 @@ export class PowerPilotPanel extends LitElement {
       kwhNames.push(name);
     };
 
-    // --- Supply (stacks up) ---
-    pushKwh("Import z sieci", "#8e44ad", 1, (h) => h.grid_buy_kwh);
-    pushKwh("Bateria — rozładowanie", "#b0a14f", 1, (h) => h.battery_discharge_kwh);
-
-    // --- Consumption (stacks down) ---
-    pushKwh("Zużycie bazowe", "#b5475d", -1, baseConsumption);
-    const deviceIds = s.device_ids ?? [];
-    deviceIds.forEach((eid, idx) => {
-      const color = DEVICE_PALETTE[idx % DEVICE_PALETTE.length];
-      const friendly = eid.split(".").slice(-1)[0];
-      pushKwh(`Urz: ${friendly}`, color, -1, device(eid));
-    });
-    pushKwh("EV ładowanie", "#3498db", -1, (h) => h.ev_charge_kwh);
-    pushKwh("Bateria — ładowanie", "#c98a3a", -1, (h) => h.battery_charge_kwh);
+    upRows.forEach((r) => pushKwh(r.label, r.color, 1, r.get));
+    downRows.forEach((r) => pushKwh(r.label, r.color, -1, r.get));
 
     // Shared symmetric-ish scale so every per-series axis aligns and the
     // stacked bars line up. Compute the largest up-stack and down-stack.
@@ -648,24 +666,23 @@ export class PowerPilotPanel extends LitElement {
     const axMax = posMax > 0 ? posMax * 1.1 : 1;
     const axMin = negMax > 0 ? -negMax * 1.1 : -1;
 
-    // SoC line on the right axis.
+    // SoC line on the right axis. `soc` is the END-of-hour state; plotting it
+    // at the hour start would move the line one hour too early (a 17:00
+    // discharge would render its drop in the 16→17 segment). The backend also
+    // provides `battery_soc_start` — the SoC the battery *enters* each hour
+    // with — so the rise/fall lines up with the bar and inverter-mode band of
+    // the hour that caused it, including the very first hour of the window.
     series.push({
       name: "SoC %",
       type: "line",
-      data: pair((h) => h.soc),
+      data: pair((h) => h.battery_soc_start),
       color: "#2ec4b6",
     });
 
-    // Map timestamp → inverter mode so the tooltip title can show it.
-    const modeByTs = new Map<number, string | null>();
-    hrs.forEach((h, i) => modeByTs.set(ts[i], h.inverter_mode));
-    const fmtX = (val: number): string => {
-      const d = new Date(val);
-      const p = (n: number) => String(n).padStart(2, "0");
-      return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
-    };
-
     const nowTs = Date.now();
+    const dark = this._isDark();
+    const nowColor = dark ? "#ffffff" : "#333333";
+    const nowBg = dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.08)";
     return {
       chart: {
         type: "line",
@@ -679,7 +696,7 @@ export class PowerPilotPanel extends LitElement {
         zoom: { enabled: true, type: "x" },
         background: "transparent",
       },
-      theme: { mode: "dark" },
+      theme: { mode: dark ? "dark" : "light" },
       stroke: { width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)), curve: "straight" },
       plotOptions: { bar: { columnWidth: "70%", borderRadius: 0 } },
       dataLabels: { enabled: false },
@@ -693,25 +710,20 @@ export class PowerPilotPanel extends LitElement {
         },
       },
       yaxis: [
-        // Each kWh series gets its OWN yaxis entry pointing at the same shared
-        // physical axis (only the first carries title/labels; the rest are
-        // hidden duplicates). This avoids the ApexCharts
-        // `setSeriesYAxisMappings` crash that fires when some series have no
-        // explicit yaxis mapping. All entries share identical min/max so the
-        // diverging stacks stay aligned.
-        ...kwhNames.map((name, idx) => ({
-          seriesName: name,
-          show: idx === 0,
-          showAlways: idx === 0,
-          title: idx === 0 ? { text: "kWh  (↑ sieć/bateria · ↓ zużycie)" } : undefined,
+        // ALL kWh column series share ONE physical axis — this is what makes
+        // them stack into a single up/down bar per hour. `seriesName` is the
+        // full list of column names so every series is explicitly mapped
+        // (avoids the ApexCharts `setSeriesYAxisMappings` crash) while staying
+        // on the same axis (mapping each to its own axis would break stacking).
+        {
+          seriesName: kwhNames,
           min: axMin,
           max: axMax,
           forceNiceScale: false,
           decimalsInFloat: 2,
-          labels: idx === 0
-            ? { formatter: (v: number) => (v != null ? Math.abs(v).toFixed(2) : "") }
-            : { show: false },
-        })),
+          title: { text: "kWh  (↑ sieć/bateria · ↓ zużycie)" },
+          labels: { formatter: (v: number) => (v != null ? Math.abs(v).toFixed(2) : "") },
+        },
         {
           seriesName: "SoC %",
           opposite: true,
@@ -725,21 +737,69 @@ export class PowerPilotPanel extends LitElement {
         shared: true,
         intersect: false,
         followCursor: false,
-        x: {
-          formatter: (val: number) => {
-            const mode = modeByTs.get(val);
-            const meta = mode ? INVERTER_MODE_META[mode] : null;
-            return fmtX(val) + (meta ? `  •  falownik: ${meta.label}` : "");
-          },
-        },
-        y: {
-          formatter: (val: number, opts: any) => {
-            if (val == null) return "—";
-            const name = opts?.w?.config?.series?.[opts.seriesIndex]?.name ?? "";
-            if (name === "SoC %") return val.toFixed(0) + " %";
-            // Consumption series are stored negative; show magnitude.
-            return Math.abs(val).toFixed(3) + " kWh";
-          },
+        // Custom HTML: show the total of the up-bar (supply) and down-bar
+        // (consumption) plus the components that make up each sum — mirrors the
+        // cost chart's tooltip style.
+        custom: ({ dataPointIndex }: { dataPointIndex: number }) => {
+          const h = hrs[dataPointIndex];
+          if (!h) return "";
+          const tt = dark
+            ? { bg: "#1f2937", fg: "#f3f4f6", border: "#374151" }
+            : { bg: "#ffffff", fg: "#1f2937", border: "#d1d5db" };
+          const fmt = (v: number) => v.toFixed(2);
+          const start = new Date(h.start);
+          const date = start.toLocaleString("pl-PL", {
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          const modeMeta = h.inverter_mode ? INVERTER_MODE_META[h.inverter_mode] : null;
+          const modeStr = modeMeta ? `  •  falownik: ${modeMeta.label}` : "";
+
+          // SoC entering vs leaving this hour (entering = start-of-hour state
+          // from the backend, leaving = this hour's end-of-hour value).
+          const socStart = h.battery_soc_start;
+          const socEnd = h.soc;
+
+          const dot = (c: string) =>
+            `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${c};margin-right:5px;vertical-align:middle"></span>`;
+          const compRows = (rows: Row[]) =>
+            rows
+              .map((r) => ({ label: r.label, color: r.color, v: r.get(h) ?? 0 }))
+              .filter((r) => Math.abs(r.v) >= 0.005)
+              .map(
+                (r) =>
+                  `<tr><td style="padding:1px 0 1px 12px;opacity:0.85">${dot(r.color)}${r.label}</td>` +
+                  `<td style="text-align:right;font-variant-numeric:tabular-nums;opacity:0.85">${fmt(r.v)} kWh</td></tr>`,
+              )
+              .join("");
+          const sum = (rows: Row[]) =>
+            rows.reduce((acc, r) => acc + Math.abs(r.get(h) ?? 0), 0);
+          const upTotal = sum(upRows);
+          const downTotal = sum(downRows);
+          const sep = `<tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>`;
+          const socRow =
+            socStart != null || socEnd != null
+              ? `${sep}<tr><td style="padding:1px 0">SoC (pocz. → kon.)</td>` +
+                `<td style="text-align:right;font-variant-numeric:tabular-nums">` +
+                `${socStart != null ? socStart.toFixed(0) : "—"}% → ${socEnd != null ? socEnd.toFixed(0) : "—"}%</td></tr>`
+              : "";
+
+          return `
+            <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.4;min-width:260px">
+              <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}</div>
+              <table style="border-collapse:collapse;width:100%">
+                <tr><td style="padding:1px 0;font-weight:600">↑ Źródła energii</td><td style="text-align:right;font-weight:600;font-variant-numeric:tabular-nums">${fmt(upTotal)} kWh</td></tr>
+                ${compRows(upRows)}
+                ${sep}
+                <tr><td style="padding:1px 0;font-weight:600">↓ Zużycie</td><td style="text-align:right;font-weight:600;font-variant-numeric:tabular-nums">${fmt(downTotal)} kWh</td></tr>
+                ${compRows(downRows)}
+                ${socRow}
+              </table>
+            </div>
+          `;
         },
       },
       legend: {
@@ -757,11 +817,11 @@ export class PowerPilotPanel extends LitElement {
           ...this._dayBoundaryAnnotations(s),
           {
             x: nowTs,
-            borderColor: "#ffffff",
+            borderColor: nowColor,
             strokeDashArray: 4,
             label: {
-              borderColor: "#ffffff",
-              style: { background: "rgba(255,255,255,0.15)", color: "#fff" },
+              borderColor: nowColor,
+              style: { background: nowBg, color: nowColor },
               text: "teraz",
             },
           },
@@ -792,6 +852,9 @@ export class PowerPilotPanel extends LitElement {
     ];
 
     const nowTs = Date.now();
+    const dark = this._isDark();
+    const nowColor = dark ? "#ffffff" : "#333333";
+    const nowBg = dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.08)";
     return {
       chart: {
         type: "line",
@@ -805,7 +868,7 @@ export class PowerPilotPanel extends LitElement {
         zoom: { enabled: true, type: "x" },
         background: "transparent",
       },
-      theme: { mode: "dark" },
+      theme: { mode: dark ? "dark" : "light" },
       stroke: {
         // 2 lines + 2 columns = 4 series total.
         width: [3, 2, 0, 0],
@@ -864,15 +927,18 @@ export class PowerPilotPanel extends LitElement {
             minute: "2-digit",
           });
           const confirmed = row.price_confirmed ? "(pewne)" : "(prognoza)";
+          const tt = this._isDark()
+            ? { bg: "#1f2937", fg: "#f3f4f6", border: "#374151" }
+            : { bg: "#ffffff", fg: "#1f2937", border: "#d1d5db" };
           return `
-            <div style="padding:8px 10px;background:#1f2937;color:#f3f4f6;border:1px solid #374151;border-radius:6px;font-size:12px;line-height:1.4;min-width:240px">
-              <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid #374151;padding-bottom:4px">${date}</div>
+            <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.4;min-width:240px">
+              <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}</div>
               <table style="border-collapse:collapse;width:100%">
                 <tr><td style="padding:1px 0">Cena całkowita ${confirmed}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt3(row.total_price_kwh)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· energia</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmt3(row.buy_price)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· dystrybucja (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmt3(row.distribution_price_kwh)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0">Cena w baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt3(row.battery_energy_cost)} PLN/kWh</td></tr>
-                <tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid #374151"></div></td></tr>
+                <tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>
                 <tr><td style="padding:1px 0">Koszt z sieci</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.hour_cost)} PLN</td></tr>
                 <tr><td style="padding:1px 0">Koszt z baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.battery_use_cost)} PLN</td></tr>
               </table>
@@ -891,11 +957,11 @@ export class PowerPilotPanel extends LitElement {
           ...this._dayBoundaryAnnotations(s),
           {
             x: nowTs,
-            borderColor: "#ffffff",
+            borderColor: nowColor,
             strokeDashArray: 4,
             label: {
-              borderColor: "#ffffff",
-              style: { background: "rgba(255,255,255,0.15)", color: "#fff" },
+              borderColor: nowColor,
+              style: { background: nowBg, color: nowColor },
               text: "teraz",
             },
           },

@@ -347,6 +347,14 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         hours: list[dict] = []
 
+        # SoC *entering* each hour (start-of-hour state). `decision.battery_soc`
+        # and the recorder mean are END-of-hour values, so to draw the SoC line
+        # rising/falling across the bar that caused the change, the chart needs
+        # the value the battery enters each hour with. Track it as we walk
+        # forward; seed from the hour just before the window (the recorder reads
+        # one extra hour back exactly for this).
+        prev_soc = soc_real.get(past_start - timedelta(hours=1))
+
         # ----- Past hours -----
         h = past_start
         while h < past_end:
@@ -392,6 +400,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "consumption_forecast": forecast_c,
                     "base_consumption_forecast": round(base_fc, 3) if base_fc is not None else None,
                     "soc": round(soc_real[h], 1) if h in soc_real else None,
+                    "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                     "inverter_mode": None,
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
                     "battery_discharge_kwh": round(bat_discharge_real[h], 3) if h in bat_discharge_real else None,
@@ -406,10 +415,17 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "devices_forecast": dev_forecast,
                 }
             )
+            if h in soc_real:
+                prev_soc = soc_real[h]
             h += timedelta(hours=1)
 
         # ----- Future hours from plan -----
         plan = self.data
+        # If there was no past window to seed from, start the future SoC line at
+        # the live SoC the optimizer began planning from.
+        if prev_soc is None:
+            live_soc = self._read_soc()
+            prev_soc = live_soc if live_soc else None
         if plan:
             for slot, decision in zip(plan.forecast.slots, plan.decisions):
                 if window_end and slot.start >= window_end:
@@ -438,6 +454,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "consumption_forecast": round(slot.total_consumption_kwh, 3),
                         "base_consumption_forecast": round(slot.base_consumption_kwh, 3),
                         "soc": round(decision.battery_soc, 1),
+                        "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                         "inverter_mode": decision.inverter_mode,
                         "battery_charge_kwh": round(decision.battery_charge_kwh, 3),
                         "battery_discharge_kwh": round(decision.battery_discharge_kwh, 3),
@@ -452,6 +469,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "devices_forecast": dev_forecast,
                     }
                 )
+                prev_soc = decision.battery_soc
 
         return {
             "now": now.isoformat(),

@@ -91,3 +91,39 @@ async def test_ws_prices_archive(hass: HomeAssistant, hass_ws_client) -> None:
     assert msg["success"]
     assert msg["result"]["date"] == "2030-01-01"
     assert len(msg["result"]["hours"]) == 24
+
+
+async def test_ws_snapshots_and_accuracy(hass: HomeAssistant, hass_ws_client) -> None:
+    await _setup(hass)
+    client = await hass_ws_client(hass)
+
+    # The first optimization run records one vintage.
+    await client.send_json({"id": 1, "type": "powerpilot/snapshots"})
+    msg = await client.receive_json()
+    assert msg["success"]
+    assert "runs" in msg["result"]
+    assert len(msg["result"]["runs"]) >= 1
+    run_at = msg["result"]["runs"][0]["run_at"]
+
+    await client.send_json(
+        {"id": 2, "type": "powerpilot/snapshot", "run_at": run_at}
+    )
+    msg = await client.receive_json()
+    assert msg["success"]
+    assert msg["result"]["run_at"]
+    assert "hours" in msg["result"]
+    if msg["result"]["hours"]:
+        for key in ("start", "buy_price", "consumption_forecast", "inverter_mode"):
+            assert key in msg["result"]["hours"][0]
+
+    await client.send_json(
+        {"id": 3, "type": "powerpilot/accuracy", "lead_hours": 24, "days": 3}
+    )
+    msg = await client.receive_json()
+    assert msg["success"]
+    result = msg["result"]
+    assert result["lead_hours"] == 24
+    assert len(result["bias_by_hour"]) == 24
+    assert "mae" in result
+    assert "bias" in result
+    assert "hours" in result

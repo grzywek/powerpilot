@@ -100,6 +100,47 @@ def ws_prices(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], coordinator.get_price_archive(msg.get("date")))
 
 
+@websocket_api.websocket_command({vol.Required("type"): "powerpilot/snapshots"})
+@callback
+def ws_snapshots(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass)
+    connection.send_result(
+        msg["id"], coordinator.get_snapshots() if coordinator else {"runs": []}
+    )
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "powerpilot/snapshot", vol.Optional("run_at"): str}
+)
+@callback
+def ws_snapshot(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass)
+    if not coordinator:
+        connection.send_result(msg["id"], {"run_at": None, "hours": []})
+        return
+    connection.send_result(msg["id"], coordinator.get_snapshot(msg.get("run_at")))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "powerpilot/accuracy",
+        vol.Optional("lead_hours", default=24): int,
+        vol.Optional("days", default=7): int,
+    }
+)
+@websocket_api.async_response
+async def ws_accuracy(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass)
+    if not coordinator:
+        connection.send_result(msg["id"], {"hours": []})
+        return
+    result = await coordinator.get_accuracy(
+        lead_hours=int(msg.get("lead_hours", 24)),
+        days=int(msg.get("days", 7)),
+    )
+    connection.send_result(msg["id"], result)
+
+
 @websocket_api.websocket_command({vol.Required("type"): "powerpilot/debug"})
 @websocket_api.async_response
 async def ws_debug(hass: HomeAssistant, connection, msg) -> None:
@@ -120,4 +161,7 @@ def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_forecasts)
     websocket_api.async_register_command(hass, ws_series)
     websocket_api.async_register_command(hass, ws_prices)
+    websocket_api.async_register_command(hass, ws_snapshots)
+    websocket_api.async_register_command(hass, ws_snapshot)
+    websocket_api.async_register_command(hass, ws_accuracy)
     websocket_api.async_register_command(hass, ws_debug)

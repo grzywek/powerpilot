@@ -155,7 +155,55 @@ const PRICE_SOURCE_LABEL: Record<string, string> = {
   estimate: "szacowanie",
 };
 
-type Tab = "overview" | "prices" | "status" | "profiles" | "logs" | "debug";
+interface SnapshotRun {
+  run_at: string;
+  start: string | null;
+  horizon_hours: number | null;
+  total_cost: number | null;
+}
+
+interface SnapshotHour {
+  start: string | null;
+  buy_price: number | null;
+  distribution_price_kwh: number | null;
+  total_price_kwh: number | null;
+  price_type: PriceType | null;
+  consumption_forecast: number | null;
+  base_consumption_forecast: number | null;
+  inverter_mode: string | null;
+  battery_soc: number | null;
+  soc: number | null;
+  grid_buy_kwh: number | null;
+  hour_cost: number | null;
+}
+
+interface SnapshotPayload {
+  run_at: string | null;
+  start?: string;
+  total_cost?: number | null;
+  hours: SnapshotHour[];
+}
+
+interface AccuracyHour {
+  start: string;
+  predicted_cons: number | null;
+  actual_cons: number | null;
+  error: number | null;
+  predicted_price: number | null;
+  actual_price: number | null;
+}
+
+interface Accuracy {
+  lead_hours: number;
+  days: number;
+  samples: number;
+  mae: number | null;
+  bias: number | null;
+  bias_by_hour: (number | null)[];
+  hours: AccuracyHour[];
+}
+
+type Tab = "overview" | "prices" | "simulations" | "status" | "profiles" | "logs" | "debug";
 
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const WEEKDAY_PL: Record<string, string> = {
@@ -230,9 +278,22 @@ export class PowerPilotPanel extends LitElement {
   @state() private _pricesData: PriceArchive | null = null;
   @state() private _pricesLoading = false;
 
+  /** Simulations tab: available vintages, the two compared snapshots, accuracy. */
+  @state() private _snapshotRuns: SnapshotRun[] = [];
+  @state() private _snapA: string | null = null;
+  @state() private _snapB: string | null = null;
+  @state() private _snapDataA: SnapshotPayload | null = null;
+  @state() private _snapDataB: SnapshotPayload | null = null;
+  @state() private _accuracy: Accuracy | null = null;
+  @state() private _accuracyLead = 24;
+  @state() private _simLoading = false;
+
   private _timer?: number;
   private _energyChart?: ApexCharts;
   private _priceChart?: ApexCharts;
+  private _compareChart?: ApexCharts;
+  private _accuracyChart?: ApexCharts;
+  private _biasChart?: ApexCharts;
   /** Reference to the last Series payload mounted into the charts. Used to
    *  short-circuit Lit updates that don't actually change the data, so user
    *  interactions (zoom, tooltip) survive periodic refreshes. */
@@ -250,6 +311,7 @@ export class PowerPilotPanel extends LitElement {
     this._priceChart?.destroy();
     this._energyChart = undefined;
     this._priceChart = undefined;
+    this._destroySimCharts();
     super.disconnectedCallback();
   }
 
@@ -306,6 +368,8 @@ export class PowerPilotPanel extends LitElement {
       // Keep the price archive fresh while it's on screen (today's rows pick up
       // newly confirmed / re-forecast prices between source fetches).
       if (this._tab === "prices") this._loadPrices();
+      // Pick up newly recorded vintages + fresh actuals; A/B selection is kept.
+      if (this._tab === "simulations") this._loadSimulations();
     } catch (err: any) {
       this._error = err?.message ?? String(err);
     }
@@ -352,6 +416,83 @@ export class PowerPilotPanel extends LitElement {
     this._tab = tab;
     if (tab === "profiles") this._loadForecasts();
     if (tab === "prices") this._loadPrices();
+    if (tab === "simulations") this._loadSimulations();
+  }
+
+  // ------------------------------------------------------------------
+  // Simulations: snapshot list + A/B payloads + accuracy
+  // ------------------------------------------------------------------
+  private async _loadSimulations(): Promise<void> {
+    if (!this.hass) return;
+    this._simLoading = true;
+    try {
+      const list = await this.hass.callWS({ type: "powerpilot/snapshots" });
+      const runs: SnapshotRun[] = list?.runs ?? [];
+      this._snapshotRuns = runs;
+      if (runs.length) {
+        // A = newest vintage; B = one from ~24 h earlier (else the oldest).
+        if (!this._snapA || !runs.some((r) => r.run_at === this._snapA)) {
+          this._snapA = runs[0].run_at;
+        }
+        if (!this._snapB || !runs.some((r) => r.run_at === this._snapB)) {
+          const aTime = new Date(this._snapA!).getTime();
+          const target = aTime - 24 * 3600 * 1000;
+          let best = runs[runs.length - 1];
+          for (const r of runs) {
+            if (r.run_at === this._snapA) continue;
+            if (
+              Math.abs(new Date(r.run_at).getTime() - target) <
+              Math.abs(new Date(best.run_at).getTime() - target)
+            )
+              best = r;
+          }
+          this._snapB = best.run_at;
+        }
+        await Promise.all([
+          this._loadSnapshotData("A"),
+          this._loadSnapshotData("B"),
+        ]);
+      }
+      await this._loadAccuracy();
+      this._error = null;
+    } catch (err: any) {
+      this._error = err?.message ?? String(err);
+    } finally {
+      this._simLoading = false;
+    }
+  }
+
+  private async _loadSnapshotData(which: "A" | "B"): Promise<void> {
+    if (!this.hass) return;
+    const runAt = which === "A" ? this._snapA : this._snapB;
+    if (!runAt) return;
+    const data: SnapshotPayload = await this.hass.callWS({
+      type: "powerpilot/snapshot",
+      run_at: runAt,
+    });
+    if (which === "A") this._snapDataA = data;
+    else this._snapDataB = data;
+  }
+
+  private async _loadAccuracy(): Promise<void> {
+    if (!this.hass) return;
+    this._accuracy = await this.hass.callWS({
+      type: "powerpilot/accuracy",
+      lead_hours: this._accuracyLead,
+      days: 7,
+    });
+  }
+
+  private _onSnapPick(which: "A" | "B", ev: Event): void {
+    const value = (ev.target as HTMLSelectElement).value;
+    if (which === "A") this._snapA = value;
+    else this._snapB = value;
+    this._loadSnapshotData(which);
+  }
+
+  private _setAccuracyLead(lead: number): void {
+    this._accuracyLead = lead;
+    this._loadAccuracy();
   }
 
   /** Local-time ISO date (YYYY-MM-DD) the prices tab currently shows. */
@@ -413,6 +554,7 @@ export class PowerPilotPanel extends LitElement {
       <div class="tabs">
         ${this._tabButton("overview", "Przegląd")}
         ${this._tabButton("prices", "Ceny")}
+        ${this._tabButton("simulations", "Symulacje")}
         ${this._tabButton("status", "Status")}
         ${this._tabButton("profiles", "Profile")}
         ${this._tabButton("logs", "Logi")}
@@ -422,6 +564,7 @@ export class PowerPilotPanel extends LitElement {
       <div class="content">
         ${this._tab === "overview" ? this._renderOverview() : nothing}
         ${this._tab === "prices" ? this._renderPrices() : nothing}
+        ${this._tab === "simulations" ? this._renderSimulations() : nothing}
         ${this._tab === "status" ? this._renderStatus() : nothing}
         ${this._tab === "profiles" ? this._renderProfiles() : nothing}
         ${this._tab === "logs" ? this._renderLogs() : nothing}
@@ -525,21 +668,65 @@ export class PowerPilotPanel extends LitElement {
   // ApexCharts integration
   // ------------------------------------------------------------------
   protected updated(_changed: Map<string, unknown>): void {
-    if (this._tab !== "overview") {
-      // Tear down charts when switching away to free resources.
-      if (this._energyChart || this._priceChart) {
-        this._energyChart?.destroy();
-        this._priceChart?.destroy();
-        this._energyChart = undefined;
-        this._priceChart = undefined;
-        this._lastMountedSeries = undefined;
-      }
-      return;
+    // Tear down each tab's charts when it isn't active, to free resources.
+    if (this._tab !== "overview" && (this._energyChart || this._priceChart)) {
+      this._energyChart?.destroy();
+      this._priceChart?.destroy();
+      this._energyChart = undefined;
+      this._priceChart = undefined;
+      this._lastMountedSeries = undefined;
     }
-    // Mount or update on overview tab. _mountOrUpdateCharts short-circuits
-    // when the Series reference hasn't changed, so unrelated state updates
-    // (legend hover, tooltip show/hide, log polling) don't trash zoom state.
-    this._mountOrUpdateCharts();
+    if (this._tab !== "simulations") this._destroySimCharts();
+
+    // _mountOrUpdateCharts short-circuits when the Series reference hasn't
+    // changed, so unrelated state updates (legend hover, log polling) don't
+    // trash zoom state.
+    if (this._tab === "overview") this._mountOrUpdateCharts();
+    else if (this._tab === "simulations") this._mountSimCharts();
+  }
+
+  private _destroySimCharts(): void {
+    if (this._compareChart || this._accuracyChart || this._biasChart) {
+      this._compareChart?.destroy();
+      this._accuracyChart?.destroy();
+      this._biasChart?.destroy();
+      this._compareChart = undefined;
+      this._accuracyChart = undefined;
+      this._biasChart = undefined;
+    }
+  }
+
+  private _mountSimCharts(): void {
+    const compareEl = this.renderRoot.querySelector("#pp-chart-compare") as HTMLElement | null;
+    if (compareEl && (this._snapDataA || this._snapDataB)) {
+      const opts = this._buildCompareOptions(this._snapDataA, this._snapDataB);
+      if (this._compareChart) this._compareChart.updateOptions(opts, false, false);
+      else {
+        this._compareChart = new ApexCharts(compareEl, opts);
+        this._compareChart.render();
+      }
+    }
+
+    const acc = this._accuracy;
+    const accEl = this.renderRoot.querySelector("#pp-chart-accuracy") as HTMLElement | null;
+    if (accEl && acc) {
+      const opts = this._buildAccuracyOptions(acc);
+      if (this._accuracyChart) this._accuracyChart.updateOptions(opts, false, false);
+      else {
+        this._accuracyChart = new ApexCharts(accEl, opts);
+        this._accuracyChart.render();
+      }
+    }
+
+    const biasEl = this.renderRoot.querySelector("#pp-chart-bias") as HTMLElement | null;
+    if (biasEl && acc) {
+      const opts = this._buildBiasOptions(acc);
+      if (this._biasChart) this._biasChart.updateOptions(opts, false, false);
+      else {
+        this._biasChart = new ApexCharts(biasEl, opts);
+        this._biasChart.render();
+      }
+    }
   }
 
   private _mountOrUpdateCharts(): void {
@@ -1255,6 +1442,178 @@ export class PowerPilotPanel extends LitElement {
       ].join("\n");
     }
     return "";
+  }
+
+  // ------------------------------------------------------------------
+  // Simulations (snapshot compare + forecast accuracy)
+  // ------------------------------------------------------------------
+  private _fmtRun(iso: string | null): string {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    return d.toLocaleString("pl-PL", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  private _renderSimulations(): TemplateResult {
+    const runs = this._snapshotRuns;
+    if (!runs.length) {
+      return html`<div class="card empty">
+        ${this._simLoading
+          ? "Ładowanie…"
+          : "Brak zapisanych wersji. Optymalizator zapisuje jeden snapshot na godzinę — wróć tu za jakiś czas."}
+      </div>`;
+    }
+
+    const runOption = (sel: string | null) => (r: SnapshotRun) => html`
+      <option value=${r.run_at} ?selected=${r.run_at === sel}>
+        ${this._fmtRun(r.run_at)}${r.total_cost != null ? ` · ${r.total_cost.toFixed(2)} PLN` : ""}
+      </option>
+    `;
+
+    const acc = this._accuracy;
+    const fmt = (v: number | null, d = 3) => (v == null ? "—" : v.toFixed(d));
+
+    return html`
+      <div class="card">
+        <div class="card-title">Porównanie wersji planu (A vs B)</div>
+        <div class="sim-picker">
+          <label class="sim-pick">
+            <span class="sim-tag sim-a">A</span>
+            <select @change=${(e: Event) => this._onSnapPick("A", e)}>
+              ${runs.map(runOption(this._snapA))}
+            </select>
+          </label>
+          <label class="sim-pick">
+            <span class="sim-tag sim-b">B</span>
+            <select @change=${(e: Event) => this._onSnapPick("B", e)}>
+              ${runs.map(runOption(this._snapB))}
+            </select>
+          </label>
+        </div>
+        <div class="muted sim-hint">
+          A pełna linia, B przerywana. Te same godziny docelowe — widać, jak prognoza zużycia i
+          trajektoria SoC zmieniły się między przeliczeniami.
+        </div>
+        <div id="pp-chart-compare" class="apex-chart"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Trafność prognozy — przewidywanie vs rzeczywistość</div>
+        <div class="sim-lead">
+          <span class="muted">Wyprzedzenie:</span>
+          ${[24, 48, 72].map(
+            (l) => html`<button
+              class="nav-btn ${this._accuracyLead === l ? "active" : ""}"
+              @click=${() => this._setAccuracyLead(l)}
+            >
+              ${l} h
+            </button>`
+          )}
+          ${acc
+            ? html`<span class="nav-spacer"></span>
+                <span class="muted">próbki: <b>${acc.samples}</b></span>
+                <span class="muted">MAE: <b>${fmt(acc.mae)}</b> kWh</span>
+                <span class="muted">bias: <b>${fmt(acc.bias)}</b> kWh</span>`
+            : nothing}
+        </div>
+        <div class="muted sim-hint">
+          Co przewidywaliśmy ${this._accuracyLead} h wcześniej kontra realne zużycie. Ujemny bias =
+          systematyczne <b>niedoszacowanie</b>.
+        </div>
+        <div id="pp-chart-accuracy" class="apex-chart"></div>
+        <div class="card-title" style="margin-top:8px;">Błąd zużycia wg godziny doby (kWh)</div>
+        <div id="pp-chart-bias" class="apex-chart apex-chart-short"></div>
+      </div>
+    `;
+  }
+
+  /** Map snapshot hours to {x: ms, y} points for a numeric field. */
+  private _snapPoints(
+    data: SnapshotPayload | null,
+    get: (h: SnapshotHour) => number | null
+  ): { x: number; y: number | null }[] {
+    if (!data?.hours?.length) return [];
+    return data.hours
+      .filter((h) => h.start)
+      .map((h) => ({ x: new Date(h.start as string).getTime(), y: get(h) }));
+  }
+
+  private _buildCompareOptions(a: SnapshotPayload | null, b: SnapshotPayload | null): any {
+    const dark = this._isDark();
+    const grid = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
+    const fg = dark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.7)";
+    const series = [
+      { name: "Zużycie A", type: "line", color: "#1d9e75", data: this._snapPoints(a, (h) => h.consumption_forecast) },
+      { name: "Zużycie B", type: "line", color: "#1d9e75", data: this._snapPoints(b, (h) => h.consumption_forecast) },
+      { name: "SoC A", type: "line", color: "#ba7517", data: this._snapPoints(a, (h) => h.soc) },
+      { name: "SoC B", type: "line", color: "#ba7517", data: this._snapPoints(b, (h) => h.soc) },
+    ];
+    return {
+      chart: { type: "line", height: 280, background: "transparent", toolbar: { show: false }, animations: { enabled: false } },
+      theme: { mode: dark ? "dark" : "light" },
+      series,
+      stroke: { width: [2, 2, 2, 2], dashArray: [0, 5, 0, 5], curve: "smooth" },
+      colors: ["#1d9e75", "#1d9e75", "#ba7517", "#ba7517"],
+      xaxis: { type: "datetime", labels: { datetimeUTC: false, style: { colors: fg } } },
+      yaxis: [
+        { seriesName: "Zużycie A", title: { text: "kWh", style: { color: fg } }, labels: { style: { colors: fg } }, decimalsInFloat: 2 },
+        { seriesName: "Zużycie A", show: false },
+        { seriesName: "SoC A", opposite: true, min: 0, max: 100, title: { text: "SoC %", style: { color: fg } }, labels: { style: { colors: fg } } },
+        { seriesName: "SoC A", show: false, opposite: true, min: 0, max: 100 },
+      ],
+      legend: { labels: { colors: fg } },
+      grid: { borderColor: grid },
+      tooltip: { theme: dark ? "dark" : "light", x: { format: "dd.MM HH:mm" } },
+    };
+  }
+
+  private _buildAccuracyOptions(acc: Accuracy): any {
+    const dark = this._isDark();
+    const grid = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
+    const fg = dark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.7)";
+    const pts = (get: (h: AccuracyHour) => number | null) =>
+      acc.hours.map((h) => ({ x: new Date(h.start).getTime(), y: get(h) }));
+    return {
+      chart: { type: "line", height: 280, background: "transparent", toolbar: { show: false }, animations: { enabled: false } },
+      theme: { mode: dark ? "dark" : "light" },
+      series: [
+        { name: "Zużycie — prognoza", color: "#3498db", data: pts((h) => h.predicted_cons) },
+        { name: "Zużycie — rzeczywiste", color: "#e24b4a", data: pts((h) => h.actual_cons) },
+      ],
+      stroke: { width: [2, 2], dashArray: [5, 0], curve: "smooth" },
+      colors: ["#3498db", "#e24b4a"],
+      xaxis: { type: "datetime", labels: { datetimeUTC: false, style: { colors: fg } } },
+      yaxis: { title: { text: "kWh", style: { color: fg } }, labels: { style: { colors: fg } }, decimalsInFloat: 2 },
+      legend: { labels: { colors: fg } },
+      grid: { borderColor: grid },
+      tooltip: { theme: dark ? "dark" : "light", x: { format: "dd.MM HH:mm" } },
+    };
+  }
+
+  private _buildBiasOptions(acc: Accuracy): any {
+    const dark = this._isDark();
+    const grid = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
+    const fg = dark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.7)";
+    const data = acc.bias_by_hour.map((v, i) => ({ x: `${i}`, y: v }));
+    return {
+      chart: { type: "bar", height: 200, background: "transparent", toolbar: { show: false }, animations: { enabled: false } },
+      theme: { mode: dark ? "dark" : "light" },
+      series: [{ name: "Bias zużycia", data }],
+      plotOptions: { bar: { colors: { ranges: [
+        { from: -1000, to: 0, color: "#e24b4a" },
+        { from: 0, to: 1000, color: "#3498db" },
+      ] } } },
+      dataLabels: { enabled: false },
+      xaxis: { title: { text: "godzina doby", style: { color: fg } }, labels: { style: { colors: fg } } },
+      yaxis: { title: { text: "kWh", style: { color: fg } }, labels: { style: { colors: fg } }, decimalsInFloat: 2 },
+      grid: { borderColor: grid },
+      tooltip: { theme: dark ? "dark" : "light" },
+    };
   }
 
   // ------------------------------------------------------------------
@@ -2006,6 +2365,57 @@ export class PowerPilotPanel extends LitElement {
       gap: 8px;
       margin-top: 10px;
       font-size: 12px;
+    }
+    .sim-picker {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .sim-pick {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sim-pick select {
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.12));
+      border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.3));
+      color: inherit;
+      font-size: 13px;
+    }
+    .sim-tag {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .sim-a {
+      background: #1d9e75;
+    }
+    .sim-b {
+      background: #7b6cf6;
+    }
+    .sim-hint {
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .sim-lead {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .apex-chart-short {
+      min-height: 200px;
     }
   `;
 }

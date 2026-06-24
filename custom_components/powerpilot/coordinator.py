@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
@@ -37,10 +38,18 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DEFAULTS,
     DOMAIN,
+    MODE_CODE,
+    MODE_CODE_INV,
+    PRICE_TYPE_CERTAIN,
     PRICE_TYPE_ESTIMATED,
+    PRICE_TYPE_FORECAST,
+    PTYPE_CODE,
+    PTYPE_CODE_INV,
+    STORAGE_VERSION_SNAPSHOTS,
 )
 from .forecast import ForecastBuilder
 from .models import Plan, tariff_for_day
+from .modules.snapshots import SnapshotStore
 from .modules import (
     CalendarModule,
     ClimateModule,
@@ -98,8 +107,29 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         self.forecast_builder = ForecastBuilder(self.registry)
 
+        # Optimizer snapshots ("Symulacje" tab): one vintage per clock hour.
+        self.snapshots = SnapshotStore()
+        self._snapshot_store: Store | None = None
+        self._last_snapshot_hour: datetime | None = None
+
     async def async_setup_modules(self) -> None:
         await self.registry.async_setup_all()
+        await self._async_setup_snapshots()
+
+    async def _async_setup_snapshots(self) -> None:
+        self._snapshot_store = Store(
+            self.hass,
+            STORAGE_VERSION_SNAPSHOTS,
+            f"{DOMAIN}_{self.entry.entry_id}_snapshots",
+        )
+        stored = await self._snapshot_store.async_load()
+        self.snapshots = SnapshotStore.from_dict(stored)
+        self.snapshots.prune()
+
+    async def _async_save_snapshots(self) -> None:
+        if self._snapshot_store is None:
+            return
+        self._snapshot_store.async_delay_save(self.snapshots.to_dict, 30.0)
 
     def _build_battery(self) -> BatteryModel:
         soc = self._read_soc()
@@ -159,8 +189,195 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if plan.current is not None:
             self._battery_energy_cost = plan.current.battery_energy_cost
 
+        await self._maybe_record_snapshot(forecast, plan)
         self._record_event(plan)
         return plan
+
+    # ------------------------------------------------------------------
+    # Optimizer snapshots ("Symulacje" tab)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _slot_ptype(slot) -> str:
+        """Price provenance for a forecast slot (mirrors the prices module)."""
+        if slot.price_confirmed:
+            return PRICE_TYPE_CERTAIN
+        if "price_estimated" in slot.tags:
+            return PRICE_TYPE_ESTIMATED
+        return PRICE_TYPE_FORECAST
+
+    async def _maybe_record_snapshot(self, forecast, plan) -> None:
+        """Persist one columnar snapshot per clock hour (a 'vintage')."""
+        now = dt_util.now()
+        hour = now.replace(minute=0, second=0, microsecond=0)
+        if self._last_snapshot_hour is not None and hour <= self._last_snapshot_hour:
+            return
+
+        slots = forecast.slots
+        decisions = plan.decisions
+        if not slots:
+            return
+
+        def _r(value, ndigits=4):
+            return round(value, ndigits) if value is not None else None
+
+        record: dict = {
+            "run_at": now.isoformat(),
+            "start": slots[0].start.isoformat(),
+            "n": len(slots),
+            "horizon_hours": len(decisions),
+            "total_cost": _r(plan.total_cost, 2),
+            "buy": [_r(s.buy_price) for s in slots],
+            "dist": [_r(s.distribution_price_kwh) for s in slots],
+            "ptype": [PTYPE_CODE[self._slot_ptype(s)] for s in slots],
+            "cons_fc": [_r(s.total_consumption_kwh, 3) for s in slots],
+            "base_fc": [_r(s.base_consumption_kwh, 3) for s in slots],
+            "mode": [MODE_CODE.get(d.inverter_mode, "p") for d in decisions],
+            "soc": [_r(d.battery_soc, 1) for d in decisions],
+            "grid": [_r(d.grid_buy_kwh, 3) for d in decisions],
+            "cost": [_r(d.hour_cost, 4) for d in decisions],
+        }
+        self.snapshots.add(record)
+        self.snapshots.prune()
+        self._last_snapshot_hour = hour
+        await self._async_save_snapshots()
+
+    def get_snapshots(self) -> dict:
+        """Available vintages for the picker."""
+        return {"runs": self.snapshots.runs()}
+
+    def get_snapshot(self, run_at: str | None) -> dict:
+        """Decode one vintage into per-hour rows the chart can render."""
+        rec = self.snapshots.get(run_at) if run_at else None
+        if rec is None:
+            runs = self.snapshots.runs()
+            rec = self.snapshots.get(runs[0]["run_at"]) if runs else None
+        if rec is None:
+            return {"run_at": None, "hours": []}
+
+        start = dt_util.parse_datetime(rec["start"])
+        n = rec.get("n", 0)
+        horizon = rec.get("horizon_hours", 0)
+
+        def _at(key, idx, default=None):
+            seq = rec.get(key) or []
+            return seq[idx] if idx < len(seq) else default
+
+        hours: list[dict] = []
+        for i in range(n):
+            hour_start = (start + timedelta(hours=i)) if start else None
+            buy = _at("buy", i)
+            dist = _at("dist", i)
+            total = buy + dist if (buy is not None and dist is not None) else None
+            hours.append(
+                {
+                    "start": hour_start.isoformat() if hour_start else None,
+                    "buy_price": buy,
+                    "distribution_price_kwh": dist,
+                    "total_price_kwh": total,
+                    "price_type": PTYPE_CODE_INV.get(_at("ptype", i)),
+                    "consumption_forecast": _at("cons_fc", i),
+                    "base_consumption_forecast": _at("base_fc", i),
+                    "inverter_mode": MODE_CODE_INV.get(_at("mode", i)) if i < horizon else None,
+                    "battery_soc": _at("soc", i) if i < horizon else None,
+                    "soc": _at("soc", i) if i < horizon else None,
+                    "grid_buy_kwh": _at("grid", i) if i < horizon else None,
+                    "hour_cost": _at("cost", i) if i < horizon else None,
+                }
+            )
+        return {
+            "run_at": rec["run_at"],
+            "start": rec.get("start"),
+            "total_cost": rec.get("total_cost"),
+            "hours": hours,
+        }
+
+    async def get_accuracy(self, lead_hours: int = 24, days: int = 7) -> dict:
+        """Forecast-vs-actual error for past hours, at a given lead time.
+
+        For each past target hour H, picks the vintage produced at most recently
+        at or before ``H - lead_hours`` and compares its predicted consumption /
+        price for H against the realized actuals. ``bias`` = mean(predicted −
+        actual); a negative value means the optimizer systematically
+        *under*-estimates.
+        """
+        from .const import CONF_CONSUMPTION_SENSOR
+
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        window_start = now - timedelta(days=max(days, 1))
+
+        main_sensor = self.config.get(CONF_CONSUMPTION_SENSOR)
+        actual_cons: dict = {}
+        if main_sensor:
+            actual_cons = await self.consumption.async_range_kwh(
+                main_sensor, window_start - timedelta(hours=1), now
+            )
+
+        def _pred_for(target: datetime):
+            run_key = self.snapshots.nearest_run_at(target - timedelta(hours=lead_hours))
+            if run_key is None:
+                return None
+            rec = self.snapshots.get(run_key)
+            if rec is None:
+                return None
+            start = dt_util.parse_datetime(rec["start"])
+            if start is None:
+                return None
+            idx = round((target - start).total_seconds() / 3600.0)
+            if idx < 0 or idx >= rec.get("n", 0):
+                return None
+            cons_seq = rec.get("cons_fc") or []
+            buy_seq = rec.get("buy") or []
+            return {
+                "cons": cons_seq[idx] if idx < len(cons_seq) else None,
+                "buy": buy_seq[idx] if idx < len(buy_seq) else None,
+            }
+
+        hours: list[dict] = []
+        errors: list[float] = []
+        bias_sum = [0.0] * 24
+        bias_cnt = [0] * 24
+        h = window_start
+        while h < now:
+            pred = _pred_for(h)
+            act_c = actual_cons.get(h)
+            act_p = (self.prices.archive.get(h) or {}).get("energy")
+            pred_c = pred["cons"] if pred else None
+            err = (
+                round(pred_c - act_c, 3)
+                if (pred_c is not None and act_c is not None)
+                else None
+            )
+            if err is not None:
+                errors.append(err)
+                bias_sum[h.hour] += err
+                bias_cnt[h.hour] += 1
+            hours.append(
+                {
+                    "start": h.isoformat(),
+                    "predicted_cons": round(pred_c, 3) if pred_c is not None else None,
+                    "actual_cons": round(act_c, 3) if act_c is not None else None,
+                    "error": err,
+                    "predicted_price": pred["buy"] if pred else None,
+                    "actual_price": round(act_p, 4) if act_p is not None else None,
+                }
+            )
+            h += timedelta(hours=1)
+
+        bias_by_hour = [
+            round(bias_sum[i] / bias_cnt[i], 3) if bias_cnt[i] else None
+            for i in range(24)
+        ]
+        mae = round(sum(abs(e) for e in errors) / len(errors), 3) if errors else None
+        bias = round(sum(errors) / len(errors), 3) if errors else None
+        return {
+            "lead_hours": lead_hours,
+            "days": days,
+            "samples": len(errors),
+            "mae": mae,
+            "bias": bias,
+            "bias_by_hour": bias_by_hour,
+            "hours": hours,
+        }
 
     # ------------------------------------------------------------------
     # Frontend support: event log + feature status

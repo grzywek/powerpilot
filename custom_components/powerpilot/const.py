@@ -92,6 +92,23 @@ CONF_TARIFFS: Final = "tariffs"
 # Storage version for the per-entry tariff snapshot store.
 STORAGE_VERSION_TARIFF_SNAPSHOTS: Final = 1
 
+# --- Optimizer snapshots ("Symulacje" tab) ---
+# One columnar snapshot of the optimizer's inputs+plan is persisted per clock
+# hour (a "vintage"), so past plans can be compared against each other and
+# against realized actuals. Stored in its own
+# ``Store(version=STORAGE_VERSION_SNAPSHOTS, key=f"{DOMAIN}_{entry_id}_snapshots")``.
+STORAGE_VERSION_SNAPSHOTS: Final = 1
+
+# Single-char codes keep the columnar snapshot records compact on disk.
+MODE_CODE: Final = {"charge": "c", "discharge": "d", "passthrough": "p"}
+MODE_CODE_INV: Final = {v: k for k, v in MODE_CODE.items()}
+PTYPE_CODE: Final = {
+    PRICE_TYPE_CERTAIN: "c",
+    PRICE_TYPE_FORECAST: "f",
+    PRICE_TYPE_ESTIMATED: "e",
+}
+PTYPE_CODE_INV: Final = {v: k for k, v in PTYPE_CODE.items()}
+
 DEFAULTS: Final = {
     CONF_PHASES: 3,
     CONF_MAIN_FUSE_A: 32,

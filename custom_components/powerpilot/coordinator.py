@@ -391,7 +391,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_CONSUMPTION_SENSOR,
             CONF_DEVICE_SENSORS,
             CONF_GRID_IMPORT_SENSOR,
+            CONF_SENSOR_PARENTS,
         )
+        from .hierarchy import exclusive_series
 
         now = dt_util.now().replace(minute=0, second=0, microsecond=0)
 
@@ -441,6 +443,16 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 )
             else:
                 device_real[eid] = {}
+
+        # Collapse nested meters into exclusive (own) energy so the stacked
+        # device bars sum to the main reading instead of double-counting a
+        # sub-meter that lives inside another sub-meter.
+        if main_sensor:
+            parents = self.config.get(CONF_SENSOR_PARENTS) or {}
+            exclusive_real = exclusive_series(
+                main_sensor, device_ids, parents, {main_sensor: main_real, **device_real}
+            )
+            device_real = {eid: exclusive_real.get(eid, {}) for eid in device_ids}
 
         # Optional real battery / grid sensors (kW or kWh, auto-detected).
         async def _read_opt(conf_key: str) -> dict:

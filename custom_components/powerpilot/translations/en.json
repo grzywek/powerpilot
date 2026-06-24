@@ -63,12 +63,17 @@
         "description": "Pick a section to edit, then return here. Use *Save & exit* to commit changes.",
         "menu_options": {
           "core": "⚙️ Core (grid / battery / inverter / sensors)",
+          "hierarchy": "🌳 Meter hierarchy (consumption levels)",
           "charge_curve": "🔋 Charge curve (power vs SoC)",
           "prices": "💰 Energy prices",
           "ev": "🚗 EV",
           "tariff_list": "🧾 Distribution tariffs",
           "finish": "✅ Save & exit"
         }
+      },
+      "hierarchy": {
+        "title": "Meter hierarchy",
+        "description": "For each device sensor, pick the parent meter it is already included in. \"Main\" = directly under the main consumption sensor (e.g. the Victron output). Example: the washing machine is inside the apartment, and the apartment is inside the Victron output. This way every kWh is counted once, with no duplication. {info}"
       },
       "core": {
         "title": "PowerPilot – core setup",

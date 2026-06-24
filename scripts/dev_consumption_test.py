@@ -97,14 +97,15 @@ eser = module._energy_series(energy_rows, "kWh")
 vals = [round(v, 3) for v in eser.values()]
 assert vals == [1.2, 0.5], vals
 
-# --- Fold a full day: base = main − devices ---
+# --- Fold a full day from exclusive series: base = main − devices ---
 day = date(2026, 6, 15)
 base_day = datetime(2026, 6, 15)
-main_hourly = {base_day + timedelta(hours=h): 1.0 for h in range(24)}
-device_hourly = {
+# Exclusive root (base) = 0.7, washer exclusive = 0.3 → total main 1.0.
+base_excl = {base_day + timedelta(hours=h): 0.7 for h in range(24)}
+device_excl = {
     "sensor.washer": {base_day + timedelta(hours=h): 0.3 for h in range(24)},
 }
-ok = module._fold_day(day, main_hourly, device_hourly)
+ok = module._fold_day(day, base_excl, device_excl)
 assert ok, "full day should fold"
 assert module.base.is_date_observed(day)
 # base = 1.0 − 0.3 = 0.7 for Monday (weekday 0)

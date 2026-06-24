@@ -37,8 +37,13 @@ CONF_SOC_SENSOR: Final = "soc_sensor"  # current battery SoC %
 CONF_BATTERY_CHARGE_SENSOR: Final = "battery_charge_sensor"  # kW or kWh (total_increasing)
 CONF_BATTERY_DISCHARGE_SENSOR: Final = "battery_discharge_sensor"
 CONF_GRID_IMPORT_SENSOR: Final = "grid_import_sensor"
-CONF_CONSUMPTION_SENSOR: Final = "consumption_sensor"  # household power/energy
+CONF_CONSUMPTION_SENSOR: Final = "consumption_sensor"  # household power/energy (tree root)
 CONF_DEVICE_SENSORS: Final = "device_sensors"  # separately-metered loads to break out
+# Meter nesting: ``{device_entity_id: parent_entity_id}``. Parent is another
+# device sensor; devices absent from the map (or pointing at PARENT_ROOT) hang
+# directly under the main consumption sensor. Lets nested sub-meters (washer ⊂
+# apartment ⊂ Victron output) be counted exactly once. See ``hierarchy.py``.
+CONF_SENSOR_PARENTS: Final = "sensor_parents"
 CONF_CONSUMPTION_LEARN_DAYS: Final = "consumption_learn_days"  # history window
 CONF_BUY_PRICE_SENSOR: Final = "buy_price_sensor"
 CONF_WEATHER_ENTITY: Final = "weather_entity"

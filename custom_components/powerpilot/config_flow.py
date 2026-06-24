@@ -47,6 +47,7 @@ from .const import (
     CONF_PRICE_REFRESH_HOURS,
     CONF_PRICE_SOURCE,
     CONF_PRICE_VAT,
+    CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
     CONF_TARIFFS,
     CONF_WEATHER_ENTITY,
@@ -57,10 +58,19 @@ from .const import (
     PRICE_SOURCE_SENSOR,
     charge_curve_band_key,
 )
+from .hierarchy import PARENT_ROOT
 from .models import Tariff, TariffPeriod, ValidityRange
 
 _NUMBER = selector.NumberSelector
 _NUM = selector.NumberSelectorConfig
+
+# Transient per-device parent field prefix; reassembled into CONF_SENSOR_PARENTS
+# on submit so the field keys never leak into the saved options.
+_PARENT_FIELD_PREFIX = "parent__"
+
+
+def _parent_field_key(entity_id: str) -> str:
+    return f"{_PARENT_FIELD_PREFIX}{entity_id}"
 
 
 def _entity(domain: str | list[str]) -> selector.EntitySelector:
@@ -319,6 +329,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
             step_id="init",
             menu_options=[
                 "core",
+                "hierarchy",
                 "charge_curve",
                 "prices",
                 "ev",
@@ -339,6 +350,75 @@ class PowerPilotOptionsFlow(OptionsFlow):
             self._data.update(user_input)
             return await self.async_step_init()
         return self.async_show_form(step_id="core", data_schema=_core_schema(self._data))
+
+    # ----------------------------------------------------------- meter hierarchy
+
+    def _friendly(self, entity_id: str | None) -> str:
+        """Human label for a sensor: ``Friendly name (entity_id)``."""
+        if not entity_id:
+            return "—"
+        state = self.hass.states.get(entity_id)
+        if state and (name := state.name):
+            return f"{name} ({entity_id})"
+        return entity_id
+
+    def _hierarchy_schema(self, devices: list[str]) -> vol.Schema:
+        """One parent dropdown per device sensor (root or another device)."""
+        root_label = self._friendly(self._data.get(CONF_CONSUMPTION_SENSOR))
+        stored = dict(self._data.get(CONF_SENSOR_PARENTS) or {})
+        fields: dict[Any, Any] = {}
+        for eid in devices:
+            options = [
+                selector.SelectOptionDict(
+                    value=PARENT_ROOT, label=f"⬆ Główny: {root_label}"
+                )
+            ]
+            options.extend(
+                selector.SelectOptionDict(value=other, label=self._friendly(other))
+                for other in devices
+                if other != eid
+            )
+            valid = {PARENT_ROOT, *(o for o in devices if o != eid)}
+            default = stored.get(eid, PARENT_ROOT)
+            if default not in valid:
+                default = PARENT_ROOT
+            fields[
+                vol.Required(_parent_field_key(eid), default=default)
+            ] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=options, mode=selector.SelectSelectorMode.DROPDOWN
+                )
+            )
+        return vol.Schema(fields)
+
+    async def async_step_hierarchy(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        self._ensure_loaded()
+        devices = list(self._data.get(CONF_DEVICE_SENSORS) or [])
+
+        if user_input is not None:
+            parents: dict[str, str] = {}
+            for eid in devices:
+                value = user_input.get(_parent_field_key(eid))
+                if value and value != PARENT_ROOT:
+                    parents[eid] = value
+            self._data[CONF_SENSOR_PARENTS] = parents
+            return await self.async_step_init()
+
+        if not devices:
+            return self.async_show_form(
+                step_id="hierarchy",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "info": "⚠️ Brak czujników urządzeń — dodaj je najpierw w sekcji Core."
+                },
+            )
+        return self.async_show_form(
+            step_id="hierarchy",
+            data_schema=self._hierarchy_schema(devices),
+            description_placeholders={"info": ""},
+        )
 
     async def async_step_charge_curve(
         self, user_input: dict[str, Any] | None = None

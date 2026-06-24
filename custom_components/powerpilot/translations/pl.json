@@ -63,12 +63,17 @@
         "description": "Wybierz sekcję do edycji, potem wróć tutaj. Użyj *Zapisz i zakończ* aby zapisać zmiany.",
         "menu_options": {
           "core": "⚙️ Podstawy (sieć / bateria / falownik / sensory)",
+          "hierarchy": "🌳 Hierarchia liczników (poziomy zużycia)",
           "charge_curve": "🔋 Krzywa ładowania (moc vs SoC)",
           "prices": "💰 Ceny energii",
           "ev": "🚗 Samochód elektryczny",
           "tariff_list": "🧾 Taryfy dystrybucyjne",
           "finish": "✅ Zapisz i zakończ"
         }
+      },
+      "hierarchy": {
+        "title": "Hierarchia liczników",
+        "description": "Dla każdego czujnika urządzenia wskaż licznik nadrzędny, w którym już się zawiera. „Główny” = bezpośrednio pod głównym czujnikiem zużycia (np. wyjście Victron). Przykład: pralka zawiera się w mieszkaniu, a mieszkanie w wyjściu Victron. Dzięki temu każda kWh liczona jest tylko raz, bez duplikacji. {info}"
       },
       "core": {
         "title": "PowerPilot – konfiguracja podstawowa",

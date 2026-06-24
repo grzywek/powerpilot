@@ -4,14 +4,22 @@ Learns an hourly household consumption profile keyed by ``(weekday, hour)`` from
 the configured main consumption sensor, using Home Assistant long-term statistics
 (the recorder). Separately-metered devices (AC/heating, washer, boiler, iron, …)
 are broken out into their own weekly profiles, leaving a clean **base** (the
-uncontrollable background load):
+uncontrollable background load).
 
-    base = main − Σ(device sensors)
+Meters may be *nested* — a washing machine sub-meter sits inside an apartment
+sub-meter which sits inside the main (Victron output) sensor. The configured
+``CONF_SENSOR_PARENTS`` map describes that tree; ``hierarchy.exclusive_series``
+turns it into each node's **exclusive** (own) consumption so every kWh is
+counted exactly once:
 
-The forecast demand is reconstructed as ``base + Σ(device profiles)`` so totals
-stay correct today. Because the breakdown is stored per device, a smarter forward
-model (climate by temperature, calendar-driven appliances) can later *replace* a
-device profile without double counting.
+    exclusive(node) = reading(node) − Σ reading(direct children)
+    base            = exclusive(root)
+
+The forecast demand is reconstructed as ``base + Σ(device profiles)`` — where
+each device profile now stores its *exclusive* energy — so totals telescope back
+to the main reading. Because the breakdown is stored per device, a smarter
+forward model (climate by temperature, calendar-driven appliances) can later
+*replace* a device profile without double counting.
 
 A sensible default daily shape is used as a fallback until enough history has been
 learned.
@@ -31,8 +39,10 @@ from ..const import (
     CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
+    CONF_SENSOR_PARENTS,
     DOMAIN,
 )
+from ..hierarchy import exclusive_series
 from ..models import Forecast
 from ..profiles import WeeklyAccumulator
 from .base import PowerPilotModule
@@ -139,20 +149,27 @@ class ConsumptionModule(PowerPilotModule):
 
         learn_days = int(self.config.get(CONF_CONSUMPTION_LEARN_DAYS, 21))
         device_sensors = list(self.config.get(CONF_DEVICE_SENSORS) or [])
+        parents = self.config.get(CONF_SENSOR_PARENTS) or {}
 
         start = dt_util.start_of_local_day(today - timedelta(days=learn_days))
         end = dt_util.start_of_local_day(today)  # only settled past days
 
         main_hourly = await self._fetch_hourly_kwh(main_sensor, start, end)
-        device_hourly = {
-            eid: await self._fetch_hourly_kwh(eid, start, end) for eid in device_sensors
-        }
+        series = {main_sensor: main_hourly}
+        for eid in device_sensors:
+            series[eid] = await self._fetch_hourly_kwh(eid, start, end)
+
+        # Collapse the nested meter tree into per-node exclusive energy so a
+        # sub-meter that lives inside another sub-meter is counted once.
+        exclusive = exclusive_series(main_sensor, device_sensors, parents, series)
+        base_excl = exclusive.get(main_sensor, {})
+        device_excl = {eid: exclusive.get(eid, {}) for eid in device_sensors}
 
         changed = False
         day = start.date()
         while day < today:
             if not self.base.is_date_observed(day):
-                if self._fold_day(day, main_hourly, device_hourly):
+                if self._fold_day(day, base_excl, device_excl):
                     changed = True
             day += timedelta(days=1)
 
@@ -163,26 +180,23 @@ class ConsumptionModule(PowerPilotModule):
     def _fold_day(
         self,
         day: date,
-        main_hourly: dict[datetime, float],
-        device_hourly: dict[str, dict[datetime, float]],
+        base_excl: dict[datetime, float],
+        device_excl: dict[str, dict[datetime, float]],
     ) -> bool:
-        """Fold one settled day's hourly data into the accumulators."""
+        """Fold one settled day's exclusive hourly data into the accumulators."""
         day_hours = [
             dt_util.start_of_local_day(day) + timedelta(hours=h) for h in range(24)
         ]
-        present = [h for h in day_hours if h in main_hourly]
+        present = [h for h in day_hours if h in base_excl]
         if len(present) < 20:  # require a near-complete day
             return False
 
         for hour in present:
-            main_kwh = main_hourly.get(hour, 0.0)
-            device_total = 0.0
-            for eid, series in device_hourly.items():
-                value = series.get(hour, 0.0)
-                self.devices.setdefault(eid, WeeklyAccumulator()).observe(hour, value)
-                device_total += value
-            base_kwh = max(0.0, main_kwh - device_total)
-            self.base.observe(hour, base_kwh)
+            self.base.observe(hour, base_excl.get(hour, 0.0))
+            for eid, exclusive in device_excl.items():
+                self.devices.setdefault(eid, WeeklyAccumulator()).observe(
+                    hour, exclusive.get(hour, 0.0)
+                )
 
         self.base.mark_date_observed(day)
         for acc in self.devices.values():

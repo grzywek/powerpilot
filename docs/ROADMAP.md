@@ -17,11 +17,16 @@ integration installable and working.
 - [x] Price module with pluggable sources (confirmed vs forecast).
 - [x] Adapter for a Polish dynamic tariff API (prądcast.pl: RDN + D+1..D+3).
 - [x] Retail conversion of wholesale RDN via markup + VAT.
-- [x] Rolling hourly × weekday **price profile** learned from confirmed prices
-      ("cheapest 13–16, nights, weekends"), surfaced on the plan sensor.
-- [x] Use the profile to fill interior gaps without over-extending the horizon.
-- [ ] Persist the price profile across restarts (currently in-memory).
-- [ ] Historical backfill from `/prices/trend` + `/prices/forecasts`.
+- [x] Permanent **price archive** — per-hour energy price with provenance
+      (certain vs forecast), layered so a binding RDN price is never downgraded
+      back to a forecast; persisted across restarts and pruned after 90 days.
+- [x] Weighted **estimate** for hours the source no longer covers: same
+      weekday+hour averaged over the last 1/2/3 weeks of confirmed prices,
+      filling the D+4..D+7 tail without over-extending the horizon.
+- [x] One-time historical backfill (~3 weeks) on first run so estimates have
+      history immediately.
+- [x] ~~Rolling weekday×hour price profile~~ — superseded by the archive +
+      weighted estimate above; removed to keep a single source of truth.
 
 ## Stage 2 – Consumption learning
 - [x] Rolling weekly base profile learned from the main sensor via recorder
@@ -62,10 +67,11 @@ integration installable and working.
       Logs (recent optimization runs + module errors), plus a Configure button.
 - [x] WebSocket API (`powerpilot/plan|status|log`) backing the panel instead of
       overloading entity attributes.
-- [x] Panel **Profiles** tab: 7×24 heatmaps (price + consumption) and a D+1..D+3
+- [x] Panel **Profiles** tab: 7×24 consumption heatmap and a D+1..D+3
       forecast overlay (`/prices/forecasts`), via `powerpilot/profiles|forecasts`.
 - [ ] Inverter-mode status markers + forecast-confidence shading on the charts.
-- [ ] Options flow grouped into sections + menu for a tidier config.
+- [x] Options flow grouped into sections + menu for a tidier config, including a
+      **Clear data & cache** action (wipes stored data, keeps configuration).
 
 ## Stage 7 – Hardening
 - [ ] Tests for battery math, optimizer decisions, module contributions.

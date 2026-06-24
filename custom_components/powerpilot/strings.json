@@ -65,7 +65,15 @@
           "prices": "💰 Energy prices",
           "ev": "🚗 EV",
           "tariff_list": "🧾 Distribution tariffs",
+          "reset_data": "🧹 Clear data & cache (keep config)",
           "finish": "✅ Save & exit"
+        }
+      },
+      "reset_data": {
+        "title": "Clear data & cache",
+        "description": "Removes all stored data — learned consumption profile, price archive, distribution-tariff snapshots and optimizer simulations — and reloads the integration. Your configuration (sensors, battery, tariffs, prices) is kept. Use this if old data seems to be interfering after configuration changes.",
+        "data": {
+          "confirm": "Yes, clear all data and cache"
         }
       },
       "core": {

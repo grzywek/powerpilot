@@ -38,6 +38,14 @@ class PowerPilotModule:
     async def async_update(self) -> None:
         """Refresh internal state before a planning run."""
 
+    async def async_clear_data(self) -> None:
+        """Wipe persisted data/cache for this module, keeping configuration.
+
+        Modules that own a :class:`Store` override this to delete the store
+        file (which also cancels any pending delayed save) and reset their
+        in-memory state to a clean slate.
+        """
+
     def contribute(self, forecast: Forecast) -> None:
         """Add this module's information to the forecast slots.
 
@@ -86,6 +94,14 @@ class ModuleRegistry:
             except Exception as err:  # noqa: BLE001
                 module.last_error = f"update: {err}"
                 _LOGGER.exception("Error updating module %s", module.domain)
+
+    async def async_clear_all(self) -> None:
+        """Wipe persisted data/cache for every module (config untouched)."""
+        for module in self._modules:
+            try:
+                await module.async_clear_data()
+            except Exception:  # noqa: BLE001 - one module must not break others
+                _LOGGER.exception("Error clearing data for module %s", module.domain)
 
     def contribute_all(self, forecast: Forecast) -> None:
         for module in self._modules:

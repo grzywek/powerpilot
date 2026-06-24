@@ -68,7 +68,15 @@
           "prices": "💰 Ceny energii",
           "ev": "🚗 Samochód elektryczny",
           "tariff_list": "🧾 Taryfy dystrybucyjne",
+          "reset_data": "🧹 Wyczyść dane i cache (zachowaj konfigurację)",
           "finish": "✅ Zapisz i zakończ"
+        }
+      },
+      "reset_data": {
+        "title": "Wyczyść dane i cache",
+        "description": "Usuwa wszystkie zapisane dane — wyuczony profil zużycia, archiwum cen, snapshoty taryf dystrybucyjnych oraz symulacje optymalizatora — i przeładowuje integrację. Konfiguracja (sensory, bateria, taryfy, ceny) zostaje zachowana. Użyj, gdy po zmianach konfiguracji stare dane zaczynają się mieszać.",
+        "data": {
+          "confirm": "Tak, wyczyść wszystkie dane i cache"
         }
       },
       "hierarchy": {

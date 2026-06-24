@@ -318,6 +318,19 @@ class TariffModule(PowerPilotModule):
     def _serialise_snapshots(self) -> dict[str, Any]:
         return {"snapshots": self._snapshots}
 
+    async def async_clear_data(self) -> None:
+        """Drop recorded tariff snapshots and day-sensor caches.
+
+        Tariff definitions live in the config entry, so they are reloaded from
+        config rather than wiped here.
+        """
+        if self._store is not None:
+            await self._store.async_remove()
+        self._snapshots = {}
+        self._future_day_cache = {}
+        self._unsupported_sensors = set()
+        self._reload_config()
+
     # ------------------------------------------------------------------ public
 
     def snapshot_for(self, hour_start: datetime) -> float | None:

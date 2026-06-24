@@ -45,7 +45,7 @@ To realny dowód, że integracja „wstaje” i tworzy encje
   - **Przegląd** — wykresy SoC/zużycie i ceny (z linią „cena energii w baterii”),
     bieżący tryb, koszt horyzontu, przycisk **⚙ Konfiguracja**.
   - **Status** — co działa / czego brakuje (sensory, źródło cen), postęp uczenia
-    (dni profilu cen/zużycia), stan modułów.
+    (godziny w archiwum cen, dni profilu zużycia), stan modułów.
   - **Logi** — ostatnie przeliczenia i ewentualne błędy modułów.
 - **Ustawienia → Urządzenia i usługi → PowerPilot** → urządzenie z encjami:
   - `sensor.powerpilot_inverter_mode` (charge/discharge/passthrough)
@@ -54,8 +54,8 @@ To realny dowód, że integracja „wstaje” i tworzy encje
   - `binary_sensor.powerpilot_grid_connected`, `binary_sensor.powerpilot_ev_charge`
 - **Narzędzia deweloperskie → Stany** → wpisz `sensor.powerpilot_optimization_plan`
   i rozwiń atrybuty: zobaczysz `hours[]` (decyzje godzinowe), `forecast[]` (ceny,
-  zużycie) oraz `price_profile` / `consumption_base_profile`. Jeśli atrybuty się
-  wypełniają — pipeline liczy poprawnie.
+  zużycie) oraz `price_archive_hours` / `consumption_base_profile`. Jeśli atrybuty
+  się wypełniają — pipeline liczy poprawnie.
 
 ### 3c. Gdzie pojawi się dashboard
 Dashboard to **karta Lovelace**, nie osobny ekran — pokaże się tam, gdzie ją dodasz:
@@ -119,6 +119,10 @@ Chcesz dodatkowy dashboard Lovelace „PowerPilot” jako wpis w pasku bocznym
   w HACS/Frontend albo brak twardego odświeżenia przeglądarki.
 - **Panel PowerPilot nie pojawia się w pasku** → twarde odświeżenie przeglądarki
   (Ctrl/Cmd+Shift+R); panel rejestruje się po starcie integracji.
+- **Stare dane się mieszają po zmianach konfiguracji** → Ustawienia → Integracje →
+  PowerPilot → **Konfiguruj** → **🧹 Wyczyść dane i cache**. Usuwa archiwum cen,
+  wyuczony profil zużycia, snapshoty taryf i symulacje optymalizatora, po czym
+  przeładowuje integrację. Konfiguracja (sensory, bateria, taryfy, ceny) zostaje.
 
 ## Budowanie frontendu (dla deweloperów)
 

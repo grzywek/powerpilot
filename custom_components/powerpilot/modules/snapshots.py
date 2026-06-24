@@ -84,6 +84,30 @@ class SnapshotStore:
         candidates = [key for key in self._records if key <= cutoff]
         return max(candidates) if candidates else None
 
+    def value_at(self, hour: datetime, key: str) -> Any | None:
+        """Realized value of a per-hour array (e.g. ``"bcost"``) for a clock hour.
+
+        Used to reconstruct realized past quantities the live recorder cannot
+        give (the modelled battery energy cost has no sensor). Prefers the
+        vintage recorded *at* that hour — its index 0 is the realized "now"
+        state entering the hour — and otherwise falls back to the latest earlier
+        vintage, indexing forward by the hour offset.
+        """
+        run_key = self.nearest_run_at(hour)
+        if run_key is None:
+            return None
+        rec = self._records.get(run_key)
+        if not rec:
+            return None
+        start = dt_util.parse_datetime(rec.get("start") or "")
+        if start is None:
+            return None
+        idx = round((hour - start).total_seconds() / 3600.0)
+        seq = rec.get(key) or []
+        if 0 <= idx < len(seq):
+            return seq[idx]
+        return None
+
     def prune(self) -> None:
         cutoff = dt_util.utcnow() - timedelta(days=_SNAPSHOT_RETENTION_DAYS)
         kept: dict[str, dict[str, Any]] = {}

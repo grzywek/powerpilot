@@ -35,7 +35,7 @@ interface Plan {
 interface Status {
   last_update: string | null;
   horizon_hours: number;
-  price_profile_days: number;
+  price_archive_hours: number;
   consumption_days: number;
   consumption_devices: string[];
   ev_enabled: boolean;
@@ -60,8 +60,6 @@ interface LogEvent {
 type Matrix = Record<string, (number | null)[]>;
 
 interface Profiles {
-  price: Matrix;
-  price_days: number;
   consumption: Matrix;
   consumption_days: number;
   devices: Record<string, Matrix>;
@@ -1634,7 +1632,7 @@ export class PowerPilotPanel extends LitElement {
       </div>
       <div class="card">
         <div class="card-title">Uczenie</div>
-        <div class="check">Profil cen: <b>${s.price_profile_days}</b> dni</div>
+        <div class="check">Archiwum cen: <b>${s.price_archive_hours}</b> godz.</div>
         <div class="check">Profil zużycia: <b>${s.consumption_days}</b> dni</div>
         <div class="check">
           Urządzenia rozdzielone:
@@ -1663,10 +1661,6 @@ export class PowerPilotPanel extends LitElement {
     return html`
       ${p
         ? html`
-            <div class="card">
-              <div class="card-title">Profil cen — 7×24 (${p.price_days} dni)</div>
-              ${this._heatmap(p.price, "PLN/kWh")}
-            </div>
             <div class="card">
               <div class="card-title">Profil zużycia (bazowy) — 7×24 (${p.consumption_days} dni)</div>
               ${this._heatmap(p.consumption, "kWh")}

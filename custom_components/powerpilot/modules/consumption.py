@@ -123,6 +123,53 @@ class ConsumptionModule(PowerPilotModule):
         """Hourly kWh for an arbitrary [start, end) window (public wrapper)."""
         return await self._fetch_hourly_kwh(entity_id, start, end)
 
+    async def async_diagnose_sensor(
+        self, entity_id: str, start: datetime, end: datetime
+    ) -> dict:
+        """Introspect why a sensor does/doesn't yield historical data.
+
+        Surfaces, for the debug panel, exactly what ``_fetch_hourly_kwh`` keys
+        off: the live unit + ``state_class``, the detected kind, how many
+        long-term-statistics rows exist for each aggregation (so a kWh sensor
+        carrying only ``mean`` — ``state_class: measurement`` instead of
+        ``total_increasing`` — is obvious), and the resulting hourly kWh series.
+        """
+        state = self.hass.states.get(entity_id)
+        unit = state.attributes.get("unit_of_measurement") if state else None
+        state_class = state.attributes.get("state_class") if state else None
+        kind = self._sensor_kind(unit)
+
+        async def _rows(stat_type: str) -> int:
+            stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                start,
+                end,
+                {entity_id},
+                "hour",
+                None,
+                {stat_type},
+            )
+            return len(stats.get(entity_id, []))
+
+        series = await self._fetch_hourly_kwh(entity_id, start, end)
+        samples = [
+            {"hour": h.isoformat(), "kwh": round(v, 3)}
+            for h, v in list(series.items())[-3:]
+        ]
+        return {
+            "entity_id": entity_id,
+            "available": state is not None,
+            "state": state.state if state else None,
+            "unit_of_measurement": unit,
+            "state_class": state_class,
+            "detected_kind": kind,
+            "stat_rows_sum": await _rows("sum"),
+            "stat_rows_mean": await _rows("mean"),
+            "series_hours": len(series),
+            "samples": samples,
+        }
+
     async def _async_save(self) -> None:
         if self._store is None:
             return
@@ -135,6 +182,14 @@ class ConsumptionModule(PowerPilotModule):
                 else None,
             }
         )
+
+    async def async_clear_data(self) -> None:
+        """Drop the learned consumption profile (base + per-device)."""
+        if self._store is not None:
+            await self._store.async_remove()
+        self.base = WeeklyAccumulator()
+        self.devices = {}
+        self._last_learn_day = None
 
     # ------------------------------------------------------------------
     # Learning

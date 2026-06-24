@@ -62,7 +62,8 @@ modules (prices · consumption · loads · weather · climate · ev · calendar)
 
 Implemented: **Stage 0** (foundation — models, battery cost-after-losses, module
 pipeline, heuristic optimizer, config flow, entities), **Stage 1** (prądcast.pl
-price source with confirmed/forecast split + learned price profile), **Stage 2**
+price source with confirmed/forecast split + permanent price archive and
+weighted weekday+hour estimate for the tail), **Stage 2**
 (recorder-based consumption learning with per-device breakdown), and **Stage 6**
 (custom Lit sidebar panel + WebSocket API + dashboards).
 

@@ -117,14 +117,11 @@ class PlanSensor(PowerPilotEntity, SensorEntity):
     def extra_state_attributes(self) -> dict:
         if not self.plan:
             return {}
-        profile = self.coordinator.prices.profile
         consumption = self.coordinator.consumption
         return {
             "created_at": self.plan.created_at.isoformat() if self.plan.created_at else None,
             "horizon_hours": len(self.plan.decisions),
-            "price_profile_samples": profile.samples,
-            "price_profile_observed_days": profile.observed_days,
-            "price_profile": profile.as_matrix(),
+            "price_archive_hours": len(self.coordinator.prices.archive),
             "consumption_observed_days": consumption.base.observed_days,
             "consumption_base_profile": consumption.base.as_matrix(),
             "consumption_devices": list(consumption.devices.keys()),

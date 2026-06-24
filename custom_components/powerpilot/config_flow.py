@@ -334,6 +334,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 "prices",
                 "ev",
                 "tariff_list",
+                "reset_data",
                 "finish",
             ],
         )
@@ -341,6 +342,35 @@ class PowerPilotOptionsFlow(OptionsFlow):
     async def async_step_finish(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._ensure_loaded()
         return self.async_create_entry(title="", data=self._data)
+
+    # --------------------------------------------------------- clear data/cache
+
+    async def async_step_reset_data(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Wipe persisted data/cache (learned profiles, archives, snapshots).
+
+        Configuration is preserved — only the stored data is removed. The entry
+        is reloaded afterwards so every module re-initialises from empty stores.
+        """
+        self._ensure_loaded()
+        if user_input is not None:
+            if user_input.get("confirm"):
+                coordinator = self.hass.data.get(DOMAIN, {}).get(
+                    self.config_entry.entry_id
+                )
+                if coordinator is not None:
+                    await coordinator.async_clear_data()
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                )
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="reset_data",
+            data_schema=vol.Schema(
+                {vol.Required("confirm", default=False): selector.BooleanSelector()}
+            ),
+        )
 
     # ----------------------------------------------------- existing sub-forms
 

@@ -18,7 +18,7 @@ Outputs per hour: inverter mode (charge/discharge/passthrough), charge power
 | Stage | Status | Notes |
 |-------|--------|-------|
 | 0 Foundation | ✅ | models, BatteryModel (cost-after-losses), module pipeline, heuristic optimizer, config flow, sensors/binary_sensors |
-| 1 Prices | ✅ | pluggable sources; **prądcast.pl** adapter (confirmed RDN vs D+1..D+3 forecast); retail markup+VAT; learned 7×24 price profile (persisted + daily backfill) |
+| 1 Prices | ✅ | pluggable sources; **prądcast.pl** adapter (confirmed RDN vs D+1..D+3 forecast); retail markup+VAT; permanent price archive (layered certain/forecast, persisted, 90-day prune) + weighted 1/2/3-week estimate for the tail (~3-week first-run backfill) |
 | 2 Consumption learning | ✅ | recorder-based weekly base profile = main − Σ(device sensors); per-device profiles; persisted + incremental; energy & power sensors |
 | 6 Frontend | ✅ | **custom Lit panel** auto-registered in sidebar (Overview/Status/Profiles/Logs); WebSocket API; ApexCharts YAML dashboards also shipped |
 | 8 Distribution tariffs | ✅ | `tariff` module: `Tariff(validity_ranges, base_component_kwh, periods)`; OptionsFlow CRUD for tariffs/periods/ranges; `workday.check_date` pre-fetch for future days; H+1 snapshot persisted; optimizer + chart split energy vs distribution |
@@ -54,7 +54,8 @@ swappable for an LP solver later.
 - [profiles.py](../custom_components/powerpilot/profiles.py) — reusable `WeeklyAccumulator` (7×24, persisted)
 
 **Modules** (`custom_components/powerpilot/modules/`)
-- `prices.py` + `price_sources.py` — Sensor & **Pradcast** sources, `PriceProfile`
+- `prices.py` + `price_sources.py` — Sensor & **Pradcast** sources, `PriceArchive`
+  (per-hour history with provenance) + weighted weekday+hour estimate for the tail
 - `tariff.py` — distribution tariff (commodity ≠ delivered cost). Resolves the
   active `Tariff` per day via `models.tariff_for_day`, writes
   `slot.distribution_price_kwh = base_component_kwh + period.price_kwh` for every
@@ -65,10 +66,14 @@ swappable for an LP solver later.
 - `consumption.py` — recorder learner (base + per-device)
 - `ev.py` — `EVRequest` (SoC-deficit sizing) — **stub, expand in Stage 3**
 - `loads.py`, `weather.py`, `climate.py`, `calendar.py` — **stubs/scaffolds**
-- `base.py` — `PowerPilotModule` + `ModuleRegistry` (tracks `last_error`)
+- `base.py` — `PowerPilotModule` + `ModuleRegistry` (tracks `last_error`;
+  `async_clear_data()` contract — modules with a `Store` override it to wipe
+  their data/cache, `registry.async_clear_all()` fans it out)
 
 **HA glue**
-- `__init__.py`, `config_flow.py` (user→prices→ev steps), `sensor.py`, `binary_sensor.py`
+- `__init__.py`, `config_flow.py` (user→prices→ev steps; options menu incl.
+  **Clear data & cache** → `coordinator.async_clear_data()` + entry reload, config
+  preserved), `sensor.py`, `binary_sensor.py`
 - `panel.py` — registers sidebar panel + static JS + WS (frontend optional)
 - `websocket_api.py` — `powerpilot/plan|status|log|profiles|forecasts|series`
 
@@ -76,7 +81,7 @@ swappable for an LP solver later.
 - `src/powerpilot-panel.ts` — Lit panel. Tabs: Overview (axis charts: SoC line,
   consumption real/forecast, charge/discharge bars, inverter-mode strip, now
   marker, confirmed vs forecast prices, battery-cost line), Status, Profiles
-  (7×24 heatmaps + D+1..D+3 overlay), Logs.
+  (7×24 consumption heatmap + D+1..D+3 overlay), Logs.
 - `package.json`, `tsconfig.json`, `esbuild.mjs`
 
 **Dashboards** (optional, Lovelace/ApexCharts): `dashboards/*.yaml`
@@ -88,7 +93,7 @@ swappable for an LP solver later.
 | `powerpilot/plan` | full plan (`hours[]` + `forecast[]`) |
 | `powerpilot/status` | checks (sensors/price source), learning days, module errors |
 | `powerpilot/log` | last ~50 optimization runs |
-| `powerpilot/profiles` | 7×24 price + consumption matrices |
+| `powerpilot/profiles` | 7×24 consumption matrices (base + per-device) |
 | `powerpilot/forecasts` | D+1..D+3 horizon prices for a date (Pradcast) |
 | `powerpilot/series` | unified past(real)+future(forecast) hourly series for charts |
 

@@ -131,6 +131,23 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             return
         self._snapshot_store.async_delay_save(self.snapshots.to_dict, 30.0)
 
+    async def async_clear_data(self) -> None:
+        """Wipe all persisted data/cache for this entry, keeping configuration.
+
+        Removes every storage file (optimizer snapshots plus each module's
+        learned consumption profile / price archive / tariff snapshots),
+        cancelling any pending delayed save, and resets in-memory state. The
+        config entry (data/options) is left untouched. Callers should reload the
+        entry afterwards so modules re-initialise from a clean slate.
+        """
+        if self._snapshot_store is not None:
+            await self._snapshot_store.async_remove()
+        self.snapshots = SnapshotStore()
+        self._last_snapshot_hour = None
+        self._battery_energy_cost = 0.0
+        self.events.clear()
+        await self.registry.async_clear_all()
+
     def _build_battery(self) -> BatteryModel:
         soc = self._read_soc()
         return BatteryModel(
@@ -235,6 +252,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "soc": [_r(d.battery_soc, 1) for d in decisions],
             "grid": [_r(d.grid_buy_kwh, 3) for d in decisions],
             "cost": [_r(d.hour_cost, 4) for d in decisions],
+            # Realized battery energy cost (no sensor exists for it) so the chart
+            # can show "Cena w baterii" for past hours by reading index 0 of the
+            # vintage recorded at each hour. Captured from now on; older vintages
+            # predate this field and stay blank.
+            "bcost": [_r(d.battery_energy_cost, 4) for d in decisions],
         }
         self.snapshots.add(record)
         self.snapshots.prune()
@@ -428,10 +450,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         return list(self.events)
 
     def get_profiles(self) -> dict:
-        """7×24 learned profiles for the panel heatmaps."""
+        """7×24 learned consumption profiles for the panel heatmaps."""
         return {
-            "price": self.prices.profile.as_matrix(),
-            "price_days": self.prices.profile.observed_days,
             "consumption": self.consumption.base.as_matrix(),
             "consumption_days": self.consumption.base.observed_days,
             "devices": {
@@ -458,8 +478,47 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     out[key] = value
             return out
 
+        from .const import (
+            CONF_BATTERY_CHARGE_SENSOR,
+            CONF_BATTERY_DISCHARGE_SENSOR,
+            CONF_BUY_PRICE_SENSOR,
+            CONF_CONSUMPTION_SENSOR,
+            CONF_DEVICE_SENSORS,
+            CONF_GRID_IMPORT_SENSOR,
+            CONF_SOC_SENSOR,
+        )
+
         plan = self.data
         series = await self.get_series(past_hours=48)
+
+        # Per-sensor readability diagnostic: pinpoints why a historical series is
+        # empty (unrecognised unit, no statistics, or a sum/mean mismatch).
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        diag_start = now - timedelta(hours=48)
+        diag_targets: list[tuple[str, str]] = []
+        for key in (
+            CONF_CONSUMPTION_SENSOR,
+            CONF_BATTERY_CHARGE_SENSOR,
+            CONF_BATTERY_DISCHARGE_SENSOR,
+            CONF_GRID_IMPORT_SENSOR,
+            CONF_SOC_SENSOR,
+            CONF_BUY_PRICE_SENSOR,
+        ):
+            sid = self.config.get(key)
+            if sid:
+                diag_targets.append((key, sid))
+        for sid in self.config.get(CONF_DEVICE_SENSORS) or []:
+            diag_targets.append((CONF_DEVICE_SENSORS, sid))
+
+        sensor_reads: list[dict] = []
+        for key, sid in diag_targets:
+            try:
+                row = await self.consumption.async_diagnose_sensor(sid, diag_start, now)
+            except Exception as err:  # diagnostics must never break the debug dump
+                row = {"entity_id": sid, "error": repr(err)}
+            row["config_key"] = key
+            sensor_reads.append(row)
+
         return {
             "generated_at": dt_util.now().isoformat(),
             "config": _redact(dict(self.config)),
@@ -467,6 +526,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "status": self.get_status(),
             "profiles": self.get_profiles(),
             "series": series,
+            "sensor_reads": sensor_reads,
             "log": self.get_log(),
         }
 
@@ -743,7 +803,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "inverter_mode": None,
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
                     "battery_discharge_kwh": round(bat_discharge_real[h], 3) if h in bat_discharge_real else None,
-                    "battery_energy_cost": None,
+                    # Realized battery energy cost from the vintage recorded at h
+                    # (no live sensor exists for it). Blank for hours predating
+                    # snapshot capture of this field.
+                    "battery_energy_cost": self.snapshots.value_at(h, "bcost"),
                     "grid_buy_kwh": round(grid_import_real[h], 3) if h in grid_import_real else None,
                     "ev_charge_kwh": None,
                     "hour_cost": None,
@@ -876,7 +939,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         return {
             "last_update": self.events[0]["time"] if self.events else None,
             "horizon_hours": len(plan.decisions) if plan else 0,
-            "price_profile_days": self.prices.profile.observed_days,
+            "price_archive_hours": len(self.prices.archive),
             "consumption_days": self.consumption.base.observed_days,
             "consumption_devices": list(self.consumption.devices.keys()),
             "ev_enabled": self.ev.enabled,

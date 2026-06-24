@@ -44,7 +44,10 @@ from .price_sources import (
 _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
-BACKFILL_DAYS = 7  # how many past days to seed on first run
+BACKFILL_DAYS = 7  # how many past days to seed into the learned profile
+# How many past days of confirmed prices to seed into the archive. Must cover the
+# 3-week estimate lookback (+ a buffer) so estimated prices have samples.
+_ARCHIVE_BACKFILL_DAYS = 22
 _ARCHIVE_RETENTION_DAYS = 90  # how long fetched prices stay in the archive
 
 
@@ -163,17 +166,25 @@ class PriceArchive:
         ):
             # Certain is final — never downgrade to a forecast.
             return False
-        entry = {
-            "energy": float(energy),
+        energy = float(energy)
+        if existing is not None and (
+            existing.get("energy") == energy
+            and existing.get("type") == price_type
+            and existing.get("p10") == p10
+            and existing.get("p90") == p90
+        ):
+            # Same price + provenance → keep the ORIGINAL fetch time. Re-fetching
+            # an unchanged price (e.g. a certain price seen again after a restart)
+            # must not bump "pobrano"; only a real value/type change does.
+            return False
+        self._entries[key] = {
+            "energy": energy,
             "type": price_type,
             "source": source,
             "fetched_at": fetched_at,
             "p10": p10,
             "p90": p90,
         }
-        if existing == entry:
-            return False
-        self._entries[key] = entry
         return True
 
     def __len__(self) -> int:
@@ -248,6 +259,7 @@ class PriceModule(PowerPilotModule):
         self._store: Store | None = None
         self._archive_store: Store | None = None
         self._last_backfill_day: date | None = None
+        self._last_archive_backfill_day: date | None = None
         self._last_source_fetch: datetime | None = None
 
     def _build_source(self) -> PriceSource:
@@ -277,6 +289,7 @@ class PriceModule(PowerPilotModule):
         self.archive.prune()
 
         await self._maybe_backfill()
+        await self._maybe_backfill_archive()
 
     def _refresh_interval(self) -> timedelta:
         hours = float(self.config.get(CONF_PRICE_REFRESH_HOURS, 3) or 3)
@@ -284,6 +297,7 @@ class PriceModule(PowerPilotModule):
 
     async def async_update(self) -> None:
         await self._maybe_backfill()
+        await self._maybe_backfill_archive()
 
         now = dt_util.now()
         # Throttle the actual source hit: forecasts only change every few hours,
@@ -372,21 +386,56 @@ class PriceModule(PowerPilotModule):
                         if h.date() == day and h in data.buy
                     }
                     if hours:
-                        stamp = dt_util.now().isoformat()
                         for hour_start, price in hours.items():
                             self.profile.observe(hour_start, price)
-                            # Seed the archive with settled history so estimates
-                            # have something to weight from the first run.
-                            self.archive.record(
-                                hour_start, price, PRICE_TYPE_CERTAIN,
-                                PRICE_SOURCE_PRADCAST, stamp,
-                            )
                         self.profile.mark_date_observed(day)
-                self.archive.prune()
-                await self._async_save_archive()
 
         self._last_backfill_day = today
         await self._async_save()
+
+    async def _maybe_backfill_archive(self) -> None:
+        """Seed the archive with settled past days so estimates have history.
+
+        Independent of the profile backfill: the archive must hold ~3 weeks of
+        confirmed prices for the weighted estimate to produce a value, even when
+        the learned profile was already backfilled by an earlier version (which
+        would otherwise short-circuit :meth:`_maybe_backfill`).
+        """
+        if self.config.get(CONF_PRICE_SOURCE) != PRICE_SOURCE_PRADCAST:
+            return
+        today = dt_util.now().date()
+        if self._last_archive_backfill_day == today:
+            return
+
+        wanted = [
+            today - timedelta(days=offset)
+            for offset in range(1, _ARCHIVE_BACKFILL_DAYS + 1)
+            if not self._archive_has_day(today - timedelta(days=offset))
+        ]
+        if wanted:
+            source = self._build_source()
+            if isinstance(source, PradcastPriceSource):
+                data = await source.async_fetch_days(wanted)
+                stamp = dt_util.now().isoformat()
+                dirty = False
+                for hour in data.confirmed_hours:
+                    price = data.buy.get(hour)
+                    if price is None:
+                        continue
+                    if self.archive.record(
+                        hour, price, PRICE_TYPE_CERTAIN, PRICE_SOURCE_PRADCAST, stamp
+                    ):
+                        dirty = True
+                if dirty:
+                    self.archive.prune()
+                    await self._async_save_archive()
+
+        self._last_archive_backfill_day = today
+
+    def _archive_has_day(self, day: date) -> bool:
+        """Whether the archive already holds a representative hour of ``day``."""
+        probe = dt_util.start_of_local_day(day) + timedelta(hours=12)
+        return self.archive.get(probe) is not None
 
     async def _ingest_into_archive(self, fetched_at: datetime) -> None:
         """Fold the latest fetch into the permanent archive (layered)."""

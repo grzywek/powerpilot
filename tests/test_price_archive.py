@@ -48,6 +48,19 @@ def test_record_is_noop_when_identical() -> None:
     assert archive.record(h, 1.0, PRICE_TYPE_CERTAIN, "pradcast", "t1") is False
 
 
+def test_refetch_preserves_original_fetched_at() -> None:
+    archive = PriceArchive()
+    h = _hour()
+    archive.record(h, 1.0, PRICE_TYPE_CERTAIN, "pradcast", "13:41")
+    # Re-fetching the same certain price (e.g. after a restart) must not bump the
+    # "pobrano" timestamp.
+    assert archive.record(h, 1.0, PRICE_TYPE_CERTAIN, "pradcast", "14:08") is False
+    assert archive.get(h)["fetched_at"] == "13:41"
+    # A genuine value change does update the timestamp.
+    assert archive.record(h, 1.1, PRICE_TYPE_CERTAIN, "pradcast", "14:08") is True
+    assert archive.get(h)["fetched_at"] == "14:08"
+
+
 def test_estimate_weighted_average() -> None:
     archive = PriceArchive()
     h = _hour()

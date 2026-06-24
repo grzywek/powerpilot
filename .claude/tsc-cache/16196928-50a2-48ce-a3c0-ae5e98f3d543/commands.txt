@@ -1,2 +1,0 @@
-frontend:build:cd /Users/dawid/Documents/GIT/powerpilot/frontend && npm run build
-frontend:tsc:cd /Users/dawid/Documents/GIT/powerpilot/frontend && npx tsc --noEmit

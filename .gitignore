@@ -1,7 +1,61 @@
+# ===================
+# OS files
+# ===================
 .DS_Store
-.venv/
+Thumbs.db
+
+# ===================
+# Python
+# ===================
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# Test / coverage / type-check caches
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ===================
+# Frontend (Node / esbuild)
+# ===================
 node_modules/
+# NOTE: the built panel bundle
+# custom_components/powerpilot/frontend/powerpilot-panel.js is intentionally
+# tracked — HACS installs the component without a build step, so the bundle
+# must ship in the repo.
+
+# ===================
+# Editors / IDEs
+# ===================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===================
+# Secrets / env
+# ===================
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.*
+secrets.*
+
+# ===================
+# Local tooling state (not part of the project)
+# ===================
+.tldr/
+.claude/tsc-cache/

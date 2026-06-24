@@ -110,12 +110,29 @@ for d in plan.decisions:
 print("modes:", modes, "| EV charging hours:", ev_hours)
 print("first hour:", plan.current.inverter_mode, "soc", round(plan.current.battery_soc, 1),
       "battery_cost", round(plan.current.battery_energy_cost, 4))
-# Spot-check: charging should occur in cheap hours, discharge in expensive ones.
+# Economic spot-checks for the cost-minimizing LP. The model does real
+# arbitrage, so charging is NOT confined to the single cheapest tier: it may
+# top up at a mid price to ride through a peak when the cheap hours are already
+# consumed (e.g. by EV sharing the inverter phase). The invariants that must
+# hold are economic, not threshold-based.
 charge_prices = [s.buy_price for s, d in zip(slots, plan.decisions) if d.inverter_mode == "charge"]
 discharge_prices = [s.buy_price for s, d in zip(slots, plan.decisions) if d.inverter_mode == "discharge"]
+soc_curve = [d.battery_soc for d in plan.decisions]
 print("charge during prices:", sorted(set(charge_prices)))
 print("discharge during prices:", sorted(set(discharge_prices)))
-assert all(p <= 0.3 for p in charge_prices), "charging should only happen in cheap hours"
-assert all(p >= 0.7 for p in discharge_prices), "discharge only at/above the expensive threshold"
+print("soc range:", round(min(soc_curve), 1), "..", round(max(soc_curve), 1))
+
+peak_price = max(s.buy_price for s in slots)
+# 1) Never charge the battery at the peak price — that can never be arbitraged.
+assert all(p < peak_price for p in charge_prices), "must not charge at the peak price"
+# 2) Arbitrage direction holds: we charge cheaper than we later discharge.
+if charge_prices and discharge_prices:
+    assert max(charge_prices) <= max(discharge_prices), "charge cheaper than discharge"
+# 3) Discharge happens into expensive hours (above the median price).
+median_price = sorted(s.buy_price for s in slots)[len(slots) // 2]
+assert all(p >= median_price for p in discharge_prices), "discharge into expensive hours"
+# 4) The battery is actually used — SoC must draw down meaningfully, not park
+#    at high SoC the whole horizon (the core bug this rewrite fixes).
+assert min(soc_curve) <= battery.min_soc + 10, "battery must be discharged, not parked high"
 assert plan.current.reminders == ["test reminder"]
 print("PIPELINE_OK")

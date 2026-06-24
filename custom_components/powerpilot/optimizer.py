@@ -122,9 +122,13 @@ def _charge_curve_cuts(
 ) -> list[tuple[float, float]]:
     """Affine upper bounds ``max_charge_kw(E) ≤ slope·E + intercept``.
 
-    The SoC-dependent charge curve is represented by its concave envelope, which
-    is exact for the usual monotonically-tapering curves and keeps the model a
-    pure LP. An empty curve returns no cuts (the flat inverter limit, applied as
+    The SoC-dependent charge curve is represented by the concave envelope of its
+    band corners, which keeps the model a pure LP. For a piecewise-constant band
+    curve the envelope is a slightly *loose* upper bound (it bows above the steps
+    between band corners by up to a fraction of a kW); it is tight at the corners
+    and exactly captures the monotonic taper, which is what matters — the LP is
+    re-solved every cycle against the measured SoC, so any small slack self-
+    corrects. An empty curve returns no cuts (the flat inverter limit, applied as
     a simple variable bound, is enough).
     """
     if not curve.segments or capacity_kwh <= 0:
@@ -137,7 +141,13 @@ def _charge_curve_cuts(
         power = float(seg["max_kw"])
         points.add((e_from, power))
         points.add((e_to, power))
-    points.add((capacity_kwh, curve.max_kw(curve.segments[-1]["soc_to"])))
+    # Pin the envelope to E=capacity using the last band's power. ``max_kw`` is
+    # not usable here: its match is ``soc_from <= soc < soc_to``, so the last
+    # band's *exclusive* upper edge never matches and would fall back to
+    # ``default_kw`` — pulling the concave hull up and erasing the high-SoC
+    # taper. The last segment's ``max_kw`` is the power that actually applies as
+    # the battery approaches full.
+    points.add((capacity_kwh, float(curve.segments[-1]["max_kw"])))
 
     hull = _upper_hull(sorted(points))
     cuts: list[tuple[float, float]] = []

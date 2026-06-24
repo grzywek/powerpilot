@@ -37,7 +37,8 @@
           "price_source": "Price source",
           "pradcast_api_key": "Pradcast API key",
           "price_markup": "Seller markup net (PLN/kWh)",
-          "price_vat": "VAT multiplier"
+          "price_vat": "VAT multiplier",
+          "price_refresh_hours": "Source refresh interval (h)"
         }
       },
       "ev": {
@@ -62,6 +63,7 @@
         "description": "Pick a section to edit, then return here. Use *Save & exit* to commit changes.",
         "menu_options": {
           "core": "⚙️ Core (grid / battery / inverter / sensors)",
+          "charge_curve": "🔋 Charge curve (power vs SoC)",
           "prices": "💰 Energy prices",
           "ev": "🚗 EV",
           "tariff_list": "🧾 Distribution tariffs",
@@ -93,13 +95,26 @@
           "weather_entity": "Weather entity"
         }
       },
+      "charge_curve": {
+        "title": "PowerPilot – charge curve",
+        "description": "Maximum battery charge power (kW) per SoC band. Lithium cells taper charge power as they fill, so the inverter cannot push full power near 100 %. Enter the power the inverter actually sustains in each band; leave every field at the inverter's flat limit to keep a flat curve. The optimizer never schedules charging above these limits.",
+        "data": {
+          "charge_curve_kw_0_10": "0–10 % SoC — max charge power (kW)",
+          "charge_curve_kw_11_30": "11–30 % SoC — max charge power (kW)",
+          "charge_curve_kw_31_50": "31–50 % SoC — max charge power (kW)",
+          "charge_curve_kw_51_70": "51–70 % SoC — max charge power (kW)",
+          "charge_curve_kw_71_90": "71–90 % SoC — max charge power (kW)",
+          "charge_curve_kw_91_100": "91–100 % SoC — max charge power (kW)"
+        }
+      },
       "prices": {
         "title": "PowerPilot – prices",
         "data": {
           "price_source": "Price source",
           "pradcast_api_key": "Pradcast API key",
           "price_markup": "Seller markup net (PLN/kWh)",
-          "price_vat": "VAT multiplier"
+          "price_vat": "VAT multiplier",
+          "price_refresh_hours": "Source refresh interval (h)"
         }
       },
       "ev": {

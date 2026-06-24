@@ -49,9 +49,24 @@ CONF_PRADCAST_API_KEY: Final = "pradcast_api_key"
 # Net seller markup added to wholesale RDN price before VAT.
 CONF_PRICE_MARKUP: Final = "price_markup"  # additive PLN/kWh (seller's net fee)
 CONF_PRICE_VAT: Final = "price_vat"  # multiplier applied after markup (e.g. 1.23)
+# How often the price source is actually re-fetched (forecasts change). The
+# optimizer still runs every DEFAULT_UPDATE_INTERVAL_MINUTES off cached prices.
+CONF_PRICE_REFRESH_HOURS: Final = "price_refresh_hours"
 
 PRICE_SOURCE_SENSOR: Final = "sensor"
 PRICE_SOURCE_PRADCAST: Final = "pradcast"
+
+# Price provenance for the archive / "Ceny" tab.
+PRICE_TYPE_CERTAIN: Final = "certain"  # binding RDN — final, never overwritten
+PRICE_TYPE_FORECAST: Final = "forecast"  # published forecast — refreshed each fetch
+PRICE_TYPE_ESTIMATED: Final = "estimated"  # weighted weekday+hour average (derived)
+
+# Storage version for the per-entry energy-price archive store.
+STORAGE_VERSION_PRICE_ARCHIVE: Final = 1
+
+# Weights for the estimated price: same weekday+hour, 1 / 2 / 3 weeks ago.
+# More recent weeks weigh more; renormalised over whatever samples exist.
+ESTIMATE_WEEKLY_WEIGHTS: Final = (0.5, 0.3, 0.2)
 
 # --- EV ---
 CONF_EV_ENABLED: Final = "ev_enabled"
@@ -88,6 +103,7 @@ DEFAULTS: Final = {
     CONF_PRICE_SOURCE: PRICE_SOURCE_SENSOR,
     CONF_PRICE_MARKUP: 0.0,
     CONF_PRICE_VAT: 1.0,
+    CONF_PRICE_REFRESH_HOURS: 3,
     CONF_CONSUMPTION_LEARN_DAYS: 21,
     CONF_EV_ENABLED: False,
     CONF_EV_RANGE_KM: 400,
@@ -96,6 +112,35 @@ DEFAULTS: Final = {
     CONF_EV_CHARGER_KW: 3.5,
     CONF_EV_CHARGER_PHASE: 1,
 }
+
+# ---------------------------------------------------------------------------
+# Charge-curve SoC bands
+# ---------------------------------------------------------------------------
+# Each band is a half-open SoC interval ``[soc_from, soc_to)``. The exclusive
+# upper edge is the user-facing inclusive top + 1 (e.g. the "11–30 %" band is
+# stored as ``[11, 31)``) so the bands are contiguous and cover 0–100 % with no
+# gaps for a continuous SoC reading. The config flow asks for one max charge
+# power per band and assembles them into ``CONF_CHARGE_CURVE`` segments.
+CHARGE_CURVE_BANDS: Final = (
+    (0, 11),
+    (11, 31),
+    (31, 51),
+    (51, 71),
+    (71, 91),
+    (91, 101),
+)
+
+
+def charge_curve_band_key(band: tuple[int, int]) -> str:
+    """Transient config-flow field key for a band, e.g. ``charge_curve_kw_11_30``.
+
+    The key embeds the inclusive label (``soc_to - 1``) so it matches what the
+    user sees in the form. These keys are not persisted — they are assembled
+    into the canonical ``CONF_CHARGE_CURVE`` segment list on save.
+    """
+    lo, hi = band
+    return f"charge_curve_kw_{lo}_{hi - 1}"
+
 
 # ---------------------------------------------------------------------------
 # Decision enums (kept as plain strings for HA state friendliness)

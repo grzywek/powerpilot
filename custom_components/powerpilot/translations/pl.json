@@ -37,7 +37,8 @@
           "price_source": "Źródło cen",
           "pradcast_api_key": "Klucz API Pradcast",
           "price_markup": "Narzut sprzedawcy netto (PLN/kWh)",
-          "price_vat": "Mnożnik VAT"
+          "price_vat": "Mnożnik VAT",
+          "price_refresh_hours": "Częstotliwość pobierania źródła (h)"
         }
       },
       "ev": {
@@ -62,6 +63,7 @@
         "description": "Wybierz sekcję do edycji, potem wróć tutaj. Użyj *Zapisz i zakończ* aby zapisać zmiany.",
         "menu_options": {
           "core": "⚙️ Podstawy (sieć / bateria / falownik / sensory)",
+          "charge_curve": "🔋 Krzywa ładowania (moc vs SoC)",
           "prices": "💰 Ceny energii",
           "ev": "🚗 Samochód elektryczny",
           "tariff_list": "🧾 Taryfy dystrybucyjne",
@@ -93,13 +95,26 @@
           "weather_entity": "Encja pogody"
         }
       },
+      "charge_curve": {
+        "title": "PowerPilot – krzywa ładowania",
+        "description": "Maksymalna moc ładowania baterii (kW) w każdym przedziale SoC. Ogniwa litowe obniżają moc ładowania w miarę zapełniania, więc falownik nie utrzyma pełnej mocy przy ~100 %. Wpisz moc, jaką falownik realnie utrzymuje w danym przedziale; zostaw wszystkie pola na płaskim limicie falownika, aby zachować płaską krzywą. Optymalizator nigdy nie zaplanuje ładowania powyżej tych limitów.",
+        "data": {
+          "charge_curve_kw_0_10": "0–10 % SoC — maks. moc ładowania (kW)",
+          "charge_curve_kw_11_30": "11–30 % SoC — maks. moc ładowania (kW)",
+          "charge_curve_kw_31_50": "31–50 % SoC — maks. moc ładowania (kW)",
+          "charge_curve_kw_51_70": "51–70 % SoC — maks. moc ładowania (kW)",
+          "charge_curve_kw_71_90": "71–90 % SoC — maks. moc ładowania (kW)",
+          "charge_curve_kw_91_100": "91–100 % SoC — maks. moc ładowania (kW)"
+        }
+      },
       "prices": {
         "title": "PowerPilot – ceny",
         "data": {
           "price_source": "Źródło cen",
           "pradcast_api_key": "Klucz API Pradcast",
           "price_markup": "Narzut sprzedawcy netto (PLN/kWh)",
-          "price_vat": "Mnożnik VAT"
+          "price_vat": "Mnożnik VAT",
+          "price_refresh_hours": "Częstotliwość pobierania źródła (h)"
         }
       },
       "ev": {

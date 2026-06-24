@@ -37,6 +37,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DEFAULTS,
     DOMAIN,
+    PRICE_TYPE_ESTIMATED,
 )
 from .forecast import ForecastBuilder
 from .models import Plan, tariff_for_day
@@ -266,6 +267,75 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         horizons = await self.prices.async_fetch_forecasts(target)
         return {"date": target.isoformat(), "horizons": horizons}
+
+    def get_price_archive(self, date_str: str | None) -> dict:
+        """Hourly price archive for a single day (the "Ceny" tab).
+
+        Reads the permanent energy archive (certain/forecast) or derives the
+        estimated price for hours with no fetched data, pairs each with the
+        distribution price (snapshot for past hours, live-resolved for future
+        ones) and the gross full price. Estimated rows carry the three weekly
+        samples + weights so the UI can explain the calculation on hover.
+        """
+        from datetime import date as _date
+
+        if date_str:
+            try:
+                target = _date.fromisoformat(date_str)
+            except ValueError:
+                target = dt_util.now().date()
+        else:
+            target = dt_util.now().date()
+
+        def _r(value: float | None, ndigits: int = 4) -> float | None:
+            return round(value, ndigits) if value is not None else None
+
+        start = dt_util.start_of_local_day(target)
+        hours: list[dict] = []
+        for index in range(24):
+            hour = start + timedelta(hours=index)
+            entry = self.prices.archive.get(hour)
+            breakdown = None
+            p10 = p90 = None
+            if entry is not None:
+                energy = entry["energy"]
+                price_type = entry["type"]
+                source = entry["source"]
+                fetched_at = entry["fetched_at"]
+                p10 = entry.get("p10")
+                p90 = entry.get("p90")
+            else:
+                energy, samples = self.prices.archive.estimate(hour)
+                if energy is None:
+                    price_type = None
+                    source = None
+                else:
+                    price_type = PRICE_TYPE_ESTIMATED
+                    source = "estimate"
+                    breakdown = [
+                        {**s, "value": _r(s["value"])} for s in samples
+                    ]
+                fetched_at = None
+
+            dist = self.tariff.distribution_for(hour)
+            total = (
+                energy + dist if (energy is not None and dist is not None) else None
+            )
+            hours.append(
+                {
+                    "start": hour.isoformat(),
+                    "type": price_type,
+                    "source": source,
+                    "fetched_at": fetched_at,
+                    "energy_price_kwh": _r(energy),
+                    "distribution_price_kwh": _r(dist),
+                    "total_price_kwh": _r(total),
+                    "p10": _r(p10),
+                    "p90": _r(p90),
+                    "estimate_breakdown": breakdown,
+                }
+            )
+        return {"date": target.isoformat(), "hours": hours}
 
     async def _recent_soc(self, start: datetime, end: datetime) -> dict:
         """Hourly battery SoC (%) from the SoC sensor's statistics for a window."""

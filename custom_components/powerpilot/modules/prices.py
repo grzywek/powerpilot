@@ -15,11 +15,23 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from ..const import CONF_PRICE_SOURCE, DOMAIN, PRICE_SOURCE_PRADCAST
+from ..const import (
+    CONF_PRICE_REFRESH_HOURS,
+    CONF_PRICE_SOURCE,
+    DOMAIN,
+    ESTIMATE_WEEKLY_WEIGHTS,
+    PRICE_SOURCE_PRADCAST,
+    PRICE_SOURCE_SENSOR,
+    PRICE_TYPE_CERTAIN,
+    PRICE_TYPE_ESTIMATED,
+    PRICE_TYPE_FORECAST,
+    STORAGE_VERSION_PRICE_ARCHIVE,
+)
 from ..models import Forecast
 from .base import PowerPilotModule
 from .price_sources import (
@@ -33,6 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
 BACKFILL_DAYS = 7  # how many past days to seed on first run
+_ARCHIVE_RETENTION_DAYS = 90  # how long fetched prices stay in the archive
 
 
 class PriceProfile:
@@ -103,6 +116,125 @@ class PriceProfile:
         return profile
 
 
+class PriceArchive:
+    """Per-hour energy-price archive with provenance.
+
+    Once a price is fetched from the source it is stored permanently (pruned only
+    after :data:`_ARCHIVE_RETENTION_DAYS`), so any past day can be reviewed. The
+    layering rule is *estimated → forecast → certain*:
+
+      * a freshly published **forecast** refreshes a prior forecast entry;
+      * a **certain** (binding RDN) price is final and is never downgraded back
+        to a forecast.
+
+    Estimated prices are **not** stored here — they are derived on read from the
+    confirmed history, so they always reflect the latest archive.
+    """
+
+    def __init__(self) -> None:
+        # {utc_iso_hour: {"energy","type","source","fetched_at","p10","p90"}}
+        self._entries: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _key(hour_start: datetime) -> str:
+        return (
+            dt_util.as_utc(hour_start)
+            .replace(minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
+
+    def record(
+        self,
+        hour_start: datetime,
+        energy: float,
+        price_type: str,
+        source: str,
+        fetched_at: str,
+        p10: float | None = None,
+        p90: float | None = None,
+    ) -> bool:
+        """Insert/refresh an entry honouring layering. Returns True if it changed."""
+        key = self._key(hour_start)
+        existing = self._entries.get(key)
+        if (
+            existing is not None
+            and existing.get("type") == PRICE_TYPE_CERTAIN
+            and price_type != PRICE_TYPE_CERTAIN
+        ):
+            # Certain is final — never downgrade to a forecast.
+            return False
+        entry = {
+            "energy": float(energy),
+            "type": price_type,
+            "source": source,
+            "fetched_at": fetched_at,
+            "p10": p10,
+            "p90": p90,
+        }
+        if existing == entry:
+            return False
+        self._entries[key] = entry
+        return True
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def get(self, hour_start: datetime) -> dict[str, Any] | None:
+        return self._entries.get(self._key(hour_start))
+
+    def estimate(self, hour_start: datetime) -> tuple[float | None, list[dict[str, Any]]]:
+        """Weighted same-weekday+hour average from 1/2/3 weeks ago.
+
+        Returns ``(price, breakdown)``. ``breakdown`` always lists the three
+        contributing weeks (date, weight, value, type) for the UI tooltip;
+        ``price`` is ``None`` when no historical sample exists. Weights are
+        renormalised over whatever samples are available.
+        """
+        breakdown: list[dict[str, Any]] = []
+        for weeks, weight in zip((1, 2, 3), ESTIMATE_WEEKLY_WEIGHTS):
+            past = hour_start - timedelta(days=7 * weeks)
+            entry = self.get(past)
+            breakdown.append(
+                {
+                    "weeks_ago": weeks,
+                    "weight": weight,
+                    "date": dt_util.as_local(past).date().isoformat(),
+                    "value": entry["energy"] if entry else None,
+                    "type": entry["type"] if entry else None,
+                }
+            )
+        total_weight = sum(b["weight"] for b in breakdown if b["value"] is not None)
+        if total_weight <= 0:
+            return None, breakdown
+        price = (
+            sum(b["value"] * b["weight"] for b in breakdown if b["value"] is not None)
+            / total_weight
+        )
+        return price, breakdown
+
+    def prune(self) -> None:
+        cutoff = dt_util.utcnow() - timedelta(days=_ARCHIVE_RETENTION_DAYS)
+        kept: dict[str, dict[str, Any]] = {}
+        for key, value in self._entries.items():
+            try:
+                stamp = datetime.fromisoformat(key)
+            except (ValueError, TypeError):
+                continue
+            if stamp >= cutoff:
+                kept[key] = value
+        self._entries = kept
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"entries": self._entries}
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "PriceArchive":
+        archive = cls()
+        if data:
+            archive._entries = dict(data.get("entries") or {})
+        return archive
+
+
 class PriceModule(PowerPilotModule):
     """Provides hourly buy prices to the forecast."""
 
@@ -112,8 +244,11 @@ class PriceModule(PowerPilotModule):
         super().__init__(hass, coordinator)
         self._data = PriceData()
         self.profile = PriceProfile()
+        self.archive = PriceArchive()
         self._store: Store | None = None
+        self._archive_store: Store | None = None
         self._last_backfill_day: date | None = None
+        self._last_source_fetch: datetime | None = None
 
     def _build_source(self) -> PriceSource:
         if self.config.get(CONF_PRICE_SOURCE) == PRICE_SOURCE_PRADCAST:
@@ -131,12 +266,50 @@ class PriceModule(PowerPilotModule):
             self.profile = PriceProfile.from_dict(stored.get("profile"))
             last = stored.get("last_backfill_day")
             self._last_backfill_day = date.fromisoformat(last) if last else None
+
+        self._archive_store = Store(
+            self.hass,
+            STORAGE_VERSION_PRICE_ARCHIVE,
+            f"{DOMAIN}_{self.coordinator.entry.entry_id}_price_archive",
+        )
+        archived = await self._archive_store.async_load()
+        self.archive = PriceArchive.from_dict(archived)
+        self.archive.prune()
+
         await self._maybe_backfill()
+
+    def _refresh_interval(self) -> timedelta:
+        hours = float(self.config.get(CONF_PRICE_REFRESH_HOURS, 3) or 3)
+        return timedelta(hours=max(hours, 0.0))
 
     async def async_update(self) -> None:
         await self._maybe_backfill()
+
+        now = dt_util.now()
+        # Throttle the actual source hit: forecasts only change every few hours,
+        # so the optimizer runs off cached prices in between. A fresh restart
+        # (empty buy data) always fetches immediately.
+        if (
+            self._data.buy
+            and self._last_source_fetch is not None
+            and (now - self._last_source_fetch) < self._refresh_interval()
+        ):
+            next_fetch = self._last_source_fetch + self._refresh_interval()
+            self.log_info(
+                f"Ceny z pamięci podręcznej (następne pobranie ~{next_fetch.strftime('%H:%M')}). "
+                f"Archiwum: {len(self.archive)} godzin.",
+                extra={
+                    "cached": True,
+                    "next_fetch": next_fetch.isoformat(),
+                    "archive_hours": len(self.archive),
+                },
+            )
+            return
+
         source = self._build_source()
         self._data = await source.async_fetch()
+        self._last_source_fetch = now
+        await self._ingest_into_archive(now)
         confirmed_count = len(self._data.confirmed_hours)
         total_count = len(self._data.buy)
         forecast_count = total_count - confirmed_count
@@ -148,7 +321,9 @@ class PriceModule(PowerPilotModule):
         )
         self.log_info(
             f"Źródło {source_label}: {confirmed_count}h potwierdzonych + {forecast_count}h prognozy "
-            f"(do {last_hour.isoformat() if last_hour else '–'}). Profil: {self.profile.observed_days} dni / {self.profile.samples} próbek.",
+            f"(do {last_hour.isoformat() if last_hour else '–'}). "
+            f"Profil: {self.profile.observed_days} dni / {self.profile.samples} próbek. "
+            f"Archiwum: {len(self.archive)} godzin.",
             extra={
                 "source": source_label,
                 "confirmed_hours": confirmed_count,
@@ -156,6 +331,7 @@ class PriceModule(PowerPilotModule):
                 "last_priced_hour": last_hour.isoformat() if last_hour else None,
                 "profile_days": self.profile.observed_days,
                 "profile_samples": self.profile.samples,
+                "archive_hours": len(self.archive),
             },
         )
 
@@ -196,12 +372,39 @@ class PriceModule(PowerPilotModule):
                         if h.date() == day and h in data.buy
                     }
                     if hours:
+                        stamp = dt_util.now().isoformat()
                         for hour_start, price in hours.items():
                             self.profile.observe(hour_start, price)
+                            # Seed the archive with settled history so estimates
+                            # have something to weight from the first run.
+                            self.archive.record(
+                                hour_start, price, PRICE_TYPE_CERTAIN,
+                                PRICE_SOURCE_PRADCAST, stamp,
+                            )
                         self.profile.mark_date_observed(day)
+                self.archive.prune()
+                await self._async_save_archive()
 
         self._last_backfill_day = today
         await self._async_save()
+
+    async def _ingest_into_archive(self, fetched_at: datetime) -> None:
+        """Fold the latest fetch into the permanent archive (layered)."""
+        source_label = (
+            PRICE_SOURCE_PRADCAST
+            if self.config.get(CONF_PRICE_SOURCE) == PRICE_SOURCE_PRADCAST
+            else PRICE_SOURCE_SENSOR
+        )
+        stamp = fetched_at.isoformat()
+        dirty = False
+        for hour, energy in self._data.buy.items():
+            is_confirmed = hour in self._data.confirmed_hours
+            price_type = PRICE_TYPE_CERTAIN if is_confirmed else PRICE_TYPE_FORECAST
+            if self.archive.record(hour, energy, price_type, source_label, stamp):
+                dirty = True
+        if dirty:
+            self.archive.prune()
+            await self._async_save_archive()
 
     async def _async_save(self) -> None:
         if self._store is None:
@@ -215,20 +418,38 @@ class PriceModule(PowerPilotModule):
             }
         )
 
+    async def _async_save_archive(self) -> None:
+        if self._archive_store is None:
+            return
+        await self._archive_store.async_save(self.archive.to_dict())
+
     def contribute(self, forecast: Forecast) -> None:
         for slot in forecast.slots:
             hour = slot.start.replace(minute=0, second=0, microsecond=0)
             price = self._data.buy.get(hour)
+            confirmed = hour in self._data.confirmed_hours
             if price is None:
-                # Interior gap fallback to the learned profile (does not extend
-                # the horizon past the last real price — trailing gaps stay None).
-                profile_price = self.profile.value(hour.weekday(), hour.hour)
-                if profile_price is not None:
-                    price = profile_price
-                    slot.tags.append("price_profile")
+                # Fall back to the permanent archive (covers cached hours between
+                # source fetches), then to the estimated weekday+hour average.
+                archived = self.archive.get(hour)
+                if archived is not None:
+                    price = archived["energy"]
+                    confirmed = archived["type"] == PRICE_TYPE_CERTAIN
+                    if archived["type"] == PRICE_TYPE_FORECAST:
+                        slot.tags.append("price_archived")
+                else:
+                    # Estimated prices fill the tail (D+4..D+7) so the plan
+                    # reaches a full week; prefer the 3-week weighted average,
+                    # else the long-run learned profile.
+                    estimate, _ = self.archive.estimate(hour)
+                    if estimate is None:
+                        estimate = self.profile.value(hour.weekday(), hour.hour)
+                    if estimate is not None:
+                        price = estimate
+                        slot.tags.append("price_estimated")
             if price is not None:
                 slot.buy_price = price
-            slot.price_confirmed = hour in self._data.confirmed_hours
+            slot.price_confirmed = confirmed
             if hour in self._data.levels:
                 slot.tags.append(f"price:{self._data.levels[hour]}")
             if hour in self._data.confidence:

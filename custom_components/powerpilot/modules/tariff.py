@@ -50,8 +50,8 @@ from .base import PowerPilotModule
 # How many days of past snapshots to keep.
 _SNAPSHOT_RETENTION_DAYS = 90
 
-# How many future days to pre-fetch workday.check_date for.
-_FUTURE_DAYS_TO_PREFETCH = 4
+# How many future days to pre-fetch workday.check_date for (full 7-day horizon).
+_FUTURE_DAYS_TO_PREFETCH = 7
 
 _WORKDAY_DOMAIN = "workday"
 _CHECK_DATE_SERVICE = "check_date"
@@ -323,6 +323,23 @@ class TariffModule(PowerPilotModule):
     def snapshot_for(self, hour_start: datetime) -> float | None:
         """Lookup helper used by ``coordinator.get_series`` for past hours."""
         return (self._snapshots.get(self._snapshot_key(hour_start)) or {}).get("price")
+
+    def distribution_for(self, hour_start: datetime) -> float | None:
+        """Gross distribution price (PLN/kWh) for *any* hour.
+
+        Returns the persisted snapshot when present (past/current hours), else
+        resolves it live from the current config (future hours) — used by the
+        price-archive view, which spans days the snapshot store hasn't reached.
+        """
+        snap = self.snapshot_for(hour_start)
+        if snap is not None:
+            return snap
+        slot_dt = hour_start
+        if slot_dt.tzinfo is None:
+            slot_dt = dt_util.as_local(slot_dt)
+        day_offset = (slot_dt.date() - dt_util.now().date()).days
+        price, _, _ = self._resolve_price(slot_dt, day_offset)
+        return price
 
     @property
     def tariffs(self) -> list[Tariff]:

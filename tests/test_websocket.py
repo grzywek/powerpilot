@@ -57,3 +57,37 @@ async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:
     assert "now" in msg["result"]
     # Should contain both past hours and the forecast horizon.
     assert any(h["is_past"] for h in msg["result"]["hours"])
+
+
+async def test_ws_prices_archive(hass: HomeAssistant, hass_ws_client) -> None:
+    await _setup(hass)
+    client = await hass_ws_client(hass)
+
+    await client.send_json({"id": 1, "type": "powerpilot/prices"})
+    msg = await client.receive_json()
+    assert msg["success"]
+    result = msg["result"]
+    assert "date" in result
+    # A full day is always 24 hourly rows with the archive column shape.
+    assert len(result["hours"]) == 24
+    row = result["hours"][0]
+    for key in (
+        "start",
+        "type",
+        "source",
+        "fetched_at",
+        "energy_price_kwh",
+        "distribution_price_kwh",
+        "total_price_kwh",
+        "estimate_breakdown",
+    ):
+        assert key in row
+
+    # An explicit (future) date is accepted and echoed back.
+    await client.send_json(
+        {"id": 2, "type": "powerpilot/prices", "date": "2030-01-01"}
+    )
+    msg = await client.receive_json()
+    assert msg["success"]
+    assert msg["result"]["date"] == "2030-01-01"
+    assert len(msg["result"]["hours"]) == 24

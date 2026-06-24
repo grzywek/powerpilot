@@ -35,7 +35,8 @@
           "price_source": "Price source",
           "pradcast_api_key": "Pradcast API key",
           "price_markup": "Seller markup net (PLN/kWh)",
-          "price_vat": "VAT multiplier"
+          "price_vat": "VAT multiplier",
+          "price_refresh_hours": "Source refresh interval (h)"
         }
       },
       "ev": {
@@ -97,7 +98,8 @@
           "price_source": "Price source",
           "pradcast_api_key": "Pradcast API key",
           "price_markup": "Seller markup net (PLN/kWh)",
-          "price_vat": "VAT multiplier"
+          "price_vat": "VAT multiplier",
+          "price_refresh_hours": "Source refresh interval (h)"
         }
       },
       "ev": {

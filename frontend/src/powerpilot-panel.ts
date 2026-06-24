@@ -114,6 +114,47 @@ interface Series {
   hours: SeriesHour[];
 }
 
+type PriceType = "certain" | "forecast" | "estimated";
+
+interface EstimateSample {
+  weeks_ago: number;
+  weight: number;
+  date: string;
+  value: number | null;
+  type: PriceType | null;
+}
+
+interface PriceArchiveHour {
+  start: string;
+  type: PriceType | null;
+  source: string | null;
+  fetched_at: string | null;
+  energy_price_kwh: number | null;
+  distribution_price_kwh: number | null;
+  total_price_kwh: number | null;
+  p10: number | null;
+  p90: number | null;
+  estimate_breakdown: EstimateSample[] | null;
+}
+
+interface PriceArchive {
+  date: string;
+  hours: PriceArchiveHour[];
+}
+
+/** Price-type → badge label + color. Drives the "Typ" column on the Ceny tab. */
+const PRICE_TYPE_META: Record<PriceType, { label: string; color: string }> = {
+  certain: { label: "pewna", color: "#43a047" },
+  forecast: { label: "prognoza", color: "#3498db" },
+  estimated: { label: "szacowana", color: "#e67e22" },
+};
+
+const PRICE_SOURCE_LABEL: Record<string, string> = {
+  pradcast: "prądcast.pl",
+  sensor: "sensor HA",
+  estimate: "szacowanie",
+};
+
 type Tab = "overview" | "prices" | "status" | "profiles" | "logs" | "debug";
 
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -185,6 +226,9 @@ export class PowerPilotPanel extends LitElement {
   @state() private _anchor: Date | null = null;
   /** Selected day on the Prices tab (ISO string YYYY-MM-DD). Null = today. */
   @state() private _pricesDay: string | null = null;
+  /** Price archive payload for the selected day (independent of the chart window). */
+  @state() private _pricesData: PriceArchive | null = null;
+  @state() private _pricesLoading = false;
 
   private _timer?: number;
   private _energyChart?: ApexCharts;
@@ -259,6 +303,9 @@ export class PowerPilotPanel extends LitElement {
       this._profiles = profiles;
       this._series = series;
       this._error = null;
+      // Keep the price archive fresh while it's on screen (today's rows pick up
+      // newly confirmed / re-forecast prices between source fetches).
+      if (this._tab === "prices") this._loadPrices();
     } catch (err: any) {
       this._error = err?.message ?? String(err);
     }
@@ -304,6 +351,52 @@ export class PowerPilotPanel extends LitElement {
   private _selectTab(tab: Tab): void {
     this._tab = tab;
     if (tab === "profiles") this._loadForecasts();
+    if (tab === "prices") this._loadPrices();
+  }
+
+  /** Local-time ISO date (YYYY-MM-DD) the prices tab currently shows. */
+  private _pricesSelectedDay(): string {
+    return this._pricesDay ?? this._localISODate(new Date());
+  }
+
+  private _localISODate(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  private async _loadPrices(): Promise<void> {
+    if (!this.hass) return;
+    const day = this._pricesSelectedDay();
+    this._pricesLoading = true;
+    try {
+      this._pricesData = await this.hass.callWS({
+        type: "powerpilot/prices",
+        date: day,
+      });
+      this._error = null;
+    } catch (err: any) {
+      this._error = err?.message ?? String(err);
+    } finally {
+      this._pricesLoading = false;
+    }
+  }
+
+  private _setPricesDay(day: string): void {
+    this._pricesDay = day;
+    this._loadPrices();
+  }
+
+  private _shiftPricesDay(deltaDays: number): void {
+    const base = new Date(this._pricesSelectedDay() + "T12:00:00");
+    base.setDate(base.getDate() + deltaDays);
+    this._setPricesDay(this._localISODate(base));
+  }
+
+  private _onPricesDatePick(ev: Event): void {
+    const value = (ev.target as HTMLInputElement).value;
+    if (value) this._setPricesDay(value);
   }
 
   private _openConfig(): void {
@@ -1018,80 +1111,150 @@ export class PowerPilotPanel extends LitElement {
   // Prices tab (table + day switcher)
   // ------------------------------------------------------------------
   private _renderPrices(): TemplateResult {
-    const s = this._series;
-    if (!s || !s.hours?.length) {
-      return html`<div class="card empty">Brak danych cenowych. Poczekaj na pierwsze przeliczenie.</div>`;
-    }
-
-    // Determine which days are available in the series data.
-    const daySet = new Set<string>();
-    for (const h of s.hours) {
-      daySet.add(h.start.slice(0, 10));
-    }
-    const days = [...daySet].sort();
-    const today = new Date().toISOString().slice(0, 10);
-    const selectedDay = this._pricesDay && days.includes(this._pricesDay) ? this._pricesDay : (days.includes(today) ? today : days[0]);
-
-    const filtered = s.hours.filter((h) => h.start.slice(0, 10) === selectedDay);
+    const selectedDay = this._pricesSelectedDay();
+    const data = this._pricesData;
 
     const fmtHour = (iso: string) => {
       const d = new Date(iso);
       return d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
     };
+    const fmtStamp = (iso: string | null) => {
+      if (!iso) return "—";
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return "—";
+      return d.toLocaleString("pl-PL", {
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    };
     const fmt3 = (v: number | null) => (v == null ? "—" : v.toFixed(3));
-    const fmt2 = (v: number | null) => (v == null ? "—" : v.toFixed(2));
     const fmtDayLabel = (iso: string) => {
       const d = new Date(iso + "T12:00:00");
-      return d.toLocaleDateString("pl-PL", { weekday: "short", day: "2-digit", month: "2-digit" });
+      return d.toLocaleDateString("pl-PL", {
+        weekday: "long",
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+      });
     };
+
+    const today = this._localISODate(new Date());
+    const tomorrow = (() => {
+      const d = new Date();
+      d.setDate(d.getDate() + 1);
+      return this._localISODate(d);
+    })();
+
+    const nav = html`
+      <div class="prices-day-nav">
+        <button class="nav-btn" @click=${() => this._shiftPricesDay(-1)} title="Poprzedni dzień">«</button>
+        <input
+          type="date"
+          class="nav-date"
+          .value=${selectedDay}
+          @change=${this._onPricesDatePick}
+        />
+        <button class="nav-btn" @click=${() => this._shiftPricesDay(1)} title="Następny dzień">»</button>
+        <button class="nav-btn ${selectedDay === today ? "active" : ""}" @click=${() => this._setPricesDay(today)}>dziś</button>
+        <button class="nav-btn ${selectedDay === tomorrow ? "active" : ""}" @click=${() => this._setPricesDay(tomorrow)}>jutro</button>
+        <div class="nav-spacer"></div>
+        <span class="muted">${fmtDayLabel(selectedDay)}</span>
+      </div>
+    `;
+
+    const rows = data?.hours ?? [];
+    const hasAny = rows.some((h) => h.energy_price_kwh != null);
+
+    const body = !data
+      ? html`<div class="empty">${this._pricesLoading ? "Ładowanie…" : "Brak danych."}</div>`
+      : !hasAny
+      ? html`<div class="empty">Brak cen dla wybranego dnia — archiwum jeszcze nie sięga tak daleko.</div>`
+      : html`
+          <div class="prices-table-wrap">
+            <table class="prices-table">
+              <thead>
+                <tr>
+                  <th>Godzina</th>
+                  <th>Typ</th>
+                  <th>Źródło</th>
+                  <th>Pobrano</th>
+                  <th>Energia<br /><span class="muted">z VAT</span></th>
+                  <th>Dystrybucja<br /><span class="muted">z VAT</span></th>
+                  <th>Cena pełna<br /><span class="muted">z VAT</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map((h) => this._renderPriceRow(h, fmtHour, fmtStamp, fmt3))}
+              </tbody>
+            </table>
+          </div>
+          <div class="prices-legend">
+            ${(["certain", "forecast", "estimated"] as PriceType[]).map(
+              (t) => html`<span class="badge" style=${"background:" + PRICE_TYPE_META[t].color}>${PRICE_TYPE_META[t].label}</span>`
+            )}
+            <span class="muted">Wszystkie ceny brutto (z VAT). „szacowana” = średnia ważona z 3 ostatnich tygodni — najedź na typ, by zobaczyć obliczenie.</span>
+          </div>
+        `;
 
     return html`
       <div class="card">
-        <div class="card-title">Ceny godzinowe</div>
-        <div class="prices-day-nav">
-          ${days.map(
-            (d) => html`
-              <button
-                class="nav-btn ${d === selectedDay ? "active" : ""}"
-                @click=${() => { this._pricesDay = d; }}
-              >
-                ${fmtDayLabel(d)}
-              </button>
-            `
-          )}
-        </div>
-        <div class="prices-table-wrap">
-          <table class="prices-table">
-            <thead>
-              <tr>
-                <th>Godzina</th>
-                <th>Energia</th>
-                <th>Dystrybucja</th>
-                <th>Cena pełna</th>
-                <th>Bateria</th>
-                <th>Koszt/h</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              ${filtered.map(
-                (h) => html`
-                  <tr class="${h.is_past ? "past" : ""}">
-                    <td>${fmtHour(h.start)}</td>
-                    <td>${fmt3(h.buy_price)}</td>
-                    <td>${fmt3(h.distribution_price_kwh)}</td>
-                    <td class="bold">${fmt3(h.total_price_kwh)}</td>
-                    <td>${fmt3(h.battery_energy_cost)}</td>
-                    <td>${fmt2(h.hour_cost)}</td>
-                    <td class="muted">${h.price_confirmed ? "✓" : "~"}</td>
-                  </tr>
-                `
-              )}
-            </tbody>
-          </table>
-        </div>
+        <div class="card-title">Archiwum cen — podgląd danych optymalizatora</div>
+        ${nav}
+        ${body}
       </div>
     `;
+  }
+
+  private _renderPriceRow(
+    h: PriceArchiveHour,
+    fmtHour: (iso: string) => string,
+    fmtStamp: (iso: string | null) => string,
+    fmt3: (v: number | null) => string
+  ): TemplateResult {
+    const meta = h.type ? PRICE_TYPE_META[h.type] : null;
+    const sourceLabel = h.source ? PRICE_SOURCE_LABEL[h.source] ?? h.source : "—";
+    const badge = meta
+      ? html`<span class="badge" style=${"background:" + meta.color} title=${this._priceTooltip(h)}>${meta.label}</span>`
+      : html`<span class="muted">—</span>`;
+    return html`
+      <tr>
+        <td>${fmtHour(h.start)}</td>
+        <td>${badge}</td>
+        <td class="muted">${sourceLabel}</td>
+        <td class="muted">${fmtStamp(h.fetched_at)}</td>
+        <td>${fmt3(h.energy_price_kwh)}</td>
+        <td>${fmt3(h.distribution_price_kwh)}</td>
+        <td class="bold">${fmt3(h.total_price_kwh)}</td>
+      </tr>
+    `;
+  }
+
+  /** Hover text explaining how a row's price was derived. */
+  private _priceTooltip(h: PriceArchiveHour): string {
+    if (h.type === "certain") {
+      return "Cena pewna (wiążąca RDN) — nie zmienia się już.";
+    }
+    if (h.type === "forecast") {
+      const band =
+        h.p10 != null && h.p90 != null
+          ? ` Przedział P10–P90: ${h.p10.toFixed(3)}–${h.p90.toFixed(3)} PLN/kWh.`
+          : "";
+      return `Prognoza ze źródła — odświeżana co kilka godzin.${band}`;
+    }
+    if (h.type === "estimated" && h.estimate_breakdown) {
+      const lines = h.estimate_breakdown.map((s) => {
+        const v = s.value == null ? "brak" : `${s.value.toFixed(3)} PLN/kWh`;
+        return `• ${s.date} (−${s.weeks_ago} tyg., waga ${s.weight}): ${v}`;
+      });
+      return [
+        "Cena szacowana = średnia ważona tej samej godziny w tym samym dniu tygodnia z ostatnich 3 tygodni:",
+        ...lines,
+        "Wagi są normalizowane do dostępnych próbek.",
+      ].join("\n");
+    }
+    return "";
   }
 
   // ------------------------------------------------------------------
@@ -1814,6 +1977,35 @@ export class PowerPilotPanel extends LitElement {
     }
     .prices-table .bold {
       font-weight: 600;
+    }
+    .prices-table th:nth-child(2),
+    .prices-table td:nth-child(2),
+    .prices-table th:nth-child(3),
+    .prices-table td:nth-child(3),
+    .prices-table th:nth-child(4),
+    .prices-table td:nth-child(4) {
+      text-align: left;
+    }
+    .prices-day-nav {
+      align-items: center;
+    }
+    .badge {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 10px;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: help;
+    }
+    .prices-legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      font-size: 12px;
     }
   `;
 }

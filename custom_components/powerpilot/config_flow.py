@@ -21,6 +21,7 @@ from .const import (
     CONF_BATTERY_DISCHARGE_SENSOR,
     CONF_BATTERY_WEAR_COST,
     CONF_BUY_PRICE_SENSOR,
+    CONF_CHARGE_CURVE,
     CONF_CHARGE_EFFICIENCY,
     CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
@@ -43,15 +44,18 @@ from .const import (
     CONF_PHASES,
     CONF_PRADCAST_API_KEY,
     CONF_PRICE_MARKUP,
+    CONF_PRICE_REFRESH_HOURS,
     CONF_PRICE_SOURCE,
     CONF_PRICE_VAT,
     CONF_SOC_SENSOR,
     CONF_TARIFFS,
     CONF_WEATHER_ENTITY,
+    CHARGE_CURVE_BANDS,
     DEFAULTS,
     DOMAIN,
     PRICE_SOURCE_PRADCAST,
     PRICE_SOURCE_SENSOR,
+    charge_curve_band_key,
 )
 from .models import Tariff, TariffPeriod, ValidityRange
 
@@ -158,6 +162,9 @@ def _price_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(CONF_PRICE_VAT, default=d(CONF_PRICE_VAT)): _NUMBER(
                 _NUM(min=1, max=2, step=0.01, mode="box")
             ),
+            vol.Optional(
+                CONF_PRICE_REFRESH_HOURS, default=d(CONF_PRICE_REFRESH_HOURS)
+            ): _NUMBER(_NUM(min=1, max=24, step=1, unit_of_measurement="h", mode="box")),
         }
     )
 
@@ -187,6 +194,41 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             ),
         }
     )
+
+
+def _charge_curve_schema(data: dict[str, Any]) -> vol.Schema:
+    """One max-charge-power field per SoC band.
+
+    Each band defaults to its stored value (matched by ``soc_from``) or, if the
+    curve is not configured yet, to the flat inverter charge limit — so leaving
+    every field at its default reproduces today's flat behaviour.
+    """
+    stored = {
+        int(seg["soc_from"]): float(seg["max_kw"])
+        for seg in (data.get(CONF_CHARGE_CURVE) or [])
+    }
+    flat = float(
+        data.get(CONF_INVERTER_MAX_CHARGE_KW, DEFAULTS[CONF_INVERTER_MAX_CHARGE_KW])
+    )
+    fields: dict[Any, Any] = {}
+    for band in CHARGE_CURVE_BANDS:
+        lo, _hi = band
+        fields[
+            vol.Required(charge_curve_band_key(band), default=stored.get(lo, flat))
+        ] = _NUMBER(_NUM(min=0, max=50, step=0.1, unit_of_measurement="kW", mode="box"))
+    return vol.Schema(fields)
+
+
+def _charge_curve_segments(user_input: dict[str, Any]) -> list[dict[str, Any]]:
+    """Assemble the per-band form fields into ``CONF_CHARGE_CURVE`` segments."""
+    return [
+        {
+            "soc_from": lo,
+            "soc_to": hi,
+            "max_kw": float(user_input[charge_curve_band_key((lo, hi))]),
+        }
+        for (lo, hi) in CHARGE_CURVE_BANDS
+    ]
 
 
 class PowerPilotConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -277,6 +319,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
             step_id="init",
             menu_options=[
                 "core",
+                "charge_curve",
                 "prices",
                 "ev",
                 "tariff_list",
@@ -296,6 +339,19 @@ class PowerPilotOptionsFlow(OptionsFlow):
             self._data.update(user_input)
             return await self.async_step_init()
         return self.async_show_form(step_id="core", data_schema=_core_schema(self._data))
+
+    async def async_step_charge_curve(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        self._ensure_loaded()
+        if user_input is not None:
+            # Store only the canonical segment list; the per-band field keys are
+            # transient and must not leak into the saved options.
+            self._data[CONF_CHARGE_CURVE] = _charge_curve_segments(user_input)
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="charge_curve", data_schema=_charge_curve_schema(self._data)
+        )
 
     async def async_step_prices(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._ensure_loaded()

@@ -73,6 +73,18 @@ def _parent_field_key(entity_id: str) -> str:
     return f"{_PARENT_FIELD_PREFIX}{entity_id}"
 
 
+def _normalize_core_input(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Coerce core-form values back to their stored types.
+
+    ``CONF_PHASES`` is rendered as a string-valued select but stored as an int,
+    so the select's string output is coerced here before it reaches the options.
+    """
+    data = dict(user_input)
+    if CONF_PHASES in data:
+        data[CONF_PHASES] = int(data[CONF_PHASES])
+    return data
+
+
 def _entity(domain: str | list[str]) -> selector.EntitySelector:
     return selector.EntitySelector(selector.EntitySelectorConfig(domain=domain))
 
@@ -83,8 +95,19 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
 
     return vol.Schema(
         {
-            # Grid connection
-            vol.Required(CONF_PHASES, default=d(CONF_PHASES)): vol.In([1, 3]),
+            # Grid connection.
+            # Rendered as a radio list of string options; the stored value is an
+            # int, so the default is stringified to pre-select on re-open and the
+            # submitted value is coerced back to int (see _normalize_core_input).
+            vol.Required(CONF_PHASES, default=str(d(CONF_PHASES))): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value="1", label="1"),
+                        selector.SelectOptionDict(value="3", label="3"),
+                    ],
+                    mode=selector.SelectSelectorMode.LIST,
+                )
+            ),
             vol.Required(CONF_MAIN_FUSE_A, default=d(CONF_MAIN_FUSE_A)): _NUMBER(
                 _NUM(min=6, max=160, step=1, unit_of_measurement="A", mode="box")
             ),
@@ -139,9 +162,6 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
                 CONF_CONSUMPTION_LEARN_DAYS, default=d(CONF_CONSUMPTION_LEARN_DAYS)
             ): _NUMBER(_NUM(min=7, max=90, step=1, unit_of_measurement="d", mode="box")),
             vol.Optional(
-                CONF_BUY_PRICE_SENSOR, default=d(CONF_BUY_PRICE_SENSOR) or vol.UNDEFINED
-            ): _entity("sensor"),
-            vol.Optional(
                 CONF_WEATHER_ENTITY, default=d(CONF_WEATHER_ENTITY) or vol.UNDEFINED
             ): _entity("weather"),
         }
@@ -161,6 +181,10 @@ def _price_schema(data: dict[str, Any]) -> vol.Schema:
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             ),
+            # Energy price feed for the "Home Assistant sensor" price source.
+            vol.Optional(
+                CONF_BUY_PRICE_SENSOR, default=d(CONF_BUY_PRICE_SENSOR) or vol.UNDEFINED
+            ): _entity("sensor"),
             vol.Optional(
                 CONF_PRADCAST_API_KEY, default=d(CONF_PRADCAST_API_KEY) or vol.UNDEFINED
             ): selector.TextSelector(
@@ -253,7 +277,7 @@ class PowerPilotConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
         if user_input is not None:
-            self._data.update(user_input)
+            self._data.update(_normalize_core_input(user_input))
             return await self.async_step_prices()
         return self.async_show_form(step_id="user", data_schema=_core_schema({}))
 
@@ -377,7 +401,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
     async def async_step_core(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._ensure_loaded()
         if user_input is not None:
-            self._data.update(user_input)
+            self._data.update(_normalize_core_input(user_input))
             return await self.async_step_init()
         return self.async_show_form(step_id="core", data_schema=_core_schema(self._data))
 

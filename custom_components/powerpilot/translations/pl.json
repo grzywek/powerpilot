@@ -8,7 +8,7 @@
         "title": "PowerPilot – konfiguracja podstawowa",
         "description": "Parametry sieci, baterii i falownika oraz sensory, które PowerPilot ma odczytywać.",
         "data": {
-          "device_sensors": "Sensory urządzeń z osobnym pomiarem (klima, pralka, bojler, żelazko…)",
+          "device_sensors": "Sensory podrzędne (mieszkanie, klima, pralka, bojler…)",
           "consumption_learn_days": "Okno uczenia zużycia (dni)",
           "phases": "Liczba faz (1 lub 3)",
           "main_fuse_a": "Zabezpieczenie przedlicznikowe (A)",
@@ -25,8 +25,7 @@
           "battery_charge_sensor": "Sensor ładowania baterii (kW lub kWh)",
           "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
           "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
-          "consumption_sensor": "Sensor zużycia mieszkania",
-          "buy_price_sensor": "Sensor ceny zakupu",
+          "consumption_sensor": "Sensor główny (falownik / wyjście)",
           "weather_entity": "Encja pogody"
         }
       },
@@ -35,6 +34,7 @@
         "description": "Wybierz źródło cen dynamicznych. Pradcast pobiera potwierdzone ceny RDN oraz prognozy D+1..D+3 z api.pradcast.pl.",
         "data": {
           "price_source": "Źródło cen",
+          "buy_price_sensor": "Sensor ceny zakupu",
           "pradcast_api_key": "Klucz API Pradcast",
           "price_markup": "Narzut sprzedawcy netto (PLN/kWh)",
           "price_vat": "Mnożnik VAT",
@@ -86,7 +86,7 @@
       "core": {
         "title": "PowerPilot – konfiguracja podstawowa",
         "data": {
-          "device_sensors": "Sensory urządzeń z osobnym pomiarem (klima, pralka, bojler, żelazko…)",
+          "device_sensors": "Sensory podrzędne (mieszkanie, klima, pralka, bojler…)",
           "consumption_learn_days": "Okno uczenia zużycia (dni)",
           "phases": "Liczba faz (1 lub 3)",
           "main_fuse_a": "Zabezpieczenie przedlicznikowe (A)",
@@ -103,8 +103,7 @@
           "battery_charge_sensor": "Sensor ładowania baterii (kW lub kWh)",
           "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
           "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
-          "consumption_sensor": "Sensor zużycia mieszkania",
-          "buy_price_sensor": "Sensor ceny zakupu",
+          "consumption_sensor": "Sensor główny (falownik / wyjście)",
           "weather_entity": "Encja pogody"
         }
       },
@@ -124,6 +123,7 @@
         "title": "PowerPilot – ceny",
         "data": {
           "price_source": "Źródło cen",
+          "buy_price_sensor": "Sensor ceny zakupu",
           "pradcast_api_key": "Klucz API Pradcast",
           "price_markup": "Narzut sprzedawcy netto (PLN/kWh)",
           "price_vat": "Mnożnik VAT",

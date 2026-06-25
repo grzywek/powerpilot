@@ -459,6 +459,246 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             },
         }
 
+    async def get_diagnostics(self) -> dict:
+        """Readiness report: does the optimizer have every input it needs?
+
+        For each configured sensor it reports the unit, ``state_class``, whether
+        HA actually keeps long-term statistics for it, and how many recent hours
+        are readable — turning "why is this empty?" into a one-glance verdict
+        (configured? recorded? right unit?). Non-sensor inputs (price source,
+        tariff, EV) get a high-level check. ``ready`` is true when no *required*
+        input is in error.
+        """
+        from .const import (
+            CONF_BATTERY_CHARGE_SENSOR,
+            CONF_BATTERY_DISCHARGE_SENSOR,
+            CONF_BUY_PRICE_SENSOR,
+            CONF_CONSUMPTION_SENSOR,
+            CONF_DEVICE_SENSORS,
+            CONF_EV_ENABLED,
+            CONF_EV_SOC_SENSOR,
+            CONF_GRID_IMPORT_SENSOR,
+            CONF_PRADCAST_API_KEY,
+            CONF_PRICE_SOURCE,
+            CONF_SOC_SENSOR,
+            CONF_WEATHER_ENTITY,
+            PRICE_SOURCE_PRADCAST,
+        )
+
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        win_start = now - timedelta(hours=48)
+
+        async def _sensor_item(
+            key: str, label: str, conf_key: str, required: bool, raw: bool = False
+        ) -> dict:
+            """Diagnose one configured sensor into a readiness verdict.
+
+            ``raw=True`` is for value sensors (e.g. SoC %) whose history lives in
+            ``mean`` statistics rather than the kWh ``sum`` deltas energy/power
+            sensors use.
+            """
+            eid = self.config.get(conf_key)
+            item: dict = {
+                "key": key,
+                "label": label,
+                "required": required,
+                "entity_id": eid,
+                "detail": None,
+            }
+            if not eid:
+                item["status"] = "error" if required else "skip"
+                item["message"] = (
+                    "Nie skonfigurowany" if required else "Pominięty (opcjonalny)"
+                )
+                return item
+            try:
+                detail = await self.consumption.async_diagnose_sensor(
+                    eid, win_start, now
+                )
+            except Exception as err:  # never let one sensor break the report
+                item["status"] = "error"
+                item["message"] = f"Błąd odczytu: {err!r}"
+                return item
+            item["detail"] = detail
+            if not detail["available"]:
+                item["status"] = "error"
+                item["message"] = "Encja niedostępna w HA"
+            elif raw:
+                if detail["stat_rows_mean"] > 0:
+                    item["status"] = "ok"
+                    item["message"] = f"{detail['stat_rows_mean']} godz. statystyk / 48h"
+                else:
+                    item["status"] = "error"
+                    item["message"] = (
+                        "Brak statystyk (wykluczony z recordera lub brak state_class)"
+                    )
+            elif detail["detected_kind"] is None:
+                item["status"] = "error"
+                item["message"] = (
+                    f"Nierozpoznana jednostka: {detail['unit_of_measurement']!r} "
+                    "(oczekiwane W/kW/Wh/kWh)"
+                )
+            elif detail["series_hours"] > 0:
+                item["status"] = "ok"
+                item["message"] = f"{detail['series_hours']} godz. danych / 48h"
+            elif (
+                detail["detected_kind"] == "energy"
+                and detail["stat_rows_sum"] == 0
+                and detail["stat_rows_mean"] > 0
+            ):
+                item["status"] = "warn"
+                item["message"] = (
+                    "kWh ze state_class=measurement → brak sum; ustaw "
+                    "total/total_increasing"
+                )
+            else:
+                item["status"] = "error"
+                item["message"] = (
+                    "Brak statystyk godzinowych (encja wykluczona z recordera?)"
+                )
+            return item
+
+        # ---- Required for the optimizer to plan correctly ----
+        required_items: list[dict] = [
+            await _sensor_item(
+                "consumption",
+                "Zużycie domu (zapotrzebowanie)",
+                CONF_CONSUMPTION_SENSOR,
+                required=True,
+            ),
+            await _sensor_item(
+                "soc", "SoC baterii", CONF_SOC_SENSOR, required=True, raw=True
+            ),
+        ]
+
+        # Price source (sensor or Pradcast) — readiness = a price for "now".
+        price_source = self.config.get(CONF_PRICE_SOURCE)
+        has_price = self.prices.price_at(now) is not None
+        if price_source == PRICE_SOURCE_PRADCAST:
+            configured = bool(self.config.get(CONF_PRADCAST_API_KEY))
+        else:
+            configured = bool(self.config.get(CONF_BUY_PRICE_SENSOR))
+        price_item = {
+            "key": "prices",
+            "label": f"Ceny energii ({price_source})",
+            "required": True,
+            "entity_id": self.config.get(CONF_BUY_PRICE_SENSOR)
+            if price_source != PRICE_SOURCE_PRADCAST
+            else None,
+            "detail": {"archive_hours": len(self.prices.archive)},
+        }
+        if not configured:
+            price_item["status"] = "error"
+            price_item["message"] = (
+                "Brak klucza API Pradcast"
+                if price_source == PRICE_SOURCE_PRADCAST
+                else "Brak sensora ceny"
+            )
+        elif has_price:
+            price_item["status"] = "ok"
+            price_item["message"] = (
+                f"Cena na teraz dostępna · archiwum {len(self.prices.archive)} godz."
+            )
+        else:
+            price_item["status"] = "warn"
+            price_item["message"] = "Skonfigurowane, ale brak ceny na bieżącą godzinę"
+        required_items.append(price_item)
+
+        # Distribution tariff (affects total price; optional but recommended).
+        tariff_active = bool(
+            self.tariff.tariffs and tariff_for_day(self.tariff.tariffs, now.date())
+        )
+        required_items.append(
+            {
+                "key": "tariff",
+                "label": "Taryfa dystrybucyjna",
+                "required": False,
+                "entity_id": None,
+                "detail": {"count": len(self.tariff.tariffs)},
+                "status": "ok" if tariff_active else "warn",
+                "message": (
+                    f"Aktywna ({len(self.tariff.tariffs)} skonfig.)"
+                    if tariff_active
+                    else "Brak aktywnej taryfy — cena dystrybucji = 0"
+                ),
+            }
+        )
+
+        # ---- Battery & grid actuals (chart history + cost tracking) ----
+        battery_items = [
+            await _sensor_item(
+                "battery_charge",
+                "Sensor ładowania baterii",
+                CONF_BATTERY_CHARGE_SENSOR,
+                required=False,
+            ),
+            await _sensor_item(
+                "battery_discharge",
+                "Sensor rozładowania baterii",
+                CONF_BATTERY_DISCHARGE_SENSOR,
+                required=False,
+            ),
+            await _sensor_item(
+                "grid_import",
+                "Sensor importu z sieci",
+                CONF_GRID_IMPORT_SENSOR,
+                required=False,
+            ),
+        ]
+
+        # ---- Optional inputs ----
+        optional_items: list[dict] = []
+        for eid in self.config.get(CONF_DEVICE_SENSORS) or []:
+            di = await self.consumption.async_diagnose_sensor(eid, win_start, now)
+            name = eid.split(".")[-1]
+            optional_items.append(
+                {
+                    "key": f"device:{eid}",
+                    "label": f"Urządzenie: {name}",
+                    "required": False,
+                    "entity_id": eid,
+                    "detail": di,
+                    "status": "ok" if di["series_hours"] > 0 else "warn",
+                    "message": (
+                        f"{di['series_hours']} godz. danych / 48h"
+                        if di["series_hours"] > 0
+                        else "Brak danych godzinowych"
+                    ),
+                }
+            )
+        optional_items.append(
+            await _sensor_item(
+                "weather", "Encja pogody", CONF_WEATHER_ENTITY, required=False, raw=True
+            )
+        )
+        if self.config.get(CONF_EV_ENABLED):
+            optional_items.append(
+                await _sensor_item(
+                    "ev_soc", "SoC samochodu (EV)", CONF_EV_SOC_SENSOR, required=False, raw=True
+                )
+            )
+
+        groups = [
+            {"title": "Wymagane do optymalizacji", "items": required_items},
+            {"title": "Bateria i sieć (dane rzeczywiste)", "items": battery_items},
+            {"title": "Opcjonalne", "items": optional_items},
+        ]
+
+        summary = {"ok": 0, "warn": 0, "error": 0, "skip": 0}
+        ready = True
+        for group in groups:
+            for item in group["items"]:
+                summary[item["status"]] = summary.get(item["status"], 0) + 1
+                if item["required"] and item["status"] == "error":
+                    ready = False
+
+        return {
+            "generated_at": dt_util.now().isoformat(),
+            "ready": ready,
+            "summary": summary,
+            "groups": groups,
+        }
+
     async def get_debug(self) -> dict:
         """Full diagnostic snapshot for troubleshooting optimizer decisions.
 

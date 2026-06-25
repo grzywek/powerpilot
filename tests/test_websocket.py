@@ -126,3 +126,21 @@ async def test_ws_snapshots_and_accuracy(hass: HomeAssistant, hass_ws_client) ->
     assert "mae" in result
     assert "bias" in result
     assert "hours" in result
+
+
+async def test_ws_diagnostics(hass: HomeAssistant, hass_ws_client) -> None:
+    await _setup(hass)
+    client = await hass_ws_client(hass)
+
+    await client.send_json({"id": 1, "type": "powerpilot/diagnostics"})
+    msg = await client.receive_json()
+    assert msg["success"]
+    result = msg["result"]
+    assert "ready" in result
+    assert set(result["summary"]) >= {"ok", "warn", "error", "skip"}
+    assert result["groups"], "diagnostics must report at least one group"
+    # Every item carries a status verdict and a human message.
+    for group in result["groups"]:
+        for item in group["items"]:
+            assert item["status"] in ("ok", "warn", "error", "skip")
+            assert item["message"]

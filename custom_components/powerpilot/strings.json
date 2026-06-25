@@ -6,7 +6,7 @@
         "title": "PowerPilot – core setup",
         "description": "Grid, battery and inverter parameters, plus the sensors PowerPilot should read.",
         "data": {
-          "device_sensors": "Separately-metered device sensors (AC, washer, boiler, iron…)",
+          "device_sensors": "Sub-meter sensors (apartment, AC, washer, boiler…)",
           "consumption_learn_days": "Consumption learning window (days)",
           "phases": "Grid phases (1 or 3)",
           "main_fuse_a": "Main breaker rating (A)",
@@ -23,8 +23,7 @@
           "battery_charge_sensor": "Battery charge sensor (kW or kWh)",
           "battery_discharge_sensor": "Battery discharge sensor (kW or kWh)",
           "grid_import_sensor": "Grid import sensor (kW or kWh)",
-          "consumption_sensor": "Household consumption sensor",
-          "buy_price_sensor": "Buy price sensor",
+          "consumption_sensor": "Main sensor (inverter / output)",
           "weather_entity": "Weather entity"
         }
       },
@@ -33,6 +32,7 @@
         "description": "Choose where dynamic prices come from. Pradcast pulls confirmed RDN + D+1..D+3 forecasts from api.pradcast.pl.",
         "data": {
           "price_source": "Price source",
+          "buy_price_sensor": "Buy price sensor",
           "pradcast_api_key": "Pradcast API key",
           "price_markup": "Seller markup net (PLN/kWh)",
           "price_vat": "VAT multiplier",
@@ -79,7 +79,7 @@
       "core": {
         "title": "PowerPilot – core setup",
         "data": {
-          "device_sensors": "Separately-metered device sensors (AC, washer, boiler, iron…)",
+          "device_sensors": "Sub-meter sensors (apartment, AC, washer, boiler…)",
           "consumption_learn_days": "Consumption learning window (days)",
           "phases": "Grid phases (1 or 3)",
           "main_fuse_a": "Main breaker rating (A)",
@@ -96,8 +96,7 @@
           "battery_charge_sensor": "Battery charge sensor (kW or kWh)",
           "battery_discharge_sensor": "Battery discharge sensor (kW or kWh)",
           "grid_import_sensor": "Grid import sensor (kW or kWh)",
-          "consumption_sensor": "Household consumption sensor",
-          "buy_price_sensor": "Buy price sensor",
+          "consumption_sensor": "Main sensor (inverter / output)",
           "weather_entity": "Weather entity"
         }
       },
@@ -109,6 +108,7 @@
         "title": "PowerPilot – prices",
         "data": {
           "price_source": "Price source",
+          "buy_price_sensor": "Buy price sensor",
           "pradcast_api_key": "Pradcast API key",
           "price_markup": "Seller markup net (PLN/kWh)",
           "price_vat": "VAT multiplier",

@@ -152,6 +152,17 @@ async def ws_debug(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], result)
 
 
+@websocket_api.websocket_command({vol.Required("type"): "powerpilot/diagnostics"})
+@websocket_api.async_response
+async def ws_diagnostics(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass)
+    if not coordinator:
+        connection.send_result(msg["id"], {})
+        return
+    result = await coordinator.get_diagnostics()
+    connection.send_result(msg["id"], result)
+
+
 @callback
 def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_plan)
@@ -165,3 +176,4 @@ def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_snapshot)
     websocket_api.async_register_command(hass, ws_accuracy)
     websocket_api.async_register_command(hass, ws_debug)
+    websocket_api.async_register_command(hass, ws_diagnostics)

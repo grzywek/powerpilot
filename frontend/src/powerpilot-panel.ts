@@ -201,7 +201,45 @@ interface Accuracy {
   hours: AccuracyHour[];
 }
 
-type Tab = "overview" | "prices" | "simulations" | "status" | "profiles" | "logs" | "debug";
+type Tab =
+  | "overview"
+  | "prices"
+  | "simulations"
+  | "status"
+  | "diagnostics"
+  | "profiles"
+  | "logs"
+  | "debug";
+
+interface DiagSensorDetail {
+  entity_id: string;
+  available: boolean;
+  state: string | null;
+  unit_of_measurement: string | null;
+  state_class: string | null;
+  detected_kind: string | null;
+  stat_rows_sum: number;
+  stat_rows_mean: number;
+  series_hours: number;
+  samples: { hour: string; kwh: number }[];
+}
+
+interface DiagItem {
+  key: string;
+  label: string;
+  required: boolean;
+  entity_id: string | null;
+  status: "ok" | "warn" | "error" | "skip";
+  message: string;
+  detail: (Partial<DiagSensorDetail> & Record<string, unknown>) | null;
+}
+
+interface Diagnostics {
+  generated_at: string;
+  ready: boolean;
+  summary: { ok: number; warn: number; error: number; skip: number };
+  groups: { title: string; items: DiagItem[] }[];
+}
 
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const WEEKDAY_PL: Record<string, string> = {
@@ -261,6 +299,9 @@ export class PowerPilotPanel extends LitElement {
   @state() private _error: string | null = null;
 
   /** Debug dump state (generated on demand from the Debug tab). */
+  @state() private _diagnostics: Diagnostics | null = null;
+  @state() private _diagnosticsLoading = false;
+
   @state() private _debug: unknown = null;
   @state() private _debugLoading = false;
   @state() private _debugError: string | null = null;
@@ -415,6 +456,20 @@ export class PowerPilotPanel extends LitElement {
     if (tab === "profiles") this._loadForecasts();
     if (tab === "prices") this._loadPrices();
     if (tab === "simulations") this._loadSimulations();
+    if (tab === "diagnostics") this._loadDiagnostics();
+  }
+
+  private async _loadDiagnostics(): Promise<void> {
+    if (!this.hass) return;
+    this._diagnosticsLoading = true;
+    try {
+      this._diagnostics = await this.hass.callWS({ type: "powerpilot/diagnostics" });
+      this._error = null;
+    } catch (err: any) {
+      this._error = err?.message ?? String(err);
+    } finally {
+      this._diagnosticsLoading = false;
+    }
   }
 
   // ------------------------------------------------------------------
@@ -554,6 +609,7 @@ export class PowerPilotPanel extends LitElement {
         ${this._tabButton("prices", "Ceny")}
         ${this._tabButton("simulations", "Symulacje")}
         ${this._tabButton("status", "Status")}
+        ${this._tabButton("diagnostics", "Diagnostyka")}
         ${this._tabButton("profiles", "Profile")}
         ${this._tabButton("logs", "Logi")}
         ${this._tabButton("debug", "Debug")}
@@ -564,6 +620,7 @@ export class PowerPilotPanel extends LitElement {
         ${this._tab === "prices" ? this._renderPrices() : nothing}
         ${this._tab === "simulations" ? this._renderSimulations() : nothing}
         ${this._tab === "status" ? this._renderStatus() : nothing}
+        ${this._tab === "diagnostics" ? this._renderDiagnostics() : nothing}
         ${this._tab === "profiles" ? this._renderProfiles() : nothing}
         ${this._tab === "logs" ? this._renderLogs() : nothing}
         ${this._tab === "debug" ? this._renderDebug() : nothing}
@@ -1654,6 +1711,80 @@ export class PowerPilotPanel extends LitElement {
   }
 
   // ------------------------------------------------------------------
+  // Diagnostics: is every optimizer input present, recorded and readable?
+  // ------------------------------------------------------------------
+  private _renderDiagnostics(): TemplateResult {
+    const d = this._diagnostics;
+    if (this._diagnosticsLoading && !d)
+      return html`<div class="card empty">Sprawdzanie danych…</div>`;
+    if (!d)
+      return html`<div class="card empty">
+        Brak diagnostyki.
+        <button class="debug-btn" @click=${() => this._loadDiagnostics()}>Sprawdź</button>
+      </div>`;
+    const dotClass = (s: string) =>
+      s === "ok" ? "ok" : s === "warn" ? "warn" : s === "skip" ? "skip" : "bad";
+    return html`
+      <div class="card">
+        <div class="card-title">
+          Gotowość optymalizatora
+          <span class=${"diag-badge " + (d.ready ? "ok" : "bad")}>
+            ${d.ready ? "✓ Komplet wymaganych danych" : "✗ Brakuje wymaganych danych"}
+          </span>
+        </div>
+        <div class="muted">
+          ✓ ${d.summary.ok} · ⚠ ${d.summary.warn} · ✗ ${d.summary.error} · —
+          ${d.summary.skip}
+          <button class="debug-btn" @click=${() => this._loadDiagnostics()}>Odśwież</button>
+        </div>
+      </div>
+      ${d.groups.map(
+        (g) => html`
+          <div class="card">
+            <div class="card-title">${g.title}</div>
+            ${g.items.map(
+              (it) => html`
+                <div class="diag-row">
+                  <div class="diag-head">
+                    <span class=${"dot " + dotClass(it.status)}></span>
+                    <span class="diag-label"
+                      >${it.label}${it.required
+                        ? html`<span class="diag-req">wymagane</span>`
+                        : nothing}</span
+                    >
+                    <span class="muted diag-msg">${it.message}</span>
+                  </div>
+                  ${it.entity_id
+                    ? html`<div class="diag-eid">${it.entity_id}</div>`
+                    : nothing}
+                  ${this._renderDiagDetail(it)}
+                </div>
+              `
+            )}
+          </div>
+        `
+      )}
+    `;
+  }
+
+  private _renderDiagDetail(it: DiagItem): TemplateResult {
+    const dt = it.detail;
+    if (!dt || !("detected_kind" in dt)) return html``;
+    const det = dt as unknown as DiagSensorDetail;
+    const last = det.samples?.[det.samples.length - 1];
+    return html`
+      <div class="diag-detail">
+        <span>jednostka: <b>${det.unit_of_measurement ?? "—"}</b></span>
+        <span>state_class: <b>${det.state_class ?? "—"}</b></span>
+        <span>typ: <b>${det.detected_kind ?? "—"}</b></span>
+        <span>stat sum/mean: <b>${det.stat_rows_sum}/${det.stat_rows_mean}</b></span>
+        <span>godz./48h: <b>${det.series_hours}</b></span>
+        ${last ? html`<span>ostatnia: <b>${last.kwh} kWh</b></span>` : nothing}
+      </div>
+    `;
+  }
+
+  // ------------------------------------------------------------------
   // Profiles (7×24 heatmaps + D+1..D+3 overlay)
   // ------------------------------------------------------------------
   private _renderProfiles(): TemplateResult {
@@ -2096,6 +2227,70 @@ export class PowerPilotPanel extends LitElement {
     }
     .dot.bad {
       background: var(--error-color, #d33);
+    }
+    .dot.warn {
+      background: var(--warning-color, #f9a825);
+    }
+    .dot.skip {
+      background: var(--disabled-text-color, #9e9e9e);
+    }
+    .diag-badge {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 10px;
+      margin-left: 8px;
+    }
+    .diag-badge.ok {
+      background: rgba(67, 160, 71, 0.15);
+      color: var(--success-color, #43a047);
+    }
+    .diag-badge.bad {
+      background: rgba(211, 51, 51, 0.15);
+      color: var(--error-color, #d33);
+    }
+    .diag-row {
+      padding: 8px 0;
+      border-top: 1px solid var(--divider-color, #e0e0e0);
+    }
+    .diag-row:first-child {
+      border-top: none;
+    }
+    .diag-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .diag-label {
+      font-weight: 500;
+    }
+    .diag-req {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--error-color, #d33);
+      border: 1px solid currentColor;
+      border-radius: 6px;
+      padding: 0 4px;
+      margin-left: 6px;
+    }
+    .diag-msg {
+      margin-left: auto;
+    }
+    .diag-eid {
+      font-family: monospace;
+      font-size: 12px;
+      color: var(--secondary-text-color);
+      margin: 2px 0 0 18px;
+    }
+    .diag-detail {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 14px;
+      font-size: 12px;
+      color: var(--secondary-text-color);
+      margin: 4px 0 0 18px;
     }
     table.log {
       width: 100%;

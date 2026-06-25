@@ -34,6 +34,11 @@ class HourSlot:
     # missing-configuration signal rather than zero.
     distribution_price_kwh: float | None = None
 
+    # Flat fixed distribution charge for this hour (PLN, gross), i.e. the monthly
+    # standing charge spread across the month's hours. Independent of kWh — it is
+    # a per-hour amount, not a per-kWh price. ``None`` when no tariff resolved.
+    distribution_fixed_hourly: float | None = None
+
     # Energy (kWh) expected during this hour.
     base_consumption_kwh: float = 0.0  # learned household profile
     extra_load_kwh: float = 0.0  # EV + scheduled appliances + climate
@@ -86,6 +91,10 @@ class Decision:
     energy_cost: float = 0.0
     distribution_cost: float = 0.0
     battery_use_cost: float = 0.0
+    # Flat fixed distribution charge for this hour (PLN, gross). Incurred every
+    # hour regardless of grid import; kept separate from ``hour_cost`` (which is
+    # the consumption-driven grid cost) and added into ``Plan.total_cost``.
+    fixed_cost: float = 0.0
 
     reminders: list[str] = field(default_factory=list)
 
@@ -112,6 +121,7 @@ class Decision:
             "energy_cost": round(self.energy_cost, 4),
             "distribution_cost": round(self.distribution_cost, 4),
             "battery_use_cost": round(self.battery_use_cost, 4),
+            "fixed_cost": round(self.fixed_cost, 4),
             "reminders": list(self.reminders),
             "trace": dict(self.trace),
         }
@@ -149,7 +159,9 @@ class Plan:
 
     @property
     def total_cost(self) -> float:
-        return sum(d.hour_cost for d in self.decisions)
+        # Consumption-driven grid cost plus the flat fixed distribution charge
+        # incurred every hour regardless of import.
+        return sum(d.hour_cost + d.fixed_cost for d in self.decisions)
 
     def as_dict(self) -> dict:
         return {
@@ -289,6 +301,11 @@ class Tariff:
     periods: list[TariffPeriod] = field(default_factory=list)
     validity_ranges: list[ValidityRange] = field(default_factory=list)
     vat_rate: float = 0.23  # 0.23 = 23% VAT applied to (base + period_price)
+    # Fixed monthly charge (net PLN/month, e.g. opłata stała sieciowa +
+    # abonamentowa). Spread evenly across the hours of each month — see
+    # ``TariffModule.fixed_hourly_for`` — and added as a flat per-hour cost,
+    # independent of consumption. VAT (``vat_rate``) is applied on read.
+    fixed_monthly_cost: float = 0.0
     id: str = field(default_factory=lambda: uuid4().hex)
 
     def is_active_on(self, day: date) -> bool:
@@ -309,6 +326,7 @@ class Tariff:
             "name": self.name,
             "base_component_kwh": self.base_component_kwh,
             "vat_rate": self.vat_rate,
+            "fixed_monthly_cost": self.fixed_monthly_cost,
             "validity_ranges": [r.to_dict() for r in self.validity_ranges],
             "periods": [p.to_dict() for p in self.periods],
         }
@@ -334,6 +352,7 @@ class Tariff:
             # Pre-D.1 stored tariffs had no vat_rate → keep them VAT-free until
             # the user re-saves the tariff in the OptionsFlow.
             vat_rate=float(data.get("vat_rate", 0.0)),
+            fixed_monthly_cost=float(data.get("fixed_monthly_cost", 0.0)),
             validity_ranges=[ValidityRange.from_dict(r) for r in validity_raw],
             periods=[TariffPeriod.from_dict(p) for p in (data.get("periods") or [])],
         )

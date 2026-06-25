@@ -7,8 +7,9 @@ from typing import Final
 DOMAIN: Final = "powerpilot"
 PLATFORMS: Final = ["sensor", "binary_sensor"]
 
-# How often the optimization pipeline runs.
-DEFAULT_UPDATE_INTERVAL_MINUTES: Final = 5
+# How often the optimization pipeline runs (4× per hour). Also the granularity
+# at which the current hour is split into realized vs forecast on the chart.
+DEFAULT_UPDATE_INTERVAL_MINUTES: Final = 15
 
 # ---------------------------------------------------------------------------
 # Config / options keys

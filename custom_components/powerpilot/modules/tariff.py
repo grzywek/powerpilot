@@ -31,11 +31,12 @@ timestamp, pruned to the last 90 days on every load.
 
 from __future__ import annotations
 
+import calendar
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceNotFound
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -75,6 +76,9 @@ class TariffModule(PowerPilotModule):
         # Day sensors known to *not* support workday.check_date — we warn once
         # and fall back to today's state for them.
         self._unsupported_sensors: set[str] = set()
+        # Whether we've already warned that the workday service is missing, so a
+        # startup race (workday not loaded yet) warns once instead of every cycle.
+        self._workday_unavailable_warned = False
 
     # ------------------------------------------------------------------ setup
 
@@ -151,6 +155,27 @@ class TariffModule(PowerPilotModule):
             k: v for k, v in self._future_day_cache.items() if k[1] in valid_dates
         }
 
+        if not needed:
+            return
+
+        # The whole workday integration may not have registered its service yet
+        # — common right after a restart due to load order. That is transient and
+        # NOT specific to any sensor, so skip this cycle WITHOUT blacklisting; the
+        # next run picks it up once workday has loaded. (Otherwise the ServiceNot-
+        # Found below would mark every day sensor permanently unsupported.)
+        if not self.hass.services.has_service(_WORKDAY_DOMAIN, _CHECK_DATE_SERVICE):
+            if not self._workday_unavailable_warned:
+                self.log_warning(
+                    f"Serwis {_WORKDAY_DOMAIN}.{_CHECK_DATE_SERVICE} jeszcze "
+                    "niedostępny (integracja workday nie załadowana?) — pomijam "
+                    "klasyfikację przyszłych dni w tym cyklu i spróbuję ponownie. "
+                    "Jeśli to powtarza się stale, sprawdź integrację workday.",
+                    extra={"service": f"{_WORKDAY_DOMAIN}.{_CHECK_DATE_SERVICE}"},
+                )
+                self._workday_unavailable_warned = True
+            return
+        self._workday_unavailable_warned = False
+
         for entity_id, day in needed:
             if (entity_id, day) in self._future_day_cache:
                 continue
@@ -165,6 +190,11 @@ class TariffModule(PowerPilotModule):
                     blocking=True,
                     return_response=True,
                 )
+            except ServiceNotFound:
+                # Service disappeared mid-cycle (workday reloading). Transient and
+                # not sensor-specific — don't blacklist; retry on the next run.
+                self._workday_unavailable_warned = False
+                return
             except HomeAssistantError as exc:
                 self._unsupported_sensors.add(entity_id)
                 self.log_warning(
@@ -236,6 +266,8 @@ class TariffModule(PowerPilotModule):
             else:
                 price, _, _ = self._resolve_price(slot_dt, day_offset)
                 slot.distribution_price_kwh = price
+
+            slot.distribution_fixed_hourly = self.fixed_hourly_for(slot_dt)
 
         if snapshot_dirty:
             self._schedule_save()
@@ -353,6 +385,23 @@ class TariffModule(PowerPilotModule):
         day_offset = (slot_dt.date() - dt_util.now().date()).days
         price, _, _ = self._resolve_price(slot_dt, day_offset)
         return price
+
+    def fixed_hourly_for(self, hour_start: datetime) -> float | None:
+        """Flat fixed distribution charge for this hour (PLN, gross).
+
+        The active tariff's monthly fixed cost spread evenly over every hour of
+        that calendar month (``fixed_monthly_cost / (days_in_month × 24)``), with
+        VAT applied like the rest of the distribution price. Returns ``None`` when
+        no tariff is active and ``0.0`` when the tariff has no fixed component.
+        """
+        tariff = tariff_for_day(self._tariffs, hour_start.date())
+        if tariff is None:
+            return None
+        if not tariff.fixed_monthly_cost:
+            return 0.0
+        days = calendar.monthrange(hour_start.year, hour_start.month)[1]
+        hours = days * 24
+        return tariff.fixed_monthly_cost * (1.0 + tariff.vat_rate) / hours
 
     @property
     def tariffs(self) -> list[Tariff]:

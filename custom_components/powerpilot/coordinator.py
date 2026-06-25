@@ -38,6 +38,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DEFAULTS,
     DOMAIN,
+    InverterMode,
     MODE_CODE,
     MODE_CODE_INV,
     PRICE_TYPE_CERTAIN,
@@ -847,6 +848,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "energy_price_kwh": _r(energy),
                     "distribution_price_kwh": _r(dist),
                     "total_price_kwh": _r(total),
+                    # Flat fixed distribution charge for this hour (PLN/h, gross),
+                    # i.e. the monthly standing charge spread over the month.
+                    "fixed_cost_hourly": _r(self.tariff.fixed_hourly_for(hour)),
                     "p10": _r(p10),
                     "p90": _r(p90),
                     "estimate_breakdown": breakdown,
@@ -912,7 +916,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         )
         from .hierarchy import exclusive_series
 
-        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        real_now = dt_util.now()
+        now = real_now.replace(minute=0, second=0, microsecond=0)  # current hour start
+        # Latest completed 15-minute boundary — the realized/forecast split point
+        # inside the current hour. The pipeline runs every 15 min, so up to four
+        # times an hour ``now_q`` advances and a bit more of the current hour
+        # becomes realized data rather than forecast.
+        now_q = real_now.replace(
+            minute=(real_now.minute // 15) * 15, second=0, microsecond=0
+        )
 
         # Resolve [past_start, past_end] window for recorder reads.
         if start:
@@ -984,6 +996,18 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         bat_discharge_real = await _read_opt(CONF_BATTERY_DISCHARGE_SENSOR)
         grid_import_real = await _read_opt(CONF_GRID_IMPORT_SENSOR)
 
+        # Realized inverter mode from the measured battery flows (so the history
+        # shows what the inverter *actually* did, not a plan). Charging wins ties.
+        _mode_eps = 0.05  # kWh — ignore sensor noise / negligible flow
+
+        def _real_mode(charge: float | None, discharge: float | None) -> str:
+            c, d = charge or 0.0, discharge or 0.0
+            if c > _mode_eps and c >= d:
+                return InverterMode.CHARGE
+            if d > _mode_eps:
+                return InverterMode.DISCHARGE
+            return InverterMode.PASSTHROUGH
+
         hours: list[dict] = []
 
         # SoC *entering* each hour (start-of-hour state). `decision.battery_soc`
@@ -1040,7 +1064,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "base_consumption_forecast": round(base_fc, 3) if base_fc is not None else None,
                     "soc": round(soc_real[h], 1) if h in soc_real else None,
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
-                    "inverter_mode": None,
+                    "inverter_mode": _real_mode(
+                        bat_charge_real.get(h), bat_discharge_real.get(h)
+                    ),
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
                     "battery_discharge_kwh": round(bat_discharge_real[h], 3) if h in bat_discharge_real else None,
                     # Realized battery energy cost from the vintage recorded at h
@@ -1053,6 +1079,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "energy_cost": None,
                     "distribution_cost": None,
                     "battery_use_cost": None,
+                    "fixed_cost": self.tariff.fixed_hourly_for(h),
                     "devices_real": dev_real_h,
                     "devices_forecast": dev_forecast,
                 }
@@ -1061,6 +1088,85 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 prev_soc = soc_real[h]
             h += timedelta(hours=1)
 
+        # ----- Current (in-progress) hour: realized so far via 5-min stats -----
+        # The current clock hour is part realized (up to ``now_q``) and part
+        # forecast. Show the elapsed part as REAL measured data so SoC and the
+        # bars actually agree (the old chart drew the plan here, which is why they
+        # diverged). The forecast region from ``now_q`` covers the remainder.
+        emitted_current = False
+        if now_q > now and (window_end is None or window_end > now):
+
+            async def _partial(conf_key: str) -> float | None:
+                sensor = self.config.get(conf_key)
+                if not sensor:
+                    return None
+                return await self.consumption.async_partial_kwh(sensor, now, now_q)
+
+            cur_charge = await _partial(CONF_BATTERY_CHARGE_SENSOR)
+            cur_discharge = await _partial(CONF_BATTERY_DISCHARGE_SENSOR)
+            cur_grid = await _partial(CONF_GRID_IMPORT_SENSOR)
+            cur_main = (
+                await self.consumption.async_partial_kwh(main_sensor, now, now_q)
+                if main_sensor
+                else None
+            )
+            cur_devices: dict[str, float | None] = {}
+            for eid in device_ids:
+                cur_devices[eid] = await self.consumption.async_partial_kwh(
+                    eid, now, now_q
+                )
+            live_soc = self._read_soc()
+            wd, hr = now.weekday(), now.hour
+            dev_forecast = {
+                eid: round(self.consumption.devices[eid].value(wd, hr) or 0.0, 3)
+                if eid in self.consumption.devices
+                else None
+                for eid in device_ids
+            }
+            buy_price = self.prices.price_at(now)
+            dist_price = self.tariff.distribution_for(now)
+            total_price = (
+                buy_price + dist_price
+                if buy_price is not None and dist_price is not None
+                else None
+            )
+            hours.append(
+                {
+                    "start": now.isoformat(),
+                    "is_past": True,
+                    "partial": True,
+                    "partial_until": now_q.isoformat(),
+                    "buy_price": buy_price,
+                    "distribution_price_kwh": dist_price,
+                    "total_price_kwh": total_price,
+                    "price_confirmed": self.prices.is_confirmed(now),
+                    "consumption_real": round(cur_main, 3) if cur_main is not None else None,
+                    "consumption_forecast": None,
+                    "base_consumption_forecast": None,
+                    "soc": round(live_soc, 1) if live_soc else None,
+                    "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
+                    "inverter_mode": _real_mode(cur_charge, cur_discharge),
+                    "battery_charge_kwh": round(cur_charge, 3) if cur_charge is not None else None,
+                    "battery_discharge_kwh": round(cur_discharge, 3) if cur_discharge is not None else None,
+                    "battery_energy_cost": round(self._battery_energy_cost, 4),
+                    "grid_buy_kwh": round(cur_grid, 3) if cur_grid is not None else None,
+                    "ev_charge_kwh": None,
+                    "hour_cost": None,
+                    "energy_cost": None,
+                    "distribution_cost": None,
+                    "battery_use_cost": None,
+                    "fixed_cost": self.tariff.fixed_hourly_for(now),
+                    "devices_real": {
+                        eid: round(v, 3) if v is not None else None
+                        for eid, v in cur_devices.items()
+                    },
+                    "devices_forecast": dev_forecast,
+                }
+            )
+            emitted_current = True
+            if live_soc:
+                prev_soc = live_soc
+
         # ----- Future hours from plan -----
         plan = self.data
         # If there was no past window to seed from, start the future SoC line at
@@ -1068,12 +1174,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if prev_soc is None:
             live_soc = self._read_soc()
             prev_soc = live_soc if live_soc else None
+        # When the current hour is shown as a realized partial, the plan's own
+        # current-hour slot is a duplicate → forecast starts at the next hour.
+        forecast_cutoff = (now + timedelta(hours=1)) if emitted_current else past_end
         if plan:
             for slot, decision in zip(plan.forecast.slots, plan.decisions):
                 if window_end and slot.start >= window_end:
                     break
-                if slot.start < past_end:
-                    # Plan slot already covered by past window — skip duplicate.
+                if slot.start < forecast_cutoff:
+                    # Plan slot already covered by past / current-partial → skip.
                     continue
                 wd, hr = slot.start.weekday(), slot.start.hour
                 dev_forecast = {
@@ -1107,6 +1216,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "energy_cost": round(decision.energy_cost, 4),
                         "distribution_cost": round(decision.distribution_cost, 4),
                         "battery_use_cost": round(decision.battery_use_cost, 4),
+                        "fixed_cost": round(decision.fixed_cost, 4),
                         "devices_real": {eid: None for eid in device_ids},
                         "devices_forecast": dev_forecast,
                     }
@@ -1114,7 +1224,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 prev_soc = decision.battery_soc
 
         return {
-            "now": now.isoformat(),
+            # ``now`` is snapped to the latest 15-min mark — the realized/forecast
+            # split point the panel draws "teraz" at and shades the forecast from.
+            "now": now_q.isoformat(),
+            "now_hour": now.isoformat(),
+            "forecast_start": now_q.isoformat(),
             "past_hours": past_hours,
             "start": past_start.isoformat(),
             "end": (window_end or (plan.forecast.slots[-1].start + timedelta(hours=1) if plan and plan.forecast.slots else past_end)).isoformat() if (window_end or plan) else past_end.isoformat(),

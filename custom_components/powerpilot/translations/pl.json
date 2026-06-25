@@ -155,7 +155,8 @@
         "data": {
           "name": "Nazwa taryfy (np. Tauron G12)",
           "base_component_kwh": "Składnik bazowy dodawany do każdej godziny (PLN/kWh)",
-          "vat_rate": "VAT na cenę dystrybucji (0.23 = 23%)"
+          "vat_rate": "VAT na cenę dystrybucji (0.23 = 23%)",
+          "fixed_monthly_cost": "Koszt stały miesięczny, netto (PLN/mies. — opłata stała/abonamentowa, rozłożona na godziny miesiąca)"
         }
       },
       "period_list": {

@@ -155,7 +155,8 @@
         "data": {
           "name": "Tariff name (e.g. Tauron G12)",
           "base_component_kwh": "Base component added to every hour (PLN/kWh)",
-          "vat_rate": "VAT applied to the distribution price (0.23 = 23%)"
+          "vat_rate": "VAT applied to the distribution price (0.23 = 23%)",
+          "fixed_monthly_cost": "Fixed monthly charge, net (PLN/month — standing fee, spread over the month's hours)"
         }
       },
       "period_list": {

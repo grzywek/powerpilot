@@ -54,6 +54,9 @@ async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:
     assert msg["success"]
     assert "hours" in msg["result"]
     assert "now" in msg["result"]
+    # Realized/forecast split point for the panel (snapped to 15 min).
+    assert "forecast_start" in msg["result"]
+    assert "now_hour" in msg["result"]
     # Should contain both past hours and the forecast horizon.
     assert any(h["is_past"] for h in msg["result"]["hours"])
 

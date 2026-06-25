@@ -123,6 +123,49 @@ class ConsumptionModule(PowerPilotModule):
         """Hourly kWh for an arbitrary [start, end) window (public wrapper)."""
         return await self._fetch_hourly_kwh(entity_id, start, end)
 
+    async def async_partial_kwh(
+        self, entity_id: str, start: datetime, end: datetime
+    ) -> float | None:
+        """Total kWh in a sub-hour ``[start, end)`` window via 5-minute statistics.
+
+        The in-progress clock hour has no compiled *hourly* statistic yet, so the
+        chart's "real so far this hour" segment reads the short-term 5-minute
+        buckets instead: energy sensors sum their delta across the window, power
+        sensors integrate ``mean × 5min``. Returns ``None`` when the sensor is
+        unreadable (no unit / no statistics), ``0.0`` when simply nothing flowed.
+        """
+        if end <= start:
+            return 0.0
+        unit = self._sensor_unit(entity_id)
+        kind = self._sensor_kind(unit)
+        if kind is None:
+            return None
+        rows = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            end,
+            {entity_id},
+            "5minute",
+            None,
+            {"mean"} if kind == "power" else {"sum"},
+        )
+        series = rows.get(entity_id, [])
+        if not series:
+            return None
+        if kind == "power":
+            factor = _POWER_UNITS[unit]
+            total = 0.0
+            for row in series:
+                mean = row.get("mean")
+                if mean is not None:
+                    total += float(mean) * factor * (5.0 / 60.0)
+            return total
+        sums = [float(r["sum"]) for r in series if r.get("sum") is not None]
+        if len(sums) < 2:
+            return 0.0
+        return max(0.0, sums[-1] - sums[0]) * _ENERGY_UNITS[unit]
+
     async def async_diagnose_sensor(
         self, entity_id: str, start: datetime, end: datetime
     ) -> dict:

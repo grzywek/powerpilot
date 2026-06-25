@@ -90,6 +90,8 @@ interface SeriesHour {
   soc: number | null;
   battery_soc_start: number | null;
   inverter_mode: string | null;
+  partial?: boolean;
+  partial_until?: string;
   battery_charge_kwh: number | null;
   battery_discharge_kwh: number | null;
   battery_energy_cost: number | null;
@@ -99,12 +101,15 @@ interface SeriesHour {
   energy_cost: number | null;
   distribution_cost: number | null;
   battery_use_cost: number | null;
+  fixed_cost: number | null;
   devices_real: Record<string, number | null>;
   devices_forecast: Record<string, number | null>;
 }
 
 interface Series {
   now: string;
+  now_hour?: string;
+  forecast_start?: string;
   past_hours: number;
   start: string;
   end: string;
@@ -130,6 +135,7 @@ interface PriceArchiveHour {
   energy_price_kwh: number | null;
   distribution_price_kwh: number | null;
   total_price_kwh: number | null;
+  fixed_cost_hourly: number | null;
   p10: number | null;
   p90: number | null;
   estimate_breakdown: EstimateSample[] | null;
@@ -271,9 +277,9 @@ const DEVICE_PALETTE = [
 /** Inverter operating mode → human label + background tint for the energy chart.
  *  Tints use mid-opacity colors that read on both light and dark HA themes. */
 const INVERTER_MODE_META: Record<string, { label: string; fill: string }> = {
-  charge: { label: "ładowanie", fill: "rgba(46, 196, 182, 0.16)" },
-  discharge: { label: "rozładowanie", fill: "rgba(233, 138, 160, 0.18)" },
-  passthrough: { label: "passthrough", fill: "rgba(128, 128, 128, 0.10)" },
+  charge: { label: "charging", fill: "rgba(34, 197, 94, 0.16)" },
+  discharge: { label: "battery", fill: "rgba(233, 138, 160, 0.18)" },
+  passthrough: { label: "passthrough", fill: "transparent" },
 };
 
 type RangeMode = "24h" | "3d" | "7d";
@@ -649,10 +655,13 @@ export class PowerPilotPanel extends LitElement {
     return html`
       <div class="card">
         <div class="stat-row">
-          ${this._stat("Tryb falownika", current.inverter_mode)}
+          ${this._stat(
+            "Tryb falownika",
+            INVERTER_MODE_META[current.inverter_mode]?.label ?? current.inverter_mode
+          )}
           ${this._stat("Moc", current.charge_power)}
           ${this._stat("SoC", current.battery_soc.toFixed(0) + " %")}
-          ${this._stat("Cena w baterii", current.battery_energy_cost.toFixed(3))}
+          ${this._stat("Cena w baterii", current.battery_energy_cost.toFixed(2))}
           ${this._stat("Sieć", current.grid_connected ? "tak" : "nie")}
           ${this._stat("EV", current.ev_charge ? "ładuje" : "—")}
           ${this._stat("Koszt horyzontu", plan.total_cost.toFixed(2) + " PLN")}
@@ -912,6 +921,41 @@ export class PowerPilotPanel extends LitElement {
   }
 
   /**
+   * Light background region marking everything from ``now`` (the latest 15-min
+   * mark) to the end of the horizon as forecast — so realized (left, plain) and
+   * forecast (right, shaded) are unmistakable. The boundary falls *inside* the
+   * current hour, visually splitting it into "realized so far | forecast".
+   */
+  private _forecastAnnotation(s: Series): any | null {
+    const splitIso = s.forecast_start ?? s.now;
+    if (!splitIso || !s.hours.length) return null;
+    const x = new Date(splitIso).getTime();
+    const last = s.hours[s.hours.length - 1];
+    const x2 = new Date(last.start).getTime() + 3600 * 1000;
+    if (x2 <= x) return null;
+    const dark = this._isDark();
+    return {
+      x,
+      x2,
+      fillColor: dark ? "rgba(250, 204, 21, 0.07)" : "rgba(250, 204, 21, 0.10)",
+      opacity: 1,
+      borderColor: "transparent",
+      label: {
+        text: "prognoza",
+        orientation: "horizontal",
+        position: "top",
+        offsetY: -2,
+        borderColor: "transparent",
+        style: {
+          background: "transparent",
+          color: dark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.45)",
+          fontSize: "10px",
+        },
+      },
+    };
+  }
+
+  /**
    * Build ApexCharts options for the energy chart.
    *
    * Diverging stacked columns + SoC line:
@@ -1028,10 +1072,10 @@ export class PowerPilotPanel extends LitElement {
       name: "SoC %",
       type: "line",
       data: pair((h) => h.battery_soc_start),
-      color: "#2ec4b6",
+      color: "#22c55e",
     });
 
-    const nowTs = Date.now();
+    const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
     const dark = this._isDark();
     const nowColor = dark ? "#ffffff" : "#333333";
     const nowBg = dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.08)";
@@ -1167,6 +1211,7 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
+          ...[this._forecastAnnotation(s)].filter(Boolean),
           ...this._inverterModeAnnotations(s),
           ...this._dayBoundaryAnnotations(s),
           {
@@ -1205,7 +1250,7 @@ export class PowerPilotPanel extends LitElement {
       { name: "Koszt energii - bateria", type: "column", data: batUseCostData, color: "#3b82f6" },
     ];
 
-    const nowTs = Date.now();
+    const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
     const dark = this._isDark();
     const nowColor = dark ? "#ffffff" : "#333333";
     const nowBg = dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.08)";
@@ -1244,9 +1289,9 @@ export class PowerPilotPanel extends LitElement {
         {
           seriesName: "Cena pełna",
           title: { text: "PLN/kWh" },
-          labels: { formatter: (v: number) => (v != null ? v.toFixed(3) : "") },
+          labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
           forceNiceScale: true,
-          decimalsInFloat: 3,
+          decimalsInFloat: 2,
         },
         { seriesName: "Cena w baterii", show: false, forceNiceScale: true },
         {
@@ -1270,7 +1315,7 @@ export class PowerPilotPanel extends LitElement {
         custom: ({ dataPointIndex }: { dataPointIndex: number }) => {
           const row = hrs[dataPointIndex];
           if (!row) return "";
-          const fmt3 = (v: number | null) => (v == null ? "—" : v.toFixed(3));
+          const fmtPrice = (v: number | null) => (v == null ? "—" : v.toFixed(2));
           const fmt2 = (v: number | null) => (v == null ? "—" : v.toFixed(2));
           const start = new Date(row.start);
           const date = start.toLocaleString("pl-PL", {
@@ -1288,13 +1333,14 @@ export class PowerPilotPanel extends LitElement {
             <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.4;min-width:240px">
               <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}</div>
               <table style="border-collapse:collapse;width:100%">
-                <tr><td style="padding:1px 0">Cena całkowita ${confirmed}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt3(row.total_price_kwh)} PLN/kWh</td></tr>
-                <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· energia</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmt3(row.buy_price)} PLN/kWh</td></tr>
-                <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· dystrybucja (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmt3(row.distribution_price_kwh)} PLN/kWh</td></tr>
-                <tr><td style="padding:1px 0">Cena w baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt3(row.battery_energy_cost)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0">Cena całkowita ${confirmed}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.total_price_kwh)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· energia</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.buy_price)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· dystrybucja (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.distribution_price_kwh)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0">Cena w baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.battery_energy_cost)} PLN/kWh</td></tr>
                 <tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>
                 <tr><td style="padding:1px 0">Koszt z sieci</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.hour_cost)} PLN</td></tr>
                 <tr><td style="padding:1px 0">Koszt z baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.battery_use_cost)} PLN</td></tr>
+                <tr><td style="padding:1px 0">Koszt stały</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.fixed_cost)} PLN/h</td></tr>
               </table>
             </div>
           `;
@@ -1308,6 +1354,7 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
+          ...[this._forecastAnnotation(s)].filter(Boolean),
           ...this._dayBoundaryAnnotations(s),
           {
             x: nowTs,
@@ -1371,7 +1418,7 @@ export class PowerPilotPanel extends LitElement {
         minute: "2-digit",
       });
     };
-    const fmt3 = (v: number | null) => (v == null ? "—" : v.toFixed(3));
+    const fmtPrice = (v: number | null) => (v == null ? "—" : v.toFixed(2));
     const fmtDayLabel = (iso: string) => {
       const d = new Date(iso + "T12:00:00");
       return d.toLocaleDateString("pl-PL", {
@@ -1425,10 +1472,11 @@ export class PowerPilotPanel extends LitElement {
                   <th>Energia<br /><span class="muted">z VAT</span></th>
                   <th>Dystrybucja<br /><span class="muted">z VAT</span></th>
                   <th>Cena pełna<br /><span class="muted">z VAT</span></th>
+                  <th>Koszt stały<br /><span class="muted">PLN/h z VAT</span></th>
                 </tr>
               </thead>
               <tbody>
-                ${rows.map((h) => this._renderPriceRow(h, fmtHour, fmtStamp, fmt3))}
+                ${rows.map((h) => this._renderPriceRow(h, fmtHour, fmtStamp, fmtPrice))}
               </tbody>
             </table>
           </div>
@@ -1453,7 +1501,7 @@ export class PowerPilotPanel extends LitElement {
     h: PriceArchiveHour,
     fmtHour: (iso: string) => string,
     fmtStamp: (iso: string | null) => string,
-    fmt3: (v: number | null) => string
+    fmtPrice: (v: number | null) => string
   ): TemplateResult {
     const meta = h.type ? PRICE_TYPE_META[h.type] : null;
     const sourceLabel = h.source ? PRICE_SOURCE_LABEL[h.source] ?? h.source : "—";
@@ -1466,9 +1514,10 @@ export class PowerPilotPanel extends LitElement {
         <td>${badge}</td>
         <td class="muted">${sourceLabel}</td>
         <td class="muted">${fmtStamp(h.fetched_at)}</td>
-        <td>${fmt3(h.energy_price_kwh)}</td>
-        <td>${fmt3(h.distribution_price_kwh)}</td>
-        <td class="bold">${fmt3(h.total_price_kwh)}</td>
+        <td>${fmtPrice(h.energy_price_kwh)}</td>
+        <td>${fmtPrice(h.distribution_price_kwh)}</td>
+        <td class="bold">${fmtPrice(h.total_price_kwh)}</td>
+        <td class="muted">${fmtPrice(h.fixed_cost_hourly)}</td>
       </tr>
     `;
   }
@@ -1481,13 +1530,13 @@ export class PowerPilotPanel extends LitElement {
     if (h.type === "forecast") {
       const band =
         h.p10 != null && h.p90 != null
-          ? ` Przedział P10–P90: ${h.p10.toFixed(3)}–${h.p90.toFixed(3)} PLN/kWh.`
+          ? ` Przedział P10–P90: ${h.p10.toFixed(2)}–${h.p90.toFixed(2)} PLN/kWh.`
           : "";
       return `Prognoza ze źródła — odświeżana co kilka godzin.${band}`;
     }
     if (h.type === "estimated" && h.estimate_breakdown) {
       const lines = h.estimate_breakdown.map((s) => {
-        const v = s.value == null ? "brak" : `${s.value.toFixed(3)} PLN/kWh`;
+        const v = s.value == null ? "brak" : `${s.value.toFixed(2)} PLN/kWh`;
         return `• ${s.date} (−${s.weeks_ago} tyg., waga ${s.weight}): ${v}`;
       });
       return [

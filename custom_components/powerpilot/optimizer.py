@@ -400,6 +400,7 @@ class Optimizer:
             decision.energy_cost = grid_buy * energy_price[t]
             decision.distribution_cost = grid_buy * distribution[t]
             decision.hour_cost = decision.energy_cost + decision.distribution_cost
+            decision.fixed_cost = slot.distribution_fixed_hourly or 0.0
             decision.battery_use_cost = delivered * decision.battery_energy_cost
 
             decision.trace = {

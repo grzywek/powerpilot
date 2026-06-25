@@ -17,7 +17,7 @@
           "inverter_max_discharge_kw": "Maks. moc rozładowania falownika (kW)",
           "charge_efficiency": "Sprawność ładowania",
           "discharge_efficiency": "Sprawność rozładowania",
-          "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh)",
+          "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh netto)",
           "min_soc": "Minimalny SoC (%)",
           "max_soc": "Maksymalny SoC (%)",
           "grid_disconnect_soc": "SoC odłączenia od sieci (%)",
@@ -95,7 +95,7 @@
           "inverter_max_discharge_kw": "Maks. moc rozładowania falownika (kW)",
           "charge_efficiency": "Sprawność ładowania",
           "discharge_efficiency": "Sprawność rozładowania",
-          "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh)",
+          "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh netto)",
           "min_soc": "Minimalny SoC (%)",
           "max_soc": "Maksymalny SoC (%)",
           "grid_disconnect_soc": "SoC odłączenia od sieci (%)",
@@ -154,7 +154,7 @@
         "description": "Edycja: {name}. Składnik bazowy dodawany jest do ceny każdego okresu. VAT mnoży cenę dystrybucji (bazowa + okres). VAT dla ceny energii ustawiasz w sekcji 'Ceny'. Zakresy obowiązywania i okresy konfigurujesz w kolejnych krokach.",
         "data": {
           "name": "Nazwa taryfy (np. Tauron G12)",
-          "base_component_kwh": "Składnik bazowy dodawany do każdej godziny (PLN/kWh)",
+          "base_component_kwh": "Składnik bazowy dodawany do każdej godziny (PLN/kWh netto)",
           "vat_rate": "VAT na cenę dystrybucji (0.23 = 23%)",
           "fixed_monthly_cost": "Koszt stały miesięczny, netto (PLN/mies. — opłata stała/abonamentowa, rozłożona na godziny miesiąca)"
         }
@@ -173,7 +173,7 @@
           "name": "Nazwa okresu (np. Szczyt popołudniowy)",
           "hour_from": "Godzina od (0–23, włącznie)",
           "hour_to": "Godzina do (1–24, wyłącznie)",
-          "price_kwh": "Cena (PLN/kWh)",
+          "price_kwh": "Cena (PLN/kWh netto)",
           "day_sensor": "Klasyfikator dnia (binary_sensor, opcjonalnie)"
         }
       },

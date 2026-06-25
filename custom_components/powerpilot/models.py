@@ -55,10 +55,18 @@ class HourSlot:
 
     @property
     def total_price_kwh(self) -> float | None:
-        """Energy price + distribution price (PLN/kWh), or ``None`` if either is missing."""
+        """Full gross price the user sees: energy + distribution + the flat fixed
+        charge for the hour (PLN/h folded in directly), or ``None`` if a price
+        component is missing. Display-only — the optimizer prices energy and
+        distribution separately and adds the fixed charge as a flat per-hour cost.
+        """
         if self.buy_price is None or self.distribution_price_kwh is None:
             return None
-        return self.buy_price + self.distribution_price_kwh
+        return (
+            self.buy_price
+            + self.distribution_price_kwh
+            + (self.distribution_fixed_hourly or 0.0)
+        )
 
 
 @dataclass

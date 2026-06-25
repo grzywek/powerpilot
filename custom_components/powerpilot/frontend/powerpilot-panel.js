@@ -1170,6 +1170,7 @@ rect.legend-mouseover-inactive,
                 <tr><td style="padding:1px 0">Cena ca\u0142kowita ${m}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${u(g.total_price_kwh)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">\xB7 energia</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${u(g.buy_price)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">\xB7 dystrybucja (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${u(g.distribution_price_kwh)} PLN/kWh</td></tr>
+                ${g.fixed_cost?`<tr><td style="padding:1px 0 1px 10px;opacity:0.8">\xB7 koszt sta\u0142y (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${u(g.fixed_cost)} PLN/h</td></tr>`:""}
                 <tr><td style="padding:1px 0">Cena w baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${u(g.battery_energy_cost)} PLN/kWh</td></tr>
                 <tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid ${y.border}"></div></td></tr>
                 <tr><td style="padding:1px 0">Koszt z sieci</td><td style="text-align:right;font-variant-numeric:tabular-nums">${x(g.hour_cost)} PLN</td></tr>

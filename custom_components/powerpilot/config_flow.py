@@ -129,7 +129,7 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
             ): _NUMBER(_NUM(min=0.5, max=1, step=0.01, mode="slider")),
             vol.Required(
                 CONF_BATTERY_WEAR_COST, default=d(CONF_BATTERY_WEAR_COST)
-            ): _NUMBER(_NUM(min=0, max=2, step=0.01, unit_of_measurement="PLN/kWh", mode="box")),
+            ): _NUMBER(_NUM(min=0, max=2, step=0.01, unit_of_measurement="PLN/kWh netto", mode="box")),
             vol.Required(CONF_MIN_SOC, default=d(CONF_MIN_SOC)): _NUMBER(
                 _NUM(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
             ),
@@ -191,7 +191,7 @@ def _price_schema(data: dict[str, Any]) -> vol.Schema:
                 selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
             ),
             vol.Optional(CONF_PRICE_MARKUP, default=d(CONF_PRICE_MARKUP)): _NUMBER(
-                _NUM(min=0, max=2, step=0.01, unit_of_measurement="PLN/kWh", mode="box")
+                _NUM(min=0, max=2, step=0.01, unit_of_measurement="PLN/kWh netto", mode="box")
             ),
             vol.Optional(CONF_PRICE_VAT, default=d(CONF_PRICE_VAT)): _NUMBER(
                 _NUM(min=1, max=2, step=0.01, mode="box")
@@ -597,7 +597,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
             {
                 vol.Required("name", default=defaults["name"]): selector.TextSelector(),
                 vol.Required("base_component_kwh", default=defaults["base_component_kwh"]): _NUMBER(
-                    _NUM(min=0, max=5, step="any", unit_of_measurement="PLN/kWh", mode="box")
+                    _NUM(min=0, max=5, step="any", unit_of_measurement="PLN/kWh netto", mode="box")
                 ),
                 vol.Required("vat_rate", default=defaults["vat_rate"]): _NUMBER(
                     _NUM(min=0, max=1, step=0.01, unit_of_measurement="× netto", mode="box")
@@ -735,7 +735,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
                     _NUM(min=1, max=24, step=1, unit_of_measurement="h", mode="box")
                 ),
                 vol.Required("price_kwh", default=defaults["price_kwh"]): _NUMBER(
-                    _NUM(min=0, max=5, step="any", unit_of_measurement="PLN/kWh", mode="box")
+                    _NUM(min=0, max=5, step="any", unit_of_measurement="PLN/kWh netto", mode="box")
                 ),
                 vol.Optional("day_sensor", default=defaults["day_sensor"]): _entity("binary_sensor"),
             }

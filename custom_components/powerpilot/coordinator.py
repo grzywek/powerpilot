@@ -295,7 +295,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             hour_start = (start + timedelta(hours=i)) if start else None
             buy = _at("buy", i)
             dist = _at("dist", i)
-            total = buy + dist if (buy is not None and dist is not None) else None
+            fixed = self.tariff.fixed_hourly_for(hour_start) if hour_start else None
+            total = (
+                buy + dist + (fixed or 0.0)
+                if (buy is not None and dist is not None)
+                else None
+            )
             hours.append(
                 {
                     "start": hour_start.isoformat() if hour_start else None,
@@ -841,8 +846,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 fetched_at = None
 
             dist = self.tariff.distribution_for(hour)
+            fixed_hourly = self.tariff.fixed_hourly_for(hour)
             total = (
-                energy + dist if (energy is not None and dist is not None) else None
+                energy + dist + (fixed_hourly or 0.0)
+                if (energy is not None and dist is not None)
+                else None
             )
             hours.append(
                 {
@@ -855,7 +863,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "total_price_kwh": _r(total),
                     # Flat fixed distribution charge for this hour (PLN/h, gross),
                     # i.e. the monthly standing charge spread over the month.
-                    "fixed_cost_hourly": _r(self.tariff.fixed_hourly_for(hour)),
+                    "fixed_cost_hourly": _r(fixed_hourly),
                     "p10": _r(p10),
                     "p90": _r(p90),
                     "estimate_breakdown": breakdown,
@@ -1082,8 +1090,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
             buy_price = self.prices.price_at(h)
             dist_price = self.tariff.snapshot_for(h)
+            fixed_hourly = self.tariff.fixed_hourly_for(h)
             total_price = (
-                buy_price + dist_price
+                buy_price + dist_price + (fixed_hourly or 0.0)
                 if buy_price is not None and dist_price is not None
                 else None
             )
@@ -1191,8 +1200,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             }
             buy_price = self.prices.price_at(now)
             dist_price = self.tariff.distribution_for(now)
+            fixed_hourly = self.tariff.fixed_hourly_for(now)
             total_price = (
-                buy_price + dist_price
+                buy_price + dist_price + (fixed_hourly or 0.0)
                 if buy_price is not None and dist_price is not None
                 else None
             )

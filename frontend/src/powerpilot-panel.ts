@@ -1357,6 +1357,7 @@ export class PowerPilotPanel extends LitElement {
                 <tr><td style="padding:1px 0">Cena całkowita ${confirmed}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.total_price_kwh)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· energia</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.buy_price)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· dystrybucja (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.distribution_price_kwh)} PLN/kWh</td></tr>
+                ${row.fixed_cost ? `<tr><td style="padding:1px 0 1px 10px;opacity:0.8">· koszt stały (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.fixed_cost)} PLN/h</td></tr>` : ""}
                 <tr><td style="padding:1px 0">Cena w baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.battery_energy_cost)} PLN/kWh</td></tr>
                 <tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>
                 <tr><td style="padding:1px 0">Koszt z sieci</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.hour_cost)} PLN</td></tr>

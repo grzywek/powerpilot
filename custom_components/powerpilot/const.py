@@ -7,9 +7,10 @@ from typing import Final
 DOMAIN: Final = "powerpilot"
 PLATFORMS: Final = ["sensor", "binary_sensor"]
 
-# How often the optimization pipeline runs (4× per hour). Also the granularity
-# at which the current hour is split into realized vs forecast on the chart.
-DEFAULT_UPDATE_INTERVAL_MINUTES: Final = 15
+# How often the optimization pipeline re-plans. Prices and the consumption
+# forecast move on an hourly grid, so re-optimising hourly is enough; the panel
+# still reads live realized data (incl. the current hour so far) on every fetch.
+DEFAULT_UPDATE_INTERVAL_MINUTES: Final = 60
 
 # ---------------------------------------------------------------------------
 # Config / options keys

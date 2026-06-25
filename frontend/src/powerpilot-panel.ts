@@ -92,6 +92,8 @@ interface SeriesHour {
   inverter_mode: string | null;
   partial?: boolean;
   partial_until?: string;
+  realized: TipSide | null;
+  forecast: TipSide | null;
   battery_charge_kwh: number | null;
   battery_discharge_kwh: number | null;
   battery_energy_cost: number | null;
@@ -106,10 +108,15 @@ interface SeriesHour {
   devices_forecast: Record<string, number | null>;
 }
 
+interface TipSide {
+  sources: number | null;
+  consumption: number | null;
+  soc_start: number | null;
+  soc_end: number | null;
+}
+
 interface Series {
   now: string;
-  now_hour?: string;
-  forecast_start?: string;
   past_hours: number;
   start: string;
   end: string;
@@ -921,41 +928,6 @@ export class PowerPilotPanel extends LitElement {
   }
 
   /**
-   * Light background region marking everything from ``now`` (the latest 15-min
-   * mark) to the end of the horizon as forecast — so realized (left, plain) and
-   * forecast (right, shaded) are unmistakable. The boundary falls *inside* the
-   * current hour, visually splitting it into "realized so far | forecast".
-   */
-  private _forecastAnnotation(s: Series): any | null {
-    const splitIso = s.forecast_start ?? s.now;
-    if (!splitIso || !s.hours.length) return null;
-    const x = new Date(splitIso).getTime();
-    const last = s.hours[s.hours.length - 1];
-    const x2 = new Date(last.start).getTime() + 3600 * 1000;
-    if (x2 <= x) return null;
-    const dark = this._isDark();
-    return {
-      x,
-      x2,
-      fillColor: dark ? "rgba(250, 204, 21, 0.07)" : "rgba(250, 204, 21, 0.10)",
-      opacity: 1,
-      borderColor: "transparent",
-      label: {
-        text: "prognoza",
-        orientation: "horizontal",
-        position: "top",
-        offsetY: -2,
-        borderColor: "transparent",
-        style: {
-          background: "transparent",
-          color: dark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.45)",
-          fontSize: "10px",
-        },
-      },
-    };
-  }
-
-  /**
    * Build ApexCharts options for the energy chart.
    *
    * Diverging stacked columns + SoC line:
@@ -1156,45 +1128,47 @@ export class PowerPilotPanel extends LitElement {
           const modeMeta = h.inverter_mode ? INVERTER_MODE_META[h.inverter_mode] : null;
           const modeStr = modeMeta ? `  •  falownik: ${modeMeta.label}` : "";
 
-          // SoC entering vs leaving this hour (entering = start-of-hour state
-          // from the backend, leaving = this hour's end-of-hour value).
-          const socStart = h.battery_soc_start;
-          const socEnd = h.soc;
+          // Split breakdown: realized vs forecast side by side. Settled past
+          // hours have only the realized side (whole hour); future hours only
+          // the forecast side; the current hour shows both — realized so far +
+          // the plan's forecast for the whole hour.
+          const sides: { label: string; g: TipSide }[] = [];
+          if (h.realized)
+            sides.push({ label: h.partial ? "realne (do teraz)" : "realne", g: h.realized });
+          if (h.forecast)
+            sides.push({ label: h.partial ? "prognoza (godz.)" : "prognoza", g: h.forecast });
+          if (!sides.length) return "";
 
-          const dot = (c: string) =>
-            `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${c};margin-right:5px;vertical-align:middle"></span>`;
-          const compRows = (rows: Row[]) =>
-            rows
-              .map((r) => ({ label: r.label, color: r.color, v: r.get(h) ?? 0 }))
-              .filter((r) => Math.abs(r.v) >= 0.005)
+          const kwh = (v: number | null) => (v == null ? "—" : fmt(v) + " kWh");
+          const socCell = (g: TipSide) =>
+            g.soc_start == null && g.soc_end == null
+              ? "—"
+              : `${g.soc_start != null ? g.soc_start.toFixed(0) : "—"} → ${g.soc_end != null ? g.soc_end.toFixed(0) : "—"} %`;
+          const cells = (valFn: (g: TipSide) => string) =>
+            sides
               .map(
-                (r) =>
-                  `<tr><td style="padding:1px 0 1px 12px;opacity:0.85">${dot(r.color)}${r.label}</td>` +
-                  `<td style="text-align:right;font-variant-numeric:tabular-nums;opacity:0.85">${fmt(r.v)} kWh</td></tr>`,
+                (s) =>
+                  `<td style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px">${valFn(s.g)}</td>`,
               )
               .join("");
-          const sum = (rows: Row[]) =>
-            rows.reduce((acc, r) => acc + Math.abs(r.get(h) ?? 0), 0);
-          const upTotal = sum(upRows);
-          const downTotal = sum(downRows);
-          const sep = `<tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>`;
-          const socRow =
-            socStart != null || socEnd != null
-              ? `${sep}<tr><td style="padding:1px 0">SoC (pocz. → kon.)</td>` +
-                `<td style="text-align:right;font-variant-numeric:tabular-nums">` +
-                `${socStart != null ? socStart.toFixed(0) : "—"}% → ${socEnd != null ? socEnd.toFixed(0) : "—"}%</td></tr>`
-              : "";
+          const header =
+            sides.length > 1
+              ? `<tr><td></td>${sides
+                  .map(
+                    (s) =>
+                      `<td style="text-align:right;opacity:0.7;padding-left:14px">${s.label}</td>`,
+                  )
+                  .join("")}</tr>`
+              : `<tr><td></td><td style="text-align:right;opacity:0.7">${sides[0].label}</td></tr>`;
 
           return `
-            <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.4;min-width:260px">
+            <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.5;min-width:240px">
               <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}</div>
               <table style="border-collapse:collapse;width:100%">
-                <tr><td style="padding:1px 0;font-weight:600">↑ Źródła energii</td><td style="text-align:right;font-weight:600;font-variant-numeric:tabular-nums">${fmt(upTotal)} kWh</td></tr>
-                ${compRows(upRows)}
-                ${sep}
-                <tr><td style="padding:1px 0;font-weight:600">↓ Zużycie</td><td style="text-align:right;font-weight:600;font-variant-numeric:tabular-nums">${fmt(downTotal)} kWh</td></tr>
-                ${compRows(downRows)}
-                ${socRow}
+                ${header}
+                <tr><td style="padding:1px 0">↑ Źródła energii</td>${cells((g) => kwh(g.sources))}</tr>
+                <tr><td style="padding:1px 0">↓ Zużycie</td>${cells((g) => kwh(g.consumption))}</tr>
+                <tr><td style="padding:1px 0">SoC</td>${cells(socCell)}</tr>
               </table>
             </div>
           `;
@@ -1211,7 +1185,6 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
-          ...[this._forecastAnnotation(s)].filter(Boolean),
           ...this._inverterModeAnnotations(s),
           ...this._dayBoundaryAnnotations(s),
           {
@@ -1354,7 +1327,6 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
-          ...[this._forecastAnnotation(s)].filter(Boolean),
           ...this._dayBoundaryAnnotations(s),
           {
             x: nowTs,

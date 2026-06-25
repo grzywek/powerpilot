@@ -109,8 +109,12 @@ interface SeriesHour {
 }
 
 interface TipSide {
-  sources: number | null;
-  consumption: number | null;
+  grid: number | null;
+  discharge: number | null;
+  base: number | null;
+  ev: number | null;
+  charge: number | null;
+  devices: Record<string, number>;
   soc_start: number | null;
   soc_end: number | null;
 }
@@ -979,21 +983,27 @@ export class PowerPilotPanel extends LitElement {
 
     // Stack component definitions — the single source of truth for both the
     // chart series and the custom tooltip breakdown.
-    type Row = { label: string; color: string; get: (h: SeriesHour) => number | null };
+    type Row = {
+      label: string;
+      color: string;
+      key: string; // breakdown key on TipSide ("grid"/"base"/… or "dev:<eid>")
+      get: (h: SeriesHour) => number | null;
+    };
     const deviceIds = s.device_ids ?? [];
     const upRows: Row[] = [
-      { label: "Import z sieci", color: "#8e44ad", get: (h) => h.grid_buy_kwh },
-      { label: "Bateria — rozładowanie", color: "#b0a14f", get: (h) => h.battery_discharge_kwh },
+      { label: "Import z sieci", color: "#8e44ad", key: "grid", get: (h) => h.grid_buy_kwh },
+      { label: "Bateria — rozładowanie", color: "#b0a14f", key: "discharge", get: (h) => h.battery_discharge_kwh },
     ];
     const downRows: Row[] = [
-      { label: "Zużycie bazowe", color: "#b5475d", get: baseConsumption },
+      { label: "Zużycie bazowe", color: "#b5475d", key: "base", get: baseConsumption },
       ...deviceIds.map((eid, idx) => ({
         label: `Urz: ${eid.split(".").slice(-1)[0]}`,
         color: DEVICE_PALETTE[idx % DEVICE_PALETTE.length],
+        key: `dev:${eid}`,
         get: device(eid),
       })),
-      { label: "EV ładowanie", color: "#3498db", get: (h) => h.ev_charge_kwh },
-      { label: "Bateria — ładowanie", color: "#c98a3a", get: (h) => h.battery_charge_kwh },
+      { label: "EV ładowanie", color: "#3498db", key: "ev", get: (h) => h.ev_charge_kwh },
+      { label: "Bateria — ładowanie", color: "#c98a3a", key: "charge", get: (h) => h.battery_charge_kwh },
     ];
 
     const series: any[] = [];
@@ -1128,10 +1138,10 @@ export class PowerPilotPanel extends LitElement {
           const modeMeta = h.inverter_mode ? INVERTER_MODE_META[h.inverter_mode] : null;
           const modeStr = modeMeta ? `  •  falownik: ${modeMeta.label}` : "";
 
-          // Split breakdown: realized vs forecast side by side. Settled past
-          // hours have only the realized side (whole hour); future hours only
-          // the forecast side; the current hour shows both — realized so far +
-          // the plan's forecast for the whole hour.
+          // Split breakdown: realized vs forecast side by side, each with the
+          // full colored per-position breakdown. Settled past hours carry both
+          // (actual vs what was planned); future hours only forecast; the current
+          // hour realized-so-far + the plan's forecast for the whole hour.
           const sides: { label: string; g: TipSide }[] = [];
           if (h.realized)
             sides.push({ label: h.partial ? "realne (do teraz)" : "realne", g: h.realized });
@@ -1139,18 +1149,52 @@ export class PowerPilotPanel extends LitElement {
             sides.push({ label: h.partial ? "prognoza (godz.)" : "prognoza", g: h.forecast });
           if (!sides.length) return "";
 
-          const kwh = (v: number | null) => (v == null ? "—" : fmt(v) + " kWh");
-          const socCell = (g: TipSide) =>
-            g.soc_start == null && g.soc_end == null
-              ? "—"
-              : `${g.soc_start != null ? g.soc_start.toFixed(0) : "—"} → ${g.soc_end != null ? g.soc_end.toFixed(0) : "—"} %`;
-          const cells = (valFn: (g: TipSide) => string) =>
+          const sideVal = (g: TipSide, key: string): number | null => {
+            if (key.startsWith("dev:")) {
+              const v = g.devices?.[key.slice(4)];
+              return v == null ? null : v;
+            }
+            const v = (g as unknown as Record<string, number | null>)[key];
+            return v == null ? null : v;
+          };
+          const dot = (c: string) =>
+            `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${c};margin-right:5px;vertical-align:middle"></span>`;
+          const valCells = (fn: (g: TipSide) => string) =>
             sides
               .map(
                 (s) =>
-                  `<td style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px">${valFn(s.g)}</td>`,
+                  `<td style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px">${fn(s.g)}</td>`,
               )
               .join("");
+          // One component row across the sides; hidden when every side is ~0.
+          const compRow = (r: Row) => {
+            const vals = sides.map((s) => sideVal(s.g, r.key));
+            if (vals.every((v) => v == null || Math.abs(v) < 0.005)) return "";
+            return (
+              `<tr><td style="padding:1px 0 1px 12px;opacity:0.85">${dot(r.color)}${r.label}</td>` +
+              vals
+                .map(
+                  (v) =>
+                    `<td style="text-align:right;font-variant-numeric:tabular-nums;opacity:0.85;padding-left:14px">${
+                      v == null ? "—" : fmt(v)
+                    }</td>`,
+                )
+                .join("") +
+              `</tr>`
+            );
+          };
+          const totalRow = (label: string, rows: Row[]) =>
+            `<tr><td style="padding:1px 0;font-weight:600">${label}</td>` +
+            valCells(
+              (g) =>
+                fmt(rows.reduce((a, r) => a + Math.abs(sideVal(g, r.key) ?? 0), 0)) + " kWh",
+            ) +
+            `</tr>`;
+          const socFn = (g: TipSide) =>
+            g.soc_start == null && g.soc_end == null
+              ? "—"
+              : `${g.soc_start != null ? g.soc_start.toFixed(0) : "—"} → ${g.soc_end != null ? g.soc_end.toFixed(0) : "—"} %`;
+          const sep = `<tr><td colspan="${sides.length + 1}" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>`;
           const header =
             sides.length > 1
               ? `<tr><td></td>${sides
@@ -1162,13 +1206,17 @@ export class PowerPilotPanel extends LitElement {
               : `<tr><td></td><td style="text-align:right;opacity:0.7">${sides[0].label}</td></tr>`;
 
           return `
-            <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.5;min-width:240px">
+            <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.45;min-width:240px">
               <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}</div>
               <table style="border-collapse:collapse;width:100%">
                 ${header}
-                <tr><td style="padding:1px 0">↑ Źródła energii</td>${cells((g) => kwh(g.sources))}</tr>
-                <tr><td style="padding:1px 0">↓ Zużycie</td>${cells((g) => kwh(g.consumption))}</tr>
-                <tr><td style="padding:1px 0">SoC</td>${cells(socCell)}</tr>
+                ${totalRow("↑ Źródła energii", upRows)}
+                ${upRows.map(compRow).join("")}
+                ${sep}
+                ${totalRow("↓ Zużycie", downRows)}
+                ${downRows.map(compRow).join("")}
+                ${sep}
+                <tr><td style="padding:1px 0">SoC</td>${valCells(socFn)}</tr>
               </table>
             </div>
           `;

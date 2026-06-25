@@ -252,6 +252,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "mode": [MODE_CODE.get(d.inverter_mode, "p") for d in decisions],
             "soc": [_r(d.battery_soc, 1) for d in decisions],
             "grid": [_r(d.grid_buy_kwh, 3) for d in decisions],
+            # Planned battery flows + EV, so the chart's forecast tooltip column
+            # can be reconstructed for past hours. Captured from now on.
+            "charge": [_r(d.battery_charge_kwh, 3) for d in decisions],
+            "dischg": [_r(d.battery_discharge_kwh, 3) for d in decisions],
+            "ev": [_r(d.ev_charge_kwh, 3) for d in decisions],
             "cost": [_r(d.hour_cost, 4) for d in decisions],
             # Realized battery energy cost (no sensor exists for it) so the chart
             # can show "Cena w baterii" for past hours by reading index 0 of the
@@ -1001,30 +1006,42 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 return InverterMode.DISCHARGE
             return InverterMode.PASSTHROUGH
 
-        def _tip(
-            sources: float | None,
-            consumption: float | None,
-            soc_start: float | None,
-            soc_end: float | None,
+        def _side(
+            grid: float | None = None,
+            discharge: float | None = None,
+            base: float | None = None,
+            ev: float | None = None,
+            charge: float | None = None,
+            devices: dict | None = None,
+            soc_start: float | None = None,
+            soc_end: float | None = None,
         ) -> dict | None:
             """One side (realized or forecast) of the tooltip's split breakdown.
 
-            ``sources`` = grid import + battery discharge (the up-stack total);
-            ``consumption`` = household + EV + battery charge (the down-stack
-            total). ``None`` when nothing is known for that side.
+            Per-component values keyed so the panel can render the colored
+            position breakdown for each side: ``grid``/``discharge`` are the
+            up-stack (sources); ``base``/``devices``/``ev``/``charge`` the
+            down-stack (consumption). ``None`` when nothing is known for the side.
             """
-            if (
-                sources is None
-                and consumption is None
-                and soc_start is None
-                and soc_end is None
-            ):
+            dev = {
+                k: round(v, 3) for k, v in (devices or {}).items() if v is not None
+            }
+            scalars = [grid, discharge, base, ev, charge, soc_start, soc_end]
+            if all(v is None for v in scalars) and not dev:
                 return None
+
+            def _r(v: float | None, d: int = 3) -> float | None:
+                return round(v, d) if v is not None else None
+
             return {
-                "sources": round(sources, 3) if sources is not None else None,
-                "consumption": round(consumption, 3) if consumption is not None else None,
-                "soc_start": round(soc_start, 1) if soc_start is not None else None,
-                "soc_end": round(soc_end, 1) if soc_end is not None else None,
+                "grid": _r(grid),
+                "discharge": _r(discharge),
+                "base": _r(base),
+                "ev": _r(ev),
+                "charge": _r(charge),
+                "devices": dev,
+                "soc_start": _r(soc_start, 1),
+                "soc_end": _r(soc_end, 1),
             }
 
         hours: list[dict] = []
@@ -1072,25 +1089,38 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
             g_real, d_real = grid_import_real.get(h), bat_discharge_real.get(h)
             c_real, m_real = bat_charge_real.get(h), main_real.get(h)
-            real_sources = (
-                (g_real or 0.0) + (d_real or 0.0)
-                if (g_real is not None or d_real is not None)
-                else None
+            dev_real_sum = sum(v for v in dev_real_h.values() if v is not None)
+            base_real = (
+                max(0.0, m_real - dev_real_sum) if m_real is not None else None
             )
-            real_consumption = (
-                (m_real or 0.0) + (c_real or 0.0)
-                if (m_real is not None or c_real is not None)
-                else None
+            realized_side = _side(
+                grid=g_real,
+                discharge=d_real,
+                base=base_real,
+                charge=c_real,
+                devices=dev_real_h,
+                soc_start=prev_soc,
+                soc_end=soc_real.get(h),
+            )
+            # Forecast side reconstructed from the vintage recorded at this hour
+            # (battery flows captured only from now on → blank for old vintages).
+            sn = self.snapshots
+            forecast_side = _side(
+                grid=sn.value_at(h, "grid"),
+                discharge=sn.value_at(h, "dischg"),
+                base=base_fc,
+                ev=sn.value_at(h, "ev"),
+                charge=sn.value_at(h, "charge"),
+                devices=dev_forecast,
+                soc_start=sn.value_at(h - timedelta(hours=1), "soc"),
+                soc_end=sn.value_at(h, "soc"),
             )
             hours.append(
                 {
                     "start": h.isoformat(),
                     "is_past": True,
-                    # Whole-hour realized; no forecast side for settled past hours.
-                    "realized": _tip(
-                        real_sources, real_consumption, prev_soc, soc_real.get(h)
-                    ),
-                    "forecast": None,
+                    "realized": realized_side,
+                    "forecast": forecast_side,
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
@@ -1167,16 +1197,17 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 else None
             )
 
-            # Realized-so-far totals.
-            r_sources = (
-                (cur_grid or 0.0) + (cur_discharge or 0.0)
-                if (cur_grid is not None or cur_discharge is not None)
-                else None
-            )
-            r_consumption = (
-                (cur_main or 0.0) + (cur_charge or 0.0)
-                if (cur_main is not None or cur_charge is not None)
-                else None
+            # Realized-so-far per-component breakdown.
+            cur_dev_sum = sum(v for v in cur_devices.values() if v is not None)
+            cur_base = max(0.0, cur_main - cur_dev_sum) if cur_main is not None else None
+            realized_side = _side(
+                grid=cur_grid,
+                discharge=cur_discharge,
+                base=cur_base,
+                charge=cur_charge,
+                devices=cur_devices,
+                soc_start=prev_soc,
+                soc_end=live_soc,
             )
             # Whole-hour forecast from the plan's current-hour decision.
             cur_dec = cur_slot = None
@@ -1185,13 +1216,17 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     if _sl.start == now:
                         cur_slot, cur_dec = _sl, _dc
                         break
-            fc_group = None
+            forecast_side = None
             if cur_dec is not None:
-                fc_group = _tip(
-                    (cur_dec.grid_buy_kwh or 0.0) + (cur_dec.battery_discharge_kwh or 0.0),
-                    cur_slot.total_consumption_kwh + (cur_dec.battery_charge_kwh or 0.0),
-                    prev_soc,
-                    cur_dec.battery_soc,
+                forecast_side = _side(
+                    grid=cur_dec.grid_buy_kwh,
+                    discharge=cur_dec.battery_discharge_kwh,
+                    base=cur_slot.base_consumption_kwh,
+                    ev=cur_dec.ev_charge_kwh,
+                    charge=cur_dec.battery_charge_kwh,
+                    devices=dev_forecast,
+                    soc_start=prev_soc,
+                    soc_end=cur_dec.battery_soc,
                 )
             hours.append(
                 {
@@ -1199,8 +1234,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "is_past": True,
                     "partial": True,
                     "partial_until": real_now.isoformat(),
-                    "realized": _tip(r_sources, r_consumption, prev_soc, live_soc),
-                    "forecast": fc_group,
+                    "realized": realized_side,
+                    "forecast": forecast_side,
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
@@ -1263,14 +1298,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "start": slot.start.isoformat(),
                         "is_past": False,
                         "realized": None,
-                        "forecast": _tip(
-                            (decision.grid_buy_kwh or 0.0)
-                            + (decision.battery_discharge_kwh or 0.0),
-                            slot.total_consumption_kwh
-                            + (decision.battery_charge_kwh or 0.0)
-                            + (decision.ev_charge_kwh or 0.0),
-                            prev_soc,
-                            decision.battery_soc,
+                        "forecast": _side(
+                            grid=decision.grid_buy_kwh,
+                            discharge=decision.battery_discharge_kwh,
+                            base=slot.base_consumption_kwh,
+                            ev=decision.ev_charge_kwh,
+                            charge=decision.battery_charge_kwh,
+                            devices=dev_forecast,
+                            soc_start=prev_soc,
+                            soc_end=decision.battery_soc,
                         ),
                         "buy_price": slot.buy_price,
                         "distribution_price_kwh": slot.distribution_price_kwh,

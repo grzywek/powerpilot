@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .battery import BatteryModel
@@ -162,8 +162,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.events.clear()
         await self.registry.async_clear_all()
 
-    def _build_battery(self) -> BatteryModel:
-        soc = self._read_soc()
+    def _build_battery(self, soc: float) -> BatteryModel:
         return BatteryModel(
             capacity_kwh=float(self.config[CONF_BATTERY_CAPACITY_KWH]),
             charge_efficiency=float(self.config[CONF_CHARGE_EFFICIENCY]),
@@ -175,16 +174,23 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             energy_cost=self._battery_energy_cost,
         )
 
-    def _read_soc(self) -> float:
+    def _read_soc(self) -> float | None:
+        """Live battery SoC (%) from the sensor, or ``None`` when unavailable.
+
+        Never fabricates a value — a missing/unparseable reading returns ``None``
+        so the optimizer holds the previous plan rather than planning from a
+        guessed SoC (a wrong seed silently mis-plans charge/discharge).
+        """
         entity_id = self.config.get(CONF_SOC_SENSOR)
-        if entity_id:
-            state = self.hass.states.get(entity_id)
-            if state is not None:
-                try:
-                    return float(state.state)
-                except (TypeError, ValueError):
-                    pass
-        return 50.0
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return None
+        try:
+            return float(state.state)
+        except (TypeError, ValueError):
+            return None
 
     def _build_optimizer(self) -> Optimizer:
         curve = ChargeCurve(
@@ -209,11 +215,28 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
     async def _async_update_data(self) -> Plan:
         await self.registry.async_update_all()
 
+        # The plan is only as good as its starting SoC. If the sensor is
+        # momentarily unavailable, never seed from a fabricated value — keep the
+        # last good plan and retry next cycle (a wrong seed mis-plans the battery).
+        soc = self._read_soc()
+        if soc is None:
+            if self.data is not None:
+                self.log_info(
+                    "optimizer",
+                    "Czujnik SoC chwilowo niedostępny — trzymam poprzedni plan, "
+                    "ponowię w kolejnym cyklu.",
+                    extra={"soc_sensor": self.config.get(CONF_SOC_SENSOR)},
+                )
+                return self.data
+            raise UpdateFailed(
+                "Czujnik SoC niedostępny — nie mogę policzyć planu bez stanu baterii."
+            )
+
         forecast = await self.hass.async_add_executor_job(self.forecast_builder.build)
         ev_request = self.ev.get_request(forecast)
         reminders = self.registry.collect_reminders()
 
-        battery = self._build_battery()
+        battery = self._build_battery(soc)
         optimizer = self._build_optimizer()
         plan = optimizer.optimize(forecast, battery, ev_request, reminders)
 

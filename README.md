@@ -68,6 +68,49 @@ the commit messages (conventional commits: `feat:` → minor, `feat!:` /
 those releases, so each change shows up as a new selectable version to install —
 no manual version bumping required.
 
+## EV charging
+
+PowerPilot can schedule EV charging into the cheapest hours and react to a
+calendar. Everything is optional and configured in the **EV** step of the config
+flow (Settings → Devices & Services → PowerPilot → Configure → 🚗 EV).
+
+### Sensors
+
+| Field | Type | Used for |
+|-------|------|----------|
+| EV SoC sensor | `%` | current charge level — sizes how much energy is still needed |
+| EV target SoC sensor | `%` | the car's own charge target; becomes the default goal (instead of a fixed 80 %) |
+| Charger connected | on/off | **availability gate** — the car only charges while plugged in (overrides the location tracker) |
+| Charging now | on/off | plan-vs-reality check — warns when a charging window is due but the charger draws no power |
+| Energy added this session | `kWh` (increasing) | how much energy the current session has delivered (shown in the panel) |
+| EV location (home/away) | tracker | fallback availability signal when no "charger connected" sensor is set |
+
+With neither a "charger connected" sensor nor a location tracker, the car is
+assumed to be available.
+
+### Calendar plans
+
+Point PowerPilot at any Home Assistant `calendar.*` entity (Google Calendar,
+CalDAV/iCloud, Local Calendar, …) and pick a **keyword** (default `Kotek`). The
+keyword is your car's name in event titles; only events whose title starts with
+it are read. Two kinds of events:
+
+| Event title | Meaning |
+|-------------|---------|
+| `Kotek 100%` at 12:00–13:00 | **Deadline target** — be at 100 % SoC by the event **start** (12:00). The optimizer picks the cheapest available hours before that deadline. |
+| `Kotek 50%` | Same, but to 50 %. |
+| `Kotek` (no percentage) | **Forced window** — charge at full charger power for every hour the event covers, no SoC limit. |
+
+So a **percentage** lets the optimizer choose *when* to charge (cheapest hours
+before the deadline), while a **bare** event lets you choose the hours yourself
+(charge flat-out during the window). Earlier deadlines are honoured before later
+ones, and charging never pushes the pack past 100 %. When the calendar has no
+matching upcoming events, PowerPilot simply tops the car up to the target SoC in
+the cheapest hours.
+
+The planned charging, upcoming deadlines and manual windows are shown on the
+panel's **Status** tab.
+
 ## Status
 
 Implemented: **Stage 0** (foundation — models, battery cost-after-losses, module
@@ -75,8 +118,11 @@ pipeline, heuristic optimizer, config flow, entities), **Stage 1** (prądcast.pl
 price source with confirmed/forecast split + permanent price archive and
 weighted weekday+hour estimate for the tail), **Stage 2**
 (recorder-based consumption learning with per-device breakdown), and **Stage 6**
-(custom Lit sidebar panel + WebSocket API + dashboards).
+(custom Lit sidebar panel + WebSocket API + dashboards). **Stage 3** is partly
+done: calendar-driven EV charging (deadline targets + manual windows) and charger
+telemetry sensors.
 
-Pending: Stage 3 (EV + Apple calendar), Stage 4 (weather/climate), Stage 5
+Pending: rest of Stage 3 (trip-distance/away strategies), Stage 4
+(weather/climate), Stage 5
 (LP/MILP optimizer). Full plan in [docs/ROADMAP.md](docs/ROADMAP.md); resume guide
 for a fresh session in [docs/HANDOVER.md](docs/HANDOVER.md).

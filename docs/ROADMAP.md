@@ -40,12 +40,17 @@ integration installable and working.
       replace its learned profile instead of adding it back.
 
 ## Stage 3 – EV + calendar
-- [ ] EV module: SoC, home/away location, km-per-charge, weekly off-calendar km.
+- [x] EV module: SoC, home/away location, km-per-charge, weekly off-calendar km.
+- [x] Charger telemetry: connected (availability gate), charging (plan-vs-reality),
+      energy added (session kWh), target SoC (default charge goal).
 - [ ] 3-phase charger sharing one phase with the inverter → power-limit coupling.
-- [ ] Apple Calendar (CalDAV) read → trip distances (home → event → home).
+- [x] Calendar read (any HA `calendar.*` entity: Google, CalDAV/iCloud, Local).
+      Keyword events: `<kw> NN%` = deadline target (be at NN% by event start,
+      optimizer picks cheapest hours); bare `<kw>` = forced full-power window.
+- [ ] Trip distances (home → event → home) sizing the pre-departure energy need.
 - [ ] All-day "away" events keep SoC in a lower band and wait for better prices.
 - [ ] Hourly events (washing 3 kWh/h, ironing 2 kWh/h) injected as loads.
-- [ ] Reminders (notify to plug in the car).
+- [x] Reminders (notify to plug in the car; charger-idle-but-due warning).
 
 ## Stage 4 – Weather & climate
 - [ ] Hourly temperature forecast module.

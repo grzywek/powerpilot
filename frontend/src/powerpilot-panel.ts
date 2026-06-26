@@ -1193,10 +1193,14 @@ export class PowerPilotPanel extends LitElement {
           };
           const totalRow = (label: string, rows: Row[]) =>
             `<tr><td style="padding:1px 0;font-weight:600">${label}</td>` +
-            valCells(
-              (g) =>
-                fmt(rows.reduce((a, r) => a + Math.abs(sideVal(g, r.key) ?? 0), 0)) + " kWh",
-            ) +
+            sides
+              .map(
+                (s) =>
+                  `<td style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px;font-weight:600">${
+                    fmt(rows.reduce((a, r) => a + Math.abs(sideVal(s.g, r.key) ?? 0), 0))
+                  } kWh</td>`,
+              )
+              .join("") +
             `</tr>`;
           const socFn = (g: TipSide) =>
             g.soc_start == null && g.soc_end == null

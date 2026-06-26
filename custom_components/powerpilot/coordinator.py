@@ -915,30 +915,59 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         return {"date": target.isoformat(), "hours": hours}
 
     async def _recent_soc(self, start: datetime, end: datetime) -> dict:
-        """Hourly battery SoC (%) from the SoC sensor's statistics for a window."""
-        from homeassistant.components.recorder import get_instance
-        from homeassistant.components.recorder.statistics import (
-            statistics_during_period,
-        )
+        """Battery SoC (%) at each hour's END, sampled from the sensor's history.
+
+        ``out[h]`` is the instantaneous SoC at ``h + 1h`` — the boundary the
+        battery crosses *leaving* hour ``h`` — so ``soc_start``/``soc_end`` line
+        up with the actual sensor readings. (The hourly **mean** would smear a
+        charging ramp across the hour: a battery going 4 %→28 % over the 13:00
+        hour means ~15 % and would show "4 → 15" instead of "4 → 28".) Returns
+        ``{}`` when the sensor has no usable history for the window.
+        """
+        from homeassistant.components.recorder import get_instance, history
 
         from .const import CONF_SOC_SENSOR
 
         entity_id = self.config.get(CONF_SOC_SENSOR)
         if not entity_id:
             return {}
-        rows = await get_instance(self.hass).async_add_executor_job(
-            statistics_during_period, self.hass, start, end, {entity_id}, "hour", None, {"mean"}
+
+        changes = await get_instance(self.hass).async_add_executor_job(
+            history.state_changes_during_period,
+            self.hass,
+            start,
+            end,
+            entity_id,
+            True,  # no_attributes
+            False,  # descending
+            None,  # limit
+            True,  # include_start_time_state
         )
+        series: list[tuple[datetime, float]] = []
+        for st in changes.get(entity_id, []):
+            try:
+                series.append((st.last_updated, float(st.state)))
+            except (ValueError, TypeError):
+                continue  # "unavailable" / "unknown"
+
+        if not series:
+            return {}
+
+        series.sort(key=lambda item: item[0])
         out: dict = {}
-        for row in rows.get(entity_id, []):
-            value = row.get("mean")
-            if value is None:
-                continue
-            ts = row["start"]
-            if isinstance(ts, (int, float)):
-                ts = dt_util.utc_from_timestamp(ts)
-            hour = dt_util.as_local(ts).replace(minute=0, second=0, microsecond=0)
-            out[hour] = float(value)
+        boundary = dt_util.as_local(start).replace(minute=0, second=0, microsecond=0)
+        last = dt_util.as_local(end).replace(minute=0, second=0, microsecond=0)
+        idx = 0
+        last_val: float | None = None
+        while boundary <= last:
+            cutoff = dt_util.as_utc(boundary)
+            while idx < len(series) and series[idx][0] <= cutoff:
+                last_val = series[idx][1]
+                idx += 1
+            if last_val is not None:
+                # SoC at this boundary is the END-of-hour value for the prior hour.
+                out[boundary - timedelta(hours=1)] = last_val
+            boundary += timedelta(hours=1)
         return out
 
     async def get_series(

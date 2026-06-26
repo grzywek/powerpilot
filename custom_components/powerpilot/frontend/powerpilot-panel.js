@@ -1202,10 +1202,11 @@ rect.legend-mouseover-inactive,
                   <th>Typ</th>
                   <th>Źródło</th>
                   <th>Pobrano</th>
-                  <th>Energia<br /><span class="muted">z VAT</span></th>
-                  <th>Dystrybucja<br /><span class="muted">z VAT</span></th>
+                  <th>TGE<br /><span class="muted">netto</span></th>
+                  <th>Marża<br /><span class="muted">netto</span></th>
+                  <th>Dystrybucja<br /><span class="muted">netto</span></th>
+                  <th>Podatki<br /><span class="muted">akcyza+VAT</span></th>
                   <th>Cena pełna<br /><span class="muted">z VAT</span></th>
-                  <th>Koszt stały<br /><span class="muted">PLN/h z VAT</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -1215,7 +1216,7 @@ rect.legend-mouseover-inactive,
           </div>
           <div class="prices-legend">
             ${["certain","forecast","estimated"].map(f=>W`<span class="badge" style=${"background:"+ri[f].color}>${ri[f].label}</span>`)}
-            <span class="muted">Wszystkie ceny brutto (z VAT). „szacowana” = średnia ważona z 3 ostatnich tygodni — najedź na typ, by zobaczyć obliczenie.</span>
+            <span class="muted">TGE / marża / dystrybucja są netto; „podatki” = akcyza + VAT, „cena pełna” = brutto. Opłata stała (abonamentowa) rozliczana osobno, poza ceną/kWh. „szacowana” = średnia ważona z 3 ostatnich tygodni — najedź na typ, by zobaczyć obliczenie.</span>
           </div>
         `:W`<div class="empty">Brak cen dla wybranego dnia — archiwum jeszcze nie sięga tak daleko.</div>`:W`<div class="empty">${this._pricesLoading?"\u0141adowanie\u2026":"Brak danych."}</div>`;return W`
       <div class="card">
@@ -1223,16 +1224,17 @@ rect.legend-mouseover-inactive,
         ${c}
         ${p}
       </div>
-    `}_renderPriceRow(e,s,i,a){let o=e.type?ri[e.type]:null,r=e.source?yo[e.source]??e.source:"\u2014",n=o?W`<span class="badge" style=${"background:"+o.color} title=${this._priceTooltip(e)}>${o.label}</span>`:W`<span class="muted">—</span>`;return W`
+    `}_renderPriceRow(e,s,i,a){let o=e.type?ri[e.type]:null,r=e.source?yo[e.source]??e.source:"\u2014",n=o?W`<span class="badge" style=${"background:"+o.color} title=${this._priceTooltip(e)}>${o.label}</span>`:W`<span class="muted">—</span>`,l=d=>d==null?"\u2014":d.toFixed(3),c=e.tge_kwh!=null,h=c&&e.excise_kwh!=null?`akcyza ${e.excise_kwh.toFixed(3)} + VAT ${e.vat_rate!=null?Math.round(e.vat_rate*100):""}%`:"";return W`
       <tr>
         <td>${s(e.start)}</td>
         <td>${n}</td>
         <td class="muted">${r}</td>
         <td class="muted">${i(e.fetched_at)}</td>
-        <td>${a(e.energy_price_kwh)}</td>
-        <td>${a(e.distribution_price_kwh)}</td>
+        <td>${c?l(e.tge_kwh):W`<span class="muted">—</span>`}</td>
+        <td>${c?l(e.markup_kwh):W`<span class="muted">—</span>`}</td>
+        <td>${l(c?e.distribution_net_kwh:e.distribution_price_kwh)}</td>
+        <td class="muted" title=${h}>${c?a(e.taxes_kwh??null):W`<span class="muted">—</span>`}</td>
         <td class="bold">${a(e.total_price_kwh)}</td>
-        <td class="muted">${a(e.fixed_cost_hourly)}</td>
       </tr>
     `}_priceTooltip(e){return e.type==="certain"?"Cena pewna (wi\u0105\u017C\u0105ca RDN) \u2014 nie zmienia si\u0119 ju\u017C.":e.type==="forecast"?`Prognoza ze \u017Ar\xF3d\u0142a \u2014 od\u015Bwie\u017Cana co kilka godzin.${e.p10!=null&&e.p90!=null?` Przedzia\u0142 P10\u2013P90: ${e.p10.toFixed(2)}\u2013${e.p90.toFixed(2)} PLN/kWh.`:""}`:e.type==="estimated"&&e.estimate_breakdown?["Cena szacowana = \u015Brednia wa\u017Cona tej samej godziny w tym samym dniu tygodnia z ostatnich 3 tygodni:",...e.estimate_breakdown.map(i=>{let a=i.value==null?"brak":`${i.value.toFixed(2)} PLN/kWh`;return`\u2022 ${i.date} (\u2212${i.weeks_ago} tyg., waga ${i.weight}): ${a}`}),"Wagi s\u0105 normalizowane do dost\u0119pnych pr\xF3bek."].join(`
 `):""}_fmtRun(e){if(!e)return"\u2014";let s=new Date(e);return isNaN(s.getTime())?"\u2014":s.toLocaleString("pl-PL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}_renderSimulations(){let e=this._snapshotRuns;if(!e.length)return W`<div class="card empty">

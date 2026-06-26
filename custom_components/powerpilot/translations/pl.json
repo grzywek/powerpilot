@@ -37,7 +37,9 @@
           "buy_price_sensor": "Sensor ceny zakupu",
           "pradcast_api_key": "Klucz API Pradcast",
           "price_markup": "Narzut sprzedawcy netto (PLN/kWh)",
-          "price_vat": "Mnożnik VAT",
+          "price_vat": "Mnożnik VAT (np. 1.23 = 23%)",
+          "excise_kwh": "Akcyza netto (PLN/kWh)",
+          "price_rounding": "Zaokrąglanie ceny pełnej",
           "price_refresh_hours": "Częstotliwość pobierania źródła (h)"
         }
       },
@@ -126,7 +128,9 @@
           "buy_price_sensor": "Sensor ceny zakupu",
           "pradcast_api_key": "Klucz API Pradcast",
           "price_markup": "Narzut sprzedawcy netto (PLN/kWh)",
-          "price_vat": "Mnożnik VAT",
+          "price_vat": "Mnożnik VAT (np. 1.23 = 23%)",
+          "excise_kwh": "Akcyza netto (PLN/kWh)",
+          "price_rounding": "Zaokrąglanie ceny pełnej",
           "price_refresh_hours": "Częstotliwość pobierania źródła (h)"
         }
       },
@@ -199,6 +203,13 @@
       "options": {
         "sensor": "Sensor Home Assistant",
         "pradcast": "API prądcast.pl"
+      }
+    },
+    "price_rounding": {
+      "options": {
+        "per_bucket": "Per kubełek (prąd/dystrybucja/podatki zaokrąglane osobno — jak u większości sprzedawców)",
+        "total": "Suma (jedna kwota brutto, zaokrąglona raz)",
+        "none": "Bez zaokrąglania (pełna precyzja)"
       }
     }
   },

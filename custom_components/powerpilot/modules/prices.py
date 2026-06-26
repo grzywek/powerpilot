@@ -21,9 +21,14 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import (
+    CONF_EXCISE_KWH,
+    CONF_PRICE_MARKUP,
     CONF_PRICE_REFRESH_HOURS,
+    CONF_PRICE_ROUNDING,
     CONF_PRICE_SOURCE,
+    CONF_PRICE_VAT,
     DOMAIN,
+    PRICE_ROUNDING_PER_BUCKET,
     ESTIMATE_WEEKLY_WEIGHTS,
     PRICE_SOURCE_PRADCAST,
     PRICE_SOURCE_SENSOR,
@@ -85,8 +90,17 @@ class PriceArchive:
         fetched_at: str,
         p10: float | None = None,
         p90: float | None = None,
+        formula: dict[str, Any] | None = None,
     ) -> bool:
-        """Insert/refresh an entry honouring layering. Returns True if it changed."""
+        """Insert/refresh an entry honouring layering. Returns True if it changed.
+
+        ``formula`` (optional) stamps the net components + pricing parameters in
+        effect when this hour was fetched (``tge``/``markup``/``excise``/``vat``/
+        ``rounding``). It is frozen on the entry so the displayed breakdown is
+        reconstructed from the values used at fetch time — later config changes
+        never rewrite already-archived hours. Entries without a stamp (legacy or
+        sensor source) render as a single energy bucket.
+        """
         key = self._key(hour_start)
         existing = self._entries.get(key)
         if (
@@ -102,12 +116,14 @@ class PriceArchive:
             and existing.get("type") == price_type
             and existing.get("p10") == p10
             and existing.get("p90") == p90
+            and existing.get("formula") == formula
         ):
-            # Same price + provenance → keep the ORIGINAL fetch time. Re-fetching
-            # an unchanged price (e.g. a certain price seen again after a restart)
-            # must not bump "pobrano"; only a real value/type change does.
+            # Same price + provenance + pricing formula → keep the ORIGINAL fetch
+            # time. Re-fetching an unchanged price (e.g. a certain price seen again
+            # after a restart) must not bump "pobrano"; only a real value/type/
+            # formula change does (so a config tweak re-stamps the breakdown).
             return False
-        self._entries[key] = {
+        entry = {
             "energy": energy,
             "type": price_type,
             "source": source,
@@ -115,6 +131,12 @@ class PriceArchive:
             "p10": p10,
             "p90": p90,
         }
+        if formula is not None:
+            entry["formula"] = formula
+        elif existing is not None and existing.get("formula") is not None:
+            # Preserve a prior stamp if this refresh didn't supply one.
+            entry["formula"] = existing["formula"]
+        self._entries[key] = entry
         return True
 
     def __len__(self) -> int:
@@ -315,7 +337,12 @@ class PriceModule(PowerPilotModule):
                     if price is None:
                         continue
                     if self.archive.record(
-                        hour, price, PRICE_TYPE_CERTAIN, PRICE_SOURCE_PRADCAST, stamp
+                        hour,
+                        price,
+                        PRICE_TYPE_CERTAIN,
+                        PRICE_SOURCE_PRADCAST,
+                        stamp,
+                        formula=self._formula_for(data.tge.get(hour)),
                     ):
                         dirty = True
                 if dirty:
@@ -329,6 +356,23 @@ class PriceModule(PowerPilotModule):
         probe = dt_util.start_of_local_day(day) + timedelta(hours=12)
         return self.archive.get(probe) is not None
 
+    def _formula_for(self, tge: float | None) -> dict[str, Any] | None:
+        """Net components + pricing params to stamp on a freshly-fetched hour.
+
+        Returns ``None`` when there's no raw wholesale price to decompose (e.g.
+        the sensor source) — such hours archive as a single energy bucket.
+        """
+        if tge is None:
+            return None
+        vat_mul = float(self.config.get(CONF_PRICE_VAT, 1.0) or 1.0)
+        return {
+            "tge": float(tge),
+            "markup": float(self.config.get(CONF_PRICE_MARKUP, 0.0) or 0.0),
+            "excise": float(self.config.get(CONF_EXCISE_KWH, 0.0) or 0.0),
+            "vat": round(vat_mul - 1.0, 6),  # store as a rate (0.23), not a multiplier
+            "rounding": self.config.get(CONF_PRICE_ROUNDING, PRICE_ROUNDING_PER_BUCKET),
+        }
+
     async def _ingest_into_archive(self, fetched_at: datetime) -> None:
         """Fold the latest fetch into the permanent archive (layered)."""
         source_label = (
@@ -341,7 +385,14 @@ class PriceModule(PowerPilotModule):
         for hour, energy in self._data.buy.items():
             is_confirmed = hour in self._data.confirmed_hours
             price_type = PRICE_TYPE_CERTAIN if is_confirmed else PRICE_TYPE_FORECAST
-            if self.archive.record(hour, energy, price_type, source_label, stamp):
+            if self.archive.record(
+                hour,
+                energy,
+                price_type,
+                source_label,
+                stamp,
+                formula=self._formula_for(self._data.tge.get(hour)),
+            ):
                 dirty = True
         if dirty:
             self.archive.prune()

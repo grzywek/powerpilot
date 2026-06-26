@@ -55,18 +55,18 @@ class HourSlot:
 
     @property
     def total_price_kwh(self) -> float | None:
-        """Full gross price the user sees: energy + distribution + the flat fixed
-        charge for the hour (PLN/h folded in directly), or ``None`` if a price
-        component is missing. Display-only — the optimizer prices energy and
-        distribution separately and adds the fixed charge as a flat per-hour cost.
+        """Full gross price per kWh the user sees: energy + distribution, or
+        ``None`` if a component is missing.
+
+        Both ``buy_price`` (energy side, incl. seller markup, akcyza and VAT) and
+        ``distribution_price_kwh`` are gross. The flat fixed monthly charge is
+        **not** folded in — sellers bill it as a separate monthly position, so it
+        is excluded from the per-kWh price (``distribution_fixed_hourly`` is still
+        tracked for total-cost accounting by the optimizer).
         """
         if self.buy_price is None or self.distribution_price_kwh is None:
             return None
-        return (
-            self.buy_price
-            + self.distribution_price_kwh
-            + (self.distribution_fixed_hourly or 0.0)
-        )
+        return self.buy_price + self.distribution_price_kwh
 
 
 @dataclass

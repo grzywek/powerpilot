@@ -386,6 +386,16 @@ class TariffModule(PowerPilotModule):
         price, _, _ = self._resolve_price(slot_dt, day_offset)
         return price
 
+    def vat_rate_for(self, hour_start: datetime) -> float | None:
+        """Distribution VAT rate (e.g. 0.23) of the tariff active on ``hour_start``.
+
+        Lets the price-archive view back the net distribution price out of the
+        gross snapshot (``net = gross / (1 + vat_rate)``) for the per-bucket
+        breakdown. ``None`` when no tariff is active.
+        """
+        tariff = tariff_for_day(self._tariffs, hour_start.date())
+        return None if tariff is None else tariff.vat_rate
+
     def fixed_hourly_for(self, hour_start: datetime) -> float | None:
         """Flat fixed distribution charge for this hour (PLN, gross).
 

@@ -27,6 +27,7 @@ from homeassistant.util import dt as dt_util
 
 from ..const import (
     CONF_BUY_PRICE_SENSOR,
+    CONF_EXCISE_KWH,
     CONF_PRADCAST_API_KEY,
     CONF_PRICE_MARKUP,
     CONF_PRICE_VAT,
@@ -44,9 +45,16 @@ _VALUE_KEYS = ("value", "price", "total", "cost")
 
 @dataclass
 class PriceData:
-    """Result of a price-source fetch."""
+    """Result of a price-source fetch.
+
+    ``buy`` is the gross energy-side price (PLN/kWh) the optimizer uses.
+    ``tge`` holds the raw net wholesale price per hour for the sources that
+    expose it (Pradcast) so the display can break the bill down into TGE +
+    marża + akcyza + VAT; sensor sources leave it empty.
+    """
 
     buy: dict[datetime, float] = field(default_factory=dict)
+    tge: dict[datetime, float] = field(default_factory=dict)
     confirmed_hours: set[datetime] = field(default_factory=set)
     levels: dict[datetime, str] = field(default_factory=dict)
     confidence: dict[datetime, str] = field(default_factory=dict)
@@ -160,6 +168,9 @@ class PradcastPriceSource(PriceSource):
                 if start in data.buy:
                     continue
                 data.buy[start] = float(buy)
+                tge = entry.get("tge")
+                if tge is not None:
+                    data.tge[start] = float(tge)
 
     async def async_fetch_days(self, days: list[date]) -> PriceData:
         """Fetch an explicit list of days (used for the forward horizon and backfill)."""
@@ -171,6 +182,7 @@ class PradcastPriceSource(PriceSource):
 
         markup = float(self.config.get(CONF_PRICE_MARKUP, 0.0) or 0.0)
         vat = float(self.config.get(CONF_PRICE_VAT, 1.0) or 1.0)
+        excise = float(self.config.get(CONF_EXCISE_KWH, 0.0) or 0.0)
         session = async_get_clientsession(self.hass)
 
         results = await asyncio.gather(
@@ -180,7 +192,7 @@ class PradcastPriceSource(PriceSource):
         for day, payload in zip(days, results):
             if isinstance(payload, Exception) or not payload:
                 continue
-            self._merge_day(data, day, payload, markup, vat)
+            self._merge_day(data, day, payload, markup, vat, excise)
         return data
 
     async def _fetch_day(
@@ -216,6 +228,7 @@ class PradcastPriceSource(PriceSource):
             return {}
         markup = float(self.config.get(CONF_PRICE_MARKUP, 0.0) or 0.0)
         vat = float(self.config.get(CONF_PRICE_VAT, 1.0) or 1.0)
+        excise = float(self.config.get(CONF_EXCISE_KWH, 0.0) or 0.0)
         session = async_get_clientsession(self.hass)
         payload = await self._get_json(
             session, api_key, f"{PRADCAST_BASE}/prices/forecasts/{target_date.isoformat()}"
@@ -224,7 +237,7 @@ class PradcastPriceSource(PriceSource):
             return {}
 
         def _retail(value):
-            return (float(value) + markup) * vat if value is not None else None
+            return (float(value) + markup + excise) * vat if value is not None else None
 
         out: dict[str, list[dict]] = {}
         for horizon, block in (payload.get("forecasts") or {}).items():
@@ -235,6 +248,7 @@ class PradcastPriceSource(PriceSource):
                 series.append(
                     {
                         "hour": int(entry["hour"]),
+                        "tge": float(entry["price_kwh"]),
                         "buy": _retail(entry["price_kwh"]),
                         "p10": _retail(entry.get("p10")),
                         "p90": _retail(entry.get("p90")),
@@ -246,7 +260,12 @@ class PradcastPriceSource(PriceSource):
 
     @staticmethod
     def _merge_day(
-        data: PriceData, day: date, payload: dict, markup: float, vat: float
+        data: PriceData,
+        day: date,
+        payload: dict,
+        markup: float,
+        vat: float,
+        excise: float = 0.0,
     ) -> None:
         # ``horizon`` is set (D+1/D+2/D+3) only for forecast days; null = confirmed.
         confirmed = not payload.get("horizon")
@@ -257,8 +276,9 @@ class PradcastPriceSource(PriceSource):
             if hour_index is None or price_kwh is None:
                 continue
             start = dt_util.start_of_local_day(day) + timedelta(hours=int(hour_index))
-            retail = (float(price_kwh) + markup) * vat
+            retail = (float(price_kwh) + markup + excise) * vat
             data.buy[start] = retail
+            data.tge[start] = float(price_kwh)
             if confirmed:
                 data.confirmed_hours.add(start)
             level = entry.get("level")

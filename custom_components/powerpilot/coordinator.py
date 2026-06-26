@@ -41,6 +41,7 @@ from .const import (
     InverterMode,
     MODE_CODE,
     MODE_CODE_INV,
+    PRICE_ROUNDING_PER_BUCKET,
     PRICE_TYPE_CERTAIN,
     PRICE_TYPE_ESTIMATED,
     PRICE_TYPE_FORECAST,
@@ -48,6 +49,7 @@ from .const import (
     PTYPE_CODE_INV,
     STORAGE_VERSION_SNAPSHOTS,
 )
+from . import pricing
 from .forecast import ForecastBuilder
 from .models import Plan, tariff_for_day
 from .modules.snapshots import SnapshotStore
@@ -295,9 +297,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             hour_start = (start + timedelta(hours=i)) if start else None
             buy = _at("buy", i)
             dist = _at("dist", i)
-            fixed = self.tariff.fixed_hourly_for(hour_start) if hour_start else None
+            # Per-kWh price excludes the fixed monthly charge (billed separately).
             total = (
-                buy + dist + (fixed or 0.0)
+                buy + dist
                 if (buy is not None and dist is not None)
                 else None
             )
@@ -845,30 +847,71 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     ]
                 fetched_at = None
 
-            dist = self.tariff.distribution_for(hour)
-            fixed_hourly = self.tariff.fixed_hourly_for(hour)
-            total = (
-                energy + dist + (fixed_hourly or 0.0)
-                if (energy is not None and dist is not None)
-                else None
-            )
-            hours.append(
-                {
-                    "start": hour.isoformat(),
-                    "type": price_type,
-                    "source": source,
-                    "fetched_at": fetched_at,
-                    "energy_price_kwh": _r(energy),
-                    "distribution_price_kwh": _r(dist),
-                    "total_price_kwh": _r(total),
-                    # Flat fixed distribution charge for this hour (PLN/h, gross),
-                    # i.e. the monthly standing charge spread over the month.
-                    "fixed_cost_hourly": _r(fixed_hourly),
-                    "p10": _r(p10),
-                    "p90": _r(p90),
-                    "estimate_breakdown": breakdown,
-                }
-            )
+            dist = self.tariff.distribution_for(hour)  # gross PLN/kWh
+            formula = entry.get("formula") if entry is not None else None
+
+            row = {
+                "start": hour.isoformat(),
+                "type": price_type,
+                "source": source,
+                "fetched_at": fetched_at,
+                "p10": _r(p10),
+                "p90": _r(p90),
+                "estimate_breakdown": breakdown,
+            }
+
+            if formula is not None and dist is not None:
+                # New-format hour: rebuild the seller-style breakdown from the
+                # net components + parameters frozen at fetch time, so changing
+                # the config later never rewrites this row.
+                dist_vat = self.tariff.vat_rate_for(hour)
+                dist_net = dist / (1.0 + dist_vat) if dist_vat else dist
+                bd = pricing.assemble(
+                    tge=formula.get("tge"),
+                    markup=formula.get("markup", 0.0),
+                    dist_net=dist_net,
+                    excise=formula.get("excise", 0.0),
+                    vat_rate=formula.get("vat", 0.0),
+                    rounding=formula.get("rounding", PRICE_ROUNDING_PER_BUCKET),
+                    dist_vat_rate=dist_vat,
+                )
+                row.update(
+                    {
+                        # Gross per-side values kept for the chart's stacked bars.
+                        "energy_price_kwh": _r(bd["energy_gross"]),
+                        "distribution_price_kwh": _r(dist),
+                        "total_price_kwh": _r(bd["total"], 2),
+                        "fixed_cost_hourly": None,
+                        # Net cost components + combined tax bucket (TGE / marża /
+                        # dystrybucja / akcyza / podatki) for the breakdown tooltip.
+                        "tge_kwh": _r(bd["tge"]),
+                        "markup_kwh": _r(bd["markup"]),
+                        "distribution_net_kwh": _r(dist_net),
+                        "excise_kwh": _r(bd["excise"]),
+                        "taxes_kwh": _r(bd["taxes"], 2),
+                        "vat_rate": formula.get("vat", 0.0),
+                    }
+                )
+            else:
+                # Legacy / estimated / sensor hour: render exactly as before
+                # (single energy bucket, fixed charge folded in) so history that
+                # predates the new pricing model is preserved unchanged.
+                fixed_hourly = self.tariff.fixed_hourly_for(hour)
+                total = (
+                    energy + dist + (fixed_hourly or 0.0)
+                    if (energy is not None and dist is not None)
+                    else None
+                )
+                row.update(
+                    {
+                        "energy_price_kwh": _r(energy),
+                        "distribution_price_kwh": _r(dist),
+                        "total_price_kwh": _r(total),
+                        "fixed_cost_hourly": _r(fixed_hourly),
+                    }
+                )
+
+            hours.append(row)
         return {"date": target.isoformat(), "hours": hours}
 
     async def _recent_soc(self, start: datetime, end: datetime) -> dict:
@@ -1090,9 +1133,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
             buy_price = self.prices.price_at(h)
             dist_price = self.tariff.snapshot_for(h)
-            fixed_hourly = self.tariff.fixed_hourly_for(h)
+            # Per-kWh price excludes the fixed monthly charge (kept separately).
             total_price = (
-                buy_price + dist_price + (fixed_hourly or 0.0)
+                buy_price + dist_price
                 if buy_price is not None and dist_price is not None
                 else None
             )
@@ -1200,9 +1243,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             }
             buy_price = self.prices.price_at(now)
             dist_price = self.tariff.distribution_for(now)
-            fixed_hourly = self.tariff.fixed_hourly_for(now)
+            # Per-kWh price excludes the fixed monthly charge (kept separately).
             total_price = (
-                buy_price + dist_price + (fixed_hourly or 0.0)
+                buy_price + dist_price
                 if buy_price is not None and dist_price is not None
                 else None
             )

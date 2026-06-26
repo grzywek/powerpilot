@@ -42,9 +42,11 @@ from .const import (
     CONF_MAX_SOC,
     CONF_MIN_SOC,
     CONF_PHASES,
+    CONF_EXCISE_KWH,
     CONF_PRADCAST_API_KEY,
     CONF_PRICE_MARKUP,
     CONF_PRICE_REFRESH_HOURS,
+    CONF_PRICE_ROUNDING,
     CONF_PRICE_SOURCE,
     CONF_PRICE_VAT,
     CONF_SENSOR_PARENTS,
@@ -54,6 +56,7 @@ from .const import (
     CHARGE_CURVE_BANDS,
     DEFAULTS,
     DOMAIN,
+    PRICE_ROUNDING_OPTIONS,
     PRICE_SOURCE_PRADCAST,
     PRICE_SOURCE_SENSOR,
     charge_curve_band_key,
@@ -195,6 +198,18 @@ def _price_schema(data: dict[str, Any]) -> vol.Schema:
             ),
             vol.Optional(CONF_PRICE_VAT, default=d(CONF_PRICE_VAT)): _NUMBER(
                 _NUM(min=1, max=2, step=0.01, mode="box")
+            ),
+            vol.Optional(CONF_EXCISE_KWH, default=d(CONF_EXCISE_KWH)): _NUMBER(
+                _NUM(min=0, max=0.5, step=0.001, unit_of_measurement="PLN/kWh netto", mode="box")
+            ),
+            vol.Optional(
+                CONF_PRICE_ROUNDING, default=d(CONF_PRICE_ROUNDING)
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=list(PRICE_ROUNDING_OPTIONS),
+                    translation_key="price_rounding",
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
             ),
             vol.Optional(
                 CONF_PRICE_REFRESH_HOURS, default=d(CONF_PRICE_REFRESH_HOURS)

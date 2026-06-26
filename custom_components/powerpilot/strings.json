@@ -35,7 +35,9 @@
           "buy_price_sensor": "Buy price sensor",
           "pradcast_api_key": "Pradcast API key",
           "price_markup": "Seller markup net (PLN/kWh)",
-          "price_vat": "VAT multiplier",
+          "price_vat": "VAT multiplier (e.g. 1.23 = 23%)",
+          "excise_kwh": "Excise duty net (PLN/kWh, akcyza)",
+          "price_rounding": "Full-price rounding",
           "price_refresh_hours": "Source refresh interval (h)"
         }
       },
@@ -111,7 +113,9 @@
           "buy_price_sensor": "Buy price sensor",
           "pradcast_api_key": "Pradcast API key",
           "price_markup": "Seller markup net (PLN/kWh)",
-          "price_vat": "VAT multiplier",
+          "price_vat": "VAT multiplier (e.g. 1.23 = 23%)",
+          "excise_kwh": "Excise duty net (PLN/kWh, akcyza)",
+          "price_rounding": "Full-price rounding",
           "price_refresh_hours": "Source refresh interval (h)"
         }
       },
@@ -183,6 +187,13 @@
       "options": {
         "sensor": "Home Assistant sensor",
         "pradcast": "prądcast.pl API"
+      }
+    },
+    "price_rounding": {
+      "options": {
+        "per_bucket": "Per bucket (energy/distribution/taxes rounded separately — matches most sellers)",
+        "total": "Single total (one gross sum, rounded once)",
+        "none": "None (full precision)"
       }
     }
   },

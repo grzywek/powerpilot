@@ -150,6 +150,14 @@ interface PriceArchiveHour {
   p10: number | null;
   p90: number | null;
   estimate_breakdown: EstimateSample[] | null;
+  // Seller-style net breakdown (present only for hours fetched under the new
+  // pricing model; legacy/estimated rows leave these null).
+  tge_kwh?: number | null;
+  markup_kwh?: number | null;
+  distribution_net_kwh?: number | null;
+  excise_kwh?: number | null;
+  taxes_kwh?: number | null;
+  vat_rate?: number | null;
 }
 
 interface PriceArchive {
@@ -1490,10 +1498,11 @@ export class PowerPilotPanel extends LitElement {
                   <th>Typ</th>
                   <th>Źródło</th>
                   <th>Pobrano</th>
-                  <th>Energia<br /><span class="muted">z VAT</span></th>
-                  <th>Dystrybucja<br /><span class="muted">z VAT</span></th>
+                  <th>TGE<br /><span class="muted">netto</span></th>
+                  <th>Marża<br /><span class="muted">netto</span></th>
+                  <th>Dystrybucja<br /><span class="muted">netto</span></th>
+                  <th>Podatki<br /><span class="muted">akcyza+VAT</span></th>
                   <th>Cena pełna<br /><span class="muted">z VAT</span></th>
-                  <th>Koszt stały<br /><span class="muted">PLN/h z VAT</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -1505,7 +1514,7 @@ export class PowerPilotPanel extends LitElement {
             ${(["certain", "forecast", "estimated"] as PriceType[]).map(
               (t) => html`<span class="badge" style=${"background:" + PRICE_TYPE_META[t].color}>${PRICE_TYPE_META[t].label}</span>`
             )}
-            <span class="muted">Wszystkie ceny brutto (z VAT). „szacowana” = średnia ważona z 3 ostatnich tygodni — najedź na typ, by zobaczyć obliczenie.</span>
+            <span class="muted">TGE / marża / dystrybucja są netto; „podatki” = akcyza + VAT, „cena pełna” = brutto. Opłata stała (abonamentowa) rozliczana osobno, poza ceną/kWh. „szacowana” = średnia ważona z 3 ostatnich tygodni — najedź na typ, by zobaczyć obliczenie.</span>
           </div>
         `;
 
@@ -1529,16 +1538,25 @@ export class PowerPilotPanel extends LitElement {
     const badge = meta
       ? html`<span class="badge" style=${"background:" + meta.color} title=${this._priceTooltip(h)}>${meta.label}</span>`
       : html`<span class="muted">—</span>`;
+    const fmtNet = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(3));
+    // Rows fetched under the new pricing model carry the net breakdown; legacy
+    // and estimated rows only have the lumped energy/distribution values.
+    const hasBreakdown = h.tge_kwh != null;
+    const taxesTitle =
+      hasBreakdown && h.excise_kwh != null
+        ? `akcyza ${h.excise_kwh.toFixed(3)} + VAT ${h.vat_rate != null ? Math.round(h.vat_rate * 100) : ""}%`
+        : "";
     return html`
       <tr>
         <td>${fmtHour(h.start)}</td>
         <td>${badge}</td>
         <td class="muted">${sourceLabel}</td>
         <td class="muted">${fmtStamp(h.fetched_at)}</td>
-        <td>${fmtPrice(h.energy_price_kwh)}</td>
-        <td>${fmtPrice(h.distribution_price_kwh)}</td>
+        <td>${hasBreakdown ? fmtNet(h.tge_kwh) : html`<span class="muted">—</span>`}</td>
+        <td>${hasBreakdown ? fmtNet(h.markup_kwh) : html`<span class="muted">—</span>`}</td>
+        <td>${fmtNet(hasBreakdown ? h.distribution_net_kwh : h.distribution_price_kwh)}</td>
+        <td class="muted" title=${taxesTitle}>${hasBreakdown ? fmtPrice(h.taxes_kwh ?? null) : html`<span class="muted">—</span>`}</td>
         <td class="bold">${fmtPrice(h.total_price_kwh)}</td>
-        <td class="muted">${fmtPrice(h.fixed_cost_hourly)}</td>
       </tr>
     `;
   }

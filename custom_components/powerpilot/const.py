@@ -56,9 +56,24 @@ CONF_PRADCAST_API_KEY: Final = "pradcast_api_key"
 # Net seller markup added to wholesale RDN price before VAT.
 CONF_PRICE_MARKUP: Final = "price_markup"  # additive PLN/kWh (seller's net fee)
 CONF_PRICE_VAT: Final = "price_vat"  # multiplier applied after markup (e.g. 1.23)
+# Net excise duty (akcyza) added per kWh on the energy side, inside the VAT base.
+CONF_EXCISE_KWH: Final = "excise_kwh"  # additive PLN/kWh netto (akcyza)
+# How the displayed full price is rounded so it can match a specific seller's
+# bill to the grosz. See ``pricing.assemble`` / ``PRICE_ROUNDING_*``.
+CONF_PRICE_ROUNDING: Final = "price_rounding"
 # How often the price source is actually re-fetched (forecasts change). The
 # optimizer still runs every DEFAULT_UPDATE_INTERVAL_MINUTES off cached prices.
 CONF_PRICE_REFRESH_HOURS: Final = "price_refresh_hours"
+
+# Rounding schemes for the displayed gross per-kWh price.
+PRICE_ROUNDING_PER_BUCKET: Final = "per_bucket"  # round prąd/dystrybucja/podatki separately (seller-style)
+PRICE_ROUNDING_TOTAL: Final = "total"  # one gross sum, rounded once
+PRICE_ROUNDING_NONE: Final = "none"  # raw, full precision
+PRICE_ROUNDING_OPTIONS: Final = (
+    PRICE_ROUNDING_PER_BUCKET,
+    PRICE_ROUNDING_TOTAL,
+    PRICE_ROUNDING_NONE,
+)
 
 PRICE_SOURCE_SENSOR: Final = "sensor"
 PRICE_SOURCE_PRADCAST: Final = "pradcast"
@@ -127,6 +142,8 @@ DEFAULTS: Final = {
     CONF_PRICE_SOURCE: PRICE_SOURCE_SENSOR,
     CONF_PRICE_MARKUP: 0.0,
     CONF_PRICE_VAT: 1.0,
+    CONF_EXCISE_KWH: 0.0,
+    CONF_PRICE_ROUNDING: PRICE_ROUNDING_PER_BUCKET,
     CONF_PRICE_REFRESH_HOURS: 3,
     CONF_CONSUMPTION_LEARN_DAYS: 21,
     CONF_EV_ENABLED: False,

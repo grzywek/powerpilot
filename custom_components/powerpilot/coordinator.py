@@ -1183,18 +1183,23 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 soc_start=prev_soc,
                 soc_end=soc_real.get(h),
             )
-            # Forecast side reconstructed from the vintage recorded at this hour
-            # (battery flows captured only from now on → blank for old vintages).
+            # Forecast side = the single plan made AT this hour (vintage run_at==h,
+            # index 0), so soc/charge/grid all belong to one coherent trajectory.
+            # soc_start is the real SoC the battery entered the hour with — the
+            # value that plan seeded from — so the forecast SoC delta matches its
+            # own charge instead of stitching two re-seeded vintages together.
+            # Battery flows are captured only from now on → blank for old vintages.
             sn = self.snapshots
+            fc_soc_end = sn.run0_at(h, "soc")
             forecast_side = _side(
-                grid=sn.value_at(h, "grid"),
-                discharge=sn.value_at(h, "dischg"),
+                grid=sn.run0_at(h, "grid"),
+                discharge=sn.run0_at(h, "dischg"),
                 base=base_fc,
-                ev=sn.value_at(h, "ev"),
-                charge=sn.value_at(h, "charge"),
+                ev=sn.run0_at(h, "ev"),
+                charge=sn.run0_at(h, "charge"),
                 devices=dev_forecast,
-                soc_start=sn.value_at(h - timedelta(hours=1), "soc"),
-                soc_end=sn.value_at(h, "soc"),
+                soc_start=prev_soc if fc_soc_end is not None else None,
+                soc_end=fc_soc_end,
             )
             hours.append(
                 {

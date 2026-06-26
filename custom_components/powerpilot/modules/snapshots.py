@@ -108,6 +108,22 @@ class SnapshotStore:
             return seq[idx]
         return None
 
+    def run0_at(self, run_hour: datetime, key: str) -> Any | None:
+        """Index-0 value of the vintage *recorded at* ``run_hour`` (the plan made
+        that hour, whose first slot is that hour).
+
+        Unlike :meth:`value_at`, this never forward-indexes an earlier plan: if
+        no vintage was recorded at ``run_hour`` it returns ``None``. Use it to
+        reconstruct a single coherent plan's first-hour state, so a hour's
+        forecast ``soc``/``charge``/``grid`` all come from the same trajectory
+        (mixing vintages produces nonsense like "charging yet SoC falls").
+        """
+        rec = self._records.get(self._key(run_hour))
+        if not rec:
+            return None
+        seq = rec.get(key) or []
+        return seq[0] if seq else None
+
     def prune(self) -> None:
         cutoff = dt_util.utcnow() - timedelta(days=_SNAPSHOT_RETENTION_DAYS)
         kept: dict[str, dict[str, Any]] = {}

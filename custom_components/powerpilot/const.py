@@ -99,6 +99,18 @@ CONF_EV_BATTERY_KWH: Final = "ev_battery_kwh"
 CONF_EV_WEEKLY_KM: Final = "ev_weekly_km"  # off-calendar weekly km
 CONF_EV_CHARGER_KW: Final = "ev_charger_kw"  # per-phase draw (e.g. 3.5)
 CONF_EV_CHARGER_PHASE: Final = "ev_charger_phase"  # shared phase index 1..3
+# Charger / charging telemetry. All optional; each has a concrete planning use.
+CONF_EV_CHARGER_CONNECTED_SENSOR: Final = "ev_charger_connected_sensor"  # plugged in (bool) → gates availability
+CONF_EV_CHARGING_SENSOR: Final = "ev_charging_sensor"  # actively drawing (bool) → plan-vs-reality reminders
+CONF_EV_ENERGY_ADDED_SENSOR: Final = "ev_energy_added_sensor"  # session kWh (total_increasing) → delivered so far
+CONF_EV_TARGET_SOC_SENSOR: Final = "ev_target_soc_sensor"  # car's configured target SoC % → default charge target
+# Calendar-driven charging plan. Reads an HA ``calendar.*`` entity (works with
+# Google, CalDAV/iCloud, Local Calendar, …). Events whose summary starts with
+# the keyword schedule charging — "Kotek 100%" = a deadline target (be at 100 %
+# by the event start, optimizer picks the cheapest hours), bare "Kotek" = a
+# forced window (charge at full power for the event's hours, no SoC limit).
+CONF_EV_CALENDAR: Final = "ev_calendar"
+CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # event-summary trigger word (e.g. "Kotek")
 
 # --- Distribution tariffs ---
 # Stored in ``entry.options`` as a list of dicts (see ``models.Tariff.to_dict``).
@@ -152,6 +164,7 @@ DEFAULTS: Final = {
     CONF_EV_WEEKLY_KM: 200,
     CONF_EV_CHARGER_KW: 3.5,
     CONF_EV_CHARGER_PHASE: 1,
+    CONF_EV_CALENDAR_KEYWORD: "Kotek",
 }
 
 # ---------------------------------------------------------------------------

@@ -28,11 +28,17 @@ from .const import (
     CONF_DEVICE_SENSORS,
     CONF_DISCHARGE_EFFICIENCY,
     CONF_EV_BATTERY_KWH,
+    CONF_EV_CALENDAR,
+    CONF_EV_CALENDAR_KEYWORD,
+    CONF_EV_CHARGER_CONNECTED_SENSOR,
     CONF_EV_CHARGER_KW,
+    CONF_EV_CHARGING_SENSOR,
     CONF_EV_ENABLED,
+    CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_RANGE_KM,
     CONF_EV_SOC_SENSOR,
+    CONF_EV_TARGET_SOC_SENSOR,
     CONF_EV_WEEKLY_KM,
     CONF_GRID_DISCONNECT_SOC,
     CONF_GRID_IMPORT_SENSOR,
@@ -225,10 +231,29 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
             vol.Required(CONF_EV_ENABLED, default=d(CONF_EV_ENABLED)): selector.BooleanSelector(),
-            vol.Optional(CONF_EV_SOC_SENSOR, default=d(CONF_EV_SOC_SENSOR) or vol.UNDEFINED): _entity("sensor"),
+            vol.Optional(CONF_EV_SOC_SENSOR, default=d(CONF_EV_SOC_SENSOR) or vol.UNDEFINED): _entity(["sensor", "input_number", "number"]),
+            vol.Optional(
+                CONF_EV_TARGET_SOC_SENSOR, default=d(CONF_EV_TARGET_SOC_SENSOR) or vol.UNDEFINED
+            ): _entity(["sensor", "input_number", "number"]),
+            vol.Optional(
+                CONF_EV_CHARGER_CONNECTED_SENSOR,
+                default=d(CONF_EV_CHARGER_CONNECTED_SENSOR) or vol.UNDEFINED,
+            ): _entity(["binary_sensor", "switch", "input_boolean"]),
+            vol.Optional(
+                CONF_EV_CHARGING_SENSOR, default=d(CONF_EV_CHARGING_SENSOR) or vol.UNDEFINED
+            ): _entity(["binary_sensor", "switch", "sensor"]),
+            vol.Optional(
+                CONF_EV_ENERGY_ADDED_SENSOR, default=d(CONF_EV_ENERGY_ADDED_SENSOR) or vol.UNDEFINED
+            ): _entity("sensor"),
             vol.Optional(
                 CONF_EV_LOCATION_SENSOR, default=d(CONF_EV_LOCATION_SENSOR) or vol.UNDEFINED
             ): _entity(["device_tracker", "binary_sensor", "person"]),
+            vol.Optional(
+                CONF_EV_CALENDAR, default=d(CONF_EV_CALENDAR) or vol.UNDEFINED
+            ): _entity("calendar"),
+            vol.Optional(
+                CONF_EV_CALENDAR_KEYWORD, default=d(CONF_EV_CALENDAR_KEYWORD)
+            ): selector.TextSelector(),
             vol.Optional(CONF_EV_RANGE_KM, default=d(CONF_EV_RANGE_KM)): _NUMBER(
                 _NUM(min=50, max=1000, step=10, unit_of_measurement="km", mode="box")
             ),

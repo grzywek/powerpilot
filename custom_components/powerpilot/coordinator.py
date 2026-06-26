@@ -1569,6 +1569,17 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             },
         ]
 
+        ev_summary = self.ev.plan_summary()
+        ev_summary["planned_hours"] = (
+            [
+                {"start": d.start.isoformat(), "kwh": round(d.ev_charge_kwh, 3)}
+                for d in plan.decisions
+                if d.ev_charge_kwh > 0
+            ]
+            if plan
+            else []
+        )
+
         return {
             "last_update": self.events[0]["time"] if self.events else None,
             "horizon_hours": len(plan.decisions) if plan else 0,
@@ -1576,6 +1587,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "consumption_days": self.consumption.base.observed_days,
             "consumption_devices": list(self.consumption.devices.keys()),
             "ev_enabled": self.ev.enabled,
+            "ev": ev_summary,
             "modules": modules,
             "checks": checks,
         }

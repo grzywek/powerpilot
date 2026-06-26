@@ -499,24 +499,99 @@ class Optimizer:
     def _plan_ev(
         self, forecast: Forecast, ev_request: EVRequest | None
     ) -> dict[datetime, float]:
-        """Allocate EV charging into the cheapest available hours."""
+        """Allocate EV charging across the horizon.
+
+        Three layers, applied in order and never exceeding the battery's physical
+        room to 100 %:
+
+        1. **Forced windows** — charge at full charger power for every hour the
+           user marked in the calendar (bare ``"<keyword>"`` events). No SoC
+           limit beyond the pack capacity.
+        2. **Deadline targets** — for each ``"<keyword> NN%"`` event, fill the
+           deficit to ``NN%`` using the cheapest available hours strictly before
+           the deadline (earliest deadline first, so earlier commitments are
+           honoured before later, cheaper hours are spent on a later target).
+        3. **Default top-up** — when the calendar contributes nothing, reach
+           ``required_kwh`` in the cheapest available hours.
+        """
         if ev_request is None or not ev_request.is_actionable:
             return {}
 
-        candidates = [
-            slot
-            for slot in forecast.slots
-            if slot.start in ev_request.available_hours and slot.buy_price is not None
-        ]
-        candidates.sort(key=lambda s: s.buy_price)
+        slots_by_start = {
+            s.start: s for s in forecast.slots if s.buy_price is not None
+        }
+        charger_kw = max(ev_request.charger_kw, 0.1)
+        battery_kwh = max(ev_request.battery_kwh, 0.0)
+        soc0_kwh = (
+            max(0.0, (ev_request.current_soc or 0.0) / 100.0 * battery_kwh)
+            if battery_kwh
+            else 0.0
+        )
 
-        remaining = ev_request.required_kwh
-        per_hour = max(ev_request.charger_kw, 0.1)
         allocation: dict[datetime, float] = {}
-        for slot in candidates:
-            if remaining <= 0:
-                break
-            take = min(per_hour, remaining)
-            allocation[slot.start] = take
-            remaining -= take
+        scheduled = 0.0  # total kWh added across the horizon so far
+
+        def remaining_capacity() -> float:
+            if battery_kwh <= 0:
+                return float("inf")
+            return max(0.0, battery_kwh - soc0_kwh - scheduled)
+
+        def room(start: datetime) -> float:
+            return max(0.0, charger_kw - allocation.get(start, 0.0))
+
+        # 1. Forced windows: full power for every marked, available hour.
+        for start in sorted(ev_request.forced_hours):
+            if start not in ev_request.available_hours or start not in slots_by_start:
+                continue
+            take = min(room(start), remaining_capacity())
+            if take <= _EPS:
+                continue
+            allocation[start] = allocation.get(start, 0.0) + take
+            scheduled += take
+
+        # 2. Deadline targets, earliest deadline first.
+        for target in sorted(ev_request.targets, key=lambda t: t.deadline):
+            target_kwh = (
+                target.target_soc / 100.0 * battery_kwh if battery_kwh else 0.0
+            )
+            before = soc0_kwh + sum(
+                kwh for start, kwh in allocation.items() if start < target.deadline
+            )
+            deficit = min(target_kwh - before, remaining_capacity())
+            if deficit <= _EPS:
+                continue
+            candidates = [
+                slot
+                for start, slot in slots_by_start.items()
+                if start < target.deadline
+                and start in ev_request.available_hours
+                and room(start) > _EPS
+            ]
+            candidates.sort(key=lambda s: s.buy_price)
+            for slot in candidates:
+                if deficit <= _EPS:
+                    break
+                take = min(room(slot.start), deficit, remaining_capacity())
+                if take <= _EPS:
+                    continue
+                allocation[slot.start] = allocation.get(slot.start, 0.0) + take
+                scheduled += take
+                deficit -= take
+
+        # 3. Default top-up (no calendar plan): cheapest available hours.
+        remaining = min(ev_request.required_kwh, remaining_capacity())
+        if remaining > _EPS:
+            candidates = [
+                slot
+                for start, slot in slots_by_start.items()
+                if start in ev_request.available_hours and room(start) > _EPS
+            ]
+            candidates.sort(key=lambda s: s.buy_price)
+            for slot in candidates:
+                if remaining <= _EPS:
+                    break
+                take = min(room(slot.start), remaining)
+                allocation[slot.start] = allocation.get(slot.start, 0.0) + take
+                remaining -= take
+
         return allocation

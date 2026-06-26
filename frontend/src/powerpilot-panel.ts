@@ -33,6 +33,19 @@ interface Plan {
   forecast: ForecastHour[];
 }
 
+interface EVPlan {
+  enabled: boolean;
+  available: boolean;
+  soc: number | null;
+  target_soc: number | null;
+  energy_added_kwh: number | null;
+  connected: boolean | null;
+  charging: boolean | null;
+  targets: { deadline: string; target_soc: number; label: string }[];
+  forced_hours: string[];
+  planned_hours: { start: string; kwh: number }[];
+}
+
 interface Status {
   last_update: string | null;
   horizon_hours: number;
@@ -40,6 +53,7 @@ interface Status {
   consumption_days: number;
   consumption_devices: string[];
   ev_enabled: boolean;
+  ev?: EVPlan;
   modules: { domain: string; error: string | null }[];
   checks: { key: string; label: string; ok: boolean }[];
 }
@@ -1773,6 +1787,84 @@ export class PowerPilotPanel extends LitElement {
   // ------------------------------------------------------------------
   // Status
   // ------------------------------------------------------------------
+  private _evBool(value: boolean | null, yes: string, no: string): string {
+    if (value === null || value === undefined) return "—";
+    return value ? yes : no;
+  }
+
+  /** Merge consecutive 1-hour forced slots into "HH:MM–HH:MM" ranges. */
+  private _evForcedRanges(hours: string[]): string[] {
+    const sorted = [...hours]
+      .map((iso) => new Date(iso))
+      .filter((d) => !isNaN(d.getTime()))
+      .sort((a, b) => a.getTime() - b.getTime());
+    if (!sorted.length) return [];
+    const fmt = (d: Date) =>
+      d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+    const fmtDay = (d: Date) =>
+      d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" });
+    const ranges: string[] = [];
+    let start = sorted[0];
+    let prev = sorted[0];
+    for (let i = 1; i <= sorted.length; i++) {
+      const cur = sorted[i];
+      const contiguous =
+        cur && cur.getTime() - prev.getTime() === 3600_000;
+      if (!contiguous) {
+        const end = new Date(prev.getTime() + 3600_000);
+        ranges.push(`${fmtDay(start)} ${fmt(start)}–${fmt(end)}`);
+        if (cur) start = cur;
+      }
+      prev = cur;
+    }
+    return ranges;
+  }
+
+  private _renderEvCard(ev: EVPlan): TemplateResult {
+    const plannedKwh = ev.planned_hours.reduce((sum, h) => sum + h.kwh, 0);
+    const forcedRanges = this._evForcedRanges(ev.forced_hours);
+    return html`
+      <div class="card">
+        <div class="card-title">🚗 Samochód elektryczny</div>
+        <div class="check">
+          Stan: <b>${ev.soc !== null ? `${ev.soc}%` : "—"}</b>
+          ${ev.target_soc !== null ? html`<span class="muted">cel ${ev.target_soc}%</span>` : nothing}
+        </div>
+        <div class="check">
+          Podłączony: <b>${this._evBool(ev.connected, "tak", "nie")}</b> ·
+          Ładuje: <b>${this._evBool(ev.charging, "tak", "nie")}</b> ·
+          Dostępny: <b>${ev.available ? "tak" : "nie"}</b>
+        </div>
+        ${ev.energy_added_kwh !== null
+          ? html`<div class="check">Dodano w sesji: <b>${ev.energy_added_kwh} kWh</b></div>`
+          : nothing}
+        ${ev.targets.length
+          ? html`<div class="check"><b>Terminy z kalendarza</b></div>
+              ${ev.targets.map(
+                (t) => html`<div class="check">
+                  <span class="dot ok"></span>${t.target_soc}% do
+                  <b>${this._fmtRun(t.deadline)}</b>
+                  ${t.label ? html`<span class="muted">${t.label}</span>` : nothing}
+                </div>`
+              )}`
+          : nothing}
+        ${forcedRanges.length
+          ? html`<div class="check"><b>Ręczne okna ładowania</b></div>
+              ${forcedRanges.map(
+                (r) => html`<div class="check"><span class="dot ok"></span>${r}</div>`
+              )}`
+          : nothing}
+        <div class="check">
+          Zaplanowane ładowanie: <b>${plannedKwh.toFixed(1)} kWh</b>
+          <span class="muted">${ev.planned_hours.length} godz.</span>
+        </div>
+        ${!ev.targets.length && !forcedRanges.length && !ev.planned_hours.length
+          ? html`<div class="check muted">Brak zaplanowanego ładowania.</div>`
+          : nothing}
+      </div>
+    `;
+  }
+
   private _renderStatus(): TemplateResult {
     const s = this._status;
     if (!s) return html`<div class="card empty">Brak statusu.</div>`;
@@ -1797,6 +1889,7 @@ export class PowerPilotPanel extends LitElement {
         <div class="check">EV: <b>${s.ev_enabled ? "włączone" : "wyłączone"}</b></div>
         <div class="check">Horyzont planu: <b>${s.horizon_hours}</b> h</div>
       </div>
+      ${s.ev?.enabled ? this._renderEvCard(s.ev) : nothing}
       <div class="card">
         <div class="card-title">Moduły</div>
         ${s.modules.map(

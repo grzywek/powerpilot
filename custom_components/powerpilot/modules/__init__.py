@@ -6,7 +6,7 @@ from .base import ModuleRegistry, PowerPilotModule
 from .calendar import CalendarModule
 from .climate import ClimateModule
 from .consumption import ConsumptionModule
-from .ev import EVModule, EVRequest
+from .ev import EVChargeTarget, EVModule, EVRequest
 from .loads import LoadsModule, ScheduledLoad
 from .prices import PriceModule
 from .tariff import TariffModule
@@ -18,6 +18,7 @@ __all__ = [
     "CalendarModule",
     "ClimateModule",
     "ConsumptionModule",
+    "EVChargeTarget",
     "EVModule",
     "EVRequest",
     "LoadsModule",

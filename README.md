@@ -58,6 +58,16 @@ modules (prices · consumption · loads · weather · climate · ev · calendar)
 3. Add the integration via **Settings → Devices & Services → Add Integration →
    PowerPilot** and complete the three-step setup (core → prices → EV).
 
+### Versioning & releases
+
+Versions are published automatically. On every push to `main`, the
+[Release workflow](.github/workflows/release.yml) computes the next version from
+the commit messages (conventional commits: `feat:` → minor, `feat!:` /
+`BREAKING CHANGE` → major, anything else → patch), writes it into
+`manifest.json`, tags it, and creates a matching **GitHub Release**. HACS reads
+those releases, so each change shows up as a new selectable version to install —
+no manual version bumping required.
+
 ## Status
 
 Implemented: **Stage 0** (foundation — models, battery cost-after-losses, module

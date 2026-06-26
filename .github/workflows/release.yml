@@ -1,0 +1,74 @@
+name: Release
+
+# Po każdym pushu do main: policz nową wersję (conventional commits),
+# wpisz ją do manifest.json, otaguj i opublikuj GitHub Release.
+# HACS czyta Releases, więc nowa wersja staje się wybieralna do pobrania.
+#
+# Pętli nie ma: commit/tag tworzony jest tokenem GITHUB_TOKEN, a pushe
+# wykonane tym tokenem nie wyzwalają kolejnych uruchomień workflowów.
+# Dodatkowo commit release'owy ma w treści [skip ci].
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (pełna historia + tagi)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skonfiguruj git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Policz wersję i zaktualizuj manifest
+        id: ver
+        run: |
+          set -euo pipefail
+          python3 scripts/bump_version.py | tee /tmp/ver.out
+          cat /tmp/ver.out >> "$GITHUB_OUTPUT"
+          version="$(sed -n 's/^VERSION=//p' /tmp/ver.out)"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Zcommituj bump (jeśli wersja się zmieniła)
+        if: steps.ver.outputs.CHANGED == 'true'
+        run: |
+          set -euo pipefail
+          git add custom_components/powerpilot/manifest.json
+          git commit -m "chore(release): ${{ steps.ver.outputs.tag }} [skip ci]"
+          git push origin HEAD:main
+
+      - name: Utwórz tag
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} już istnieje — pomijam."
+          else
+            git tag -a "${tag}" -m "PowerPilot ${tag}"
+            git push origin "${tag}"
+          fi
+
+      - name: Opublikuj GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} już istnieje — pomijam."
+          else
+            gh release create "${tag}" --title "${tag}" --generate-notes
+          fi

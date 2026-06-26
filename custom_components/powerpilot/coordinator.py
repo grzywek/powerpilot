@@ -1181,6 +1181,30 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
             g_real, d_real = grid_import_real.get(h), bat_discharge_real.get(h)
             c_real, m_real = bat_charge_real.get(h), main_real.get(h)
+            # Realized hourly costs (PLN/h) reconstructed from the measured flows:
+            # grid spend = imported kWh × the hour's gross price; battery-served
+            # cost = discharged kWh × the modelled in-battery cost at that hour.
+            bcost = self.snapshots.value_at(h, "bcost")
+            real_hour_cost = (
+                round(g_real * total_price, 4)
+                if g_real is not None and total_price is not None
+                else None
+            )
+            real_energy_cost = (
+                round(g_real * buy_price, 4)
+                if g_real is not None and buy_price is not None
+                else None
+            )
+            real_dist_cost = (
+                round(g_real * dist_price, 4)
+                if g_real is not None and dist_price is not None
+                else None
+            )
+            real_bat_use_cost = (
+                round(d_real * bcost, 4)
+                if d_real is not None and bcost is not None
+                else None
+            )
             dev_real_sum = sum(v for v in dev_real_h.values() if v is not None)
             base_real = (
                 max(0.0, m_real - dev_real_sum) if m_real is not None else None
@@ -1235,13 +1259,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     # Realized battery energy cost from the vintage recorded at h
                     # (no live sensor exists for it). Blank for hours predating
                     # snapshot capture of this field.
-                    "battery_energy_cost": self.snapshots.value_at(h, "bcost"),
+                    "battery_energy_cost": bcost,
                     "grid_buy_kwh": round(grid_import_real[h], 3) if h in grid_import_real else None,
                     "ev_charge_kwh": None,
-                    "hour_cost": None,
-                    "energy_cost": None,
-                    "distribution_cost": None,
-                    "battery_use_cost": None,
+                    "hour_cost": real_hour_cost,
+                    "energy_cost": real_energy_cost,
+                    "distribution_cost": real_dist_cost,
+                    "battery_use_cost": real_bat_use_cost,
                     "fixed_cost": self.tariff.fixed_hourly_for(h),
                     "devices_real": dev_real_h,
                     "devices_forecast": dev_forecast,
@@ -1349,10 +1373,27 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "battery_energy_cost": round(self._battery_energy_cost, 4),
                     "grid_buy_kwh": round(cur_grid, 3) if cur_grid is not None else None,
                     "ev_charge_kwh": None,
-                    "hour_cost": None,
-                    "energy_cost": None,
-                    "distribution_cost": None,
-                    "battery_use_cost": None,
+                    # Realized-so-far costs for the in-progress hour (partial flows).
+                    "hour_cost": (
+                        round(cur_grid * total_price, 4)
+                        if cur_grid is not None and total_price is not None
+                        else None
+                    ),
+                    "energy_cost": (
+                        round(cur_grid * buy_price, 4)
+                        if cur_grid is not None and buy_price is not None
+                        else None
+                    ),
+                    "distribution_cost": (
+                        round(cur_grid * dist_price, 4)
+                        if cur_grid is not None and dist_price is not None
+                        else None
+                    ),
+                    "battery_use_cost": (
+                        round(cur_discharge * self._battery_energy_cost, 4)
+                        if cur_discharge is not None
+                        else None
+                    ),
                     "fixed_cost": self.tariff.fixed_hourly_for(now),
                     "devices_real": {
                         eid: round(v, 3) if v is not None else None

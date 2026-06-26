@@ -291,6 +291,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # Planned battery flows + EV, so the chart's forecast tooltip column
             # can be reconstructed for past hours. Captured from now on.
             "charge": [_r(d.battery_charge_kwh, 3) for d in decisions],
+            "charge_pw": [_r(d.charge_power_kw, 3) for d in decisions],
             "dischg": [_r(d.battery_discharge_kwh, 3) for d in decisions],
             "ev": [_r(d.ev_charge_kwh, 3) for d in decisions],
             "cost": [_r(d.hour_cost, 4) for d in decisions],
@@ -1279,6 +1280,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     ),
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
                     "battery_discharge_kwh": round(bat_discharge_real[h], 3) if h in bat_discharge_real else None,
+                    # Planned grid-side charge setpoint for this hour, from the
+                    # vintage recorded at h (blank for hours predating capture).
+                    "charge_power_kw": sn.run0_at(h, "charge_pw"),
                     # Realized battery energy cost from the vintage recorded at h
                     # (no live sensor exists for it). Blank for hours predating
                     # snapshot capture of this field.
@@ -1393,6 +1397,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "inverter_mode": _real_mode(cur_charge, cur_discharge),
                     "battery_charge_kwh": round(cur_charge, 3) if cur_charge is not None else None,
                     "battery_discharge_kwh": round(cur_discharge, 3) if cur_discharge is not None else None,
+                    # Plan's grid-side charge setpoint for this hour (forecast side).
+                    "charge_power_kw": (
+                        round(cur_dec.charge_power_kw, 3) if cur_dec is not None else None
+                    ),
                     "battery_energy_cost": round(self._battery_energy_cost, 4),
                     "grid_buy_kwh": round(cur_grid, 3) if cur_grid is not None else None,
                     "ev_charge_kwh": None,
@@ -1482,6 +1490,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "inverter_mode": decision.inverter_mode,
                         "battery_charge_kwh": round(decision.battery_charge_kwh, 3),
                         "battery_discharge_kwh": round(decision.battery_discharge_kwh, 3),
+                        "charge_power_kw": round(decision.charge_power_kw, 3),
                         "battery_energy_cost": round(decision.battery_energy_cost, 4),
                         "grid_buy_kwh": round(decision.grid_buy_kwh, 3),
                         "ev_charge_kwh": round(decision.ev_charge_kwh, 3),

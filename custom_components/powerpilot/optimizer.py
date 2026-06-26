@@ -7,12 +7,21 @@ HiGHS solver, so charge/discharge decisions are globally cost-optimal and couple
 across days (the battery can be drained through an expensive day to reach a much
 cheaper one and be refilled there).
 
-Model (one continuous LP, no binaries needed)
----------------------------------------------
-For every hour ``t`` we solve for two non-negative flows:
+Model (mixed-integer: continuous charge, all-or-nothing discharge)
+------------------------------------------------------------------
+For every hour ``t`` we solve for:
 
-* ``c[t]`` – energy drawn from the grid to charge the battery (AC kWh).
-* ``d[t]`` – energy delivered from the battery to the house (AC kWh).
+* ``c[t]`` – energy drawn from the grid to charge the battery (AC kWh), a
+  continuous flow bounded by the inverter charge power.
+* ``z[t]`` – a **binary** discharge switch: ``1`` means the battery covers the
+  *whole* house demand that hour (``cap[t] = min(demand, inverter_max_discharge)``
+  kWh delivered), ``0`` means it stays idle and the house runs off the grid.
+
+Making discharge all-or-nothing means every hour resolves to exactly one
+inverter mode (charge / battery / passthrough) and the optimizer never rations a
+partial discharge across hours. This is a deliberate simplification: it trades a
+marginally cheaper fractional plan for one that maps cleanly onto a single
+per-hour inverter setpoint.
 
 The stored energy (kWh) evolves as a prefix sum::
 
@@ -33,14 +42,12 @@ Objective – minimise total spend over the horizon::
        + wear·(c[t]·η_ch + d[t])             (battery cycling wear)
        − v_terminal·E[T-1]                   (value of energy left at the end)
 
-Two economic facts make a *pure* LP correct here:
-
-* Buy-only (no export) plus round-trip losses (η_ch·η_dis < 1) and a positive
-  wear cost mean it is never optimal to charge and discharge in the same hour,
-  so no integer variables are required to forbid it.
-* The energy already in the battery at the start is a **sunk cost** – using it
-  only costs wear – so the optimizer naturally spends stored energy on the most
-  expensive hours instead of hoarding it at a high SoC.
+Buy-only (no export) plus round-trip losses (η_ch·η_dis < 1) and a positive wear
+cost mean it is never optimal to charge and discharge in the same hour, so the
+only integer variables are the discharge switches ``z[t]``. The energy already
+in the battery at the start is a **sunk cost** – using it only costs wear – so
+the optimizer naturally spends stored energy on the most expensive hours it
+chooses to cover instead of hoarding it at a high SoC.
 
 The terminal value ``v_terminal`` prices the energy left in the pack at the end
 of the horizon (so the LP does not irrationally dump the battery on the last
@@ -197,15 +204,13 @@ class Optimizer:
         demand = [max(0.0, s.total_consumption_kwh) for s in slots]
         ev_kwh = [ev_hours.get(slots[t].start, 0.0) for t in range(n)]
 
-        x = self._solve_lp(
+        charge, discharge = self._solve_lp(
             battery=battery,
             total_price=total_price,
             demand=demand,
             ev_kwh=ev_kwh,
             ev_charger_kw=ev_charger_kw,
         )
-        charge = x[:n]
-        discharge = x[n:]
 
         return self._build_plan(
             forecast=forecast,
@@ -230,7 +235,7 @@ class Optimizer:
         demand: list[float],
         ev_kwh: list[float],
         ev_charger_kw: float,
-    ) -> list[float]:
+    ) -> tuple[list[float], list[float]]:
         cfg = self.config
         n = len(total_price)
         ceff = max(battery.charge_efficiency, _EPS)
@@ -254,21 +259,31 @@ class Optimizer:
         h.setOptionValue("output_flag", False)
         inf = highspy.kHighsInf
 
-        # Columns: c[0..n-1] (charge), then d[0..n-1] (discharge).
+        # Charge columns c[0..n-1] are continuous grid-draw power (kWh per hour).
         for t in range(n):
             charge_cap = cfg.inverter_max_charge_kw
             if ev_kwh[t] > 0:
                 # EV shares a phase with the inverter; leave it head-room.
                 charge_cap = max(0.0, charge_cap - ev_charger_kw)
             h.addVar(0.0, charge_cap)
+        # Discharge columns d[0..n-1] are BINARY: each hour either covers the
+        # whole house demand from the battery (z=1 → cap[t] kWh delivered) or not
+        # at all (z=0). This makes every hour exactly one inverter mode and
+        # forbids rationing a *partial* discharge across hours — a deliberate
+        # simplification chosen over a marginally cheaper fractional plan.
+        cap = [min(demand[t], cfg.inverter_max_discharge_kw) for t in range(n)]
         for t in range(n):
-            discharge_cap = min(demand[t], cfg.inverter_max_discharge_kw)
-            h.addVar(0.0, max(0.0, discharge_cap))
+            if cap[t] > _EPS:
+                h.addVar(0.0, 1.0)
+                h.changeColIntegrality(n + t, highspy.HighsVarType.kInteger)
+            else:
+                h.addVar(0.0, 0.0)  # no demand → nothing to cover this hour
 
         cost = np.empty(2 * n, dtype=np.float64)
         for t in range(n):
             cost[t] = total_price[t] + wear * ceff - tv * ceff
-            cost[n + t] = -total_price[t] + wear + tv / deff
+            # d-column is a 0/1 switch worth cap[t] kWh delivered to the house.
+            cost[n + t] = (-total_price[t] + wear + tv / deff) * cap[t]
         h.changeColsCost(2 * n, np.arange(2 * n, dtype=np.int32), cost)
 
         # SoC band on the running reservoir level after each hour.
@@ -279,7 +294,7 @@ class Optimizer:
                 idx.append(k)
                 val.append(ceff)
                 idx.append(n + k)
-                val.append(-1.0 / deff)
+                val.append(-cap[k] / deff)
             h.addRow(
                 e_min - e0,
                 e_max - e0,
@@ -297,7 +312,7 @@ class Optimizer:
                     rhs,
                     2,
                     np.array([t, n + t], dtype=np.int32),
-                    np.array([1.0, -1.0], dtype=np.float64),
+                    np.array([1.0, -cap[t]], dtype=np.float64),
                 )
 
         # SoC-dependent charge curve (only when actually configured).
@@ -311,7 +326,7 @@ class Optimizer:
                     idx.append(k)
                     val.append(-slope * ceff)
                     idx.append(n + k)
-                    val.append(slope / deff)
+                    val.append(slope * cap[k] / deff)
                 h.addRow(
                     -inf,
                     intercept + slope * e0,
@@ -324,7 +339,11 @@ class Optimizer:
         status = h.getModelStatus()
         if status != highspy.HighsModelStatus.kOptimal:
             raise RuntimeError(f"HiGHS did not find an optimal plan: {status}")
-        return list(h.getSolution().col_value)
+        sol = list(h.getSolution().col_value)
+        charge = sol[:n]
+        # d-columns are 0/1 switches; expand back to delivered energy (cap kWh).
+        discharge = [cap[t] * sol[n + t] for t in range(n)]
+        return charge, discharge
 
     # ------------------------------------------------------------------
     # Replay the LP solution into Decisions + cost reporting
@@ -392,6 +411,11 @@ class Optimizer:
                 ChargePower.LIMITED if ev > 0 else ChargePower.FULL
             )
             decision.battery_charge_kwh = stored
+            # Grid-side charge power (kW) actually drawn this hour — what you set
+            # on the inverter as "force charge X kW". Equals ``stored / η_ch``
+            # (reduced if the SoC ceiling clipped the charge mid-hour); the hour
+            # slot is 1 h so kWh == average kW.
+            decision.charge_power_kw = stored / ceff if stored > _EPS else 0.0
             decision.battery_discharge_kwh = delivered
             decision.grid_buy_kwh = grid_buy
             decision.battery_soc = battery.soc

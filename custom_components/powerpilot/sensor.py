@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -71,15 +75,27 @@ class InverterModeSensor(PowerPilotEntity, SensorEntity):
 
 
 class ChargePowerSensor(PowerPilotEntity, SensorEntity):
+    """Grid-side charge power planned for the current hour (kW).
+
+    This is the "force charge X kW" setpoint to push to the inverter: the grid
+    draw, equal to the hour's stored kWh divided by charge efficiency (slots are
+    1 h so kWh == average kW). 0 when the current hour is not charging.
+    """
+
     _attr_translation_key = SENSOR_CHARGE_POWER
+    _attr_native_unit_of_measurement = "kW"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:speedometer"
 
     def __init__(self, coordinator, entry) -> None:
         super().__init__(coordinator, entry, SENSOR_CHARGE_POWER)
 
     @property
-    def native_value(self) -> str | None:
-        return self.plan.current.charge_power if self.plan and self.plan.current else None
+    def native_value(self) -> float | None:
+        if self.plan and self.plan.current:
+            return round(self.plan.current.charge_power_kw, 3)
+        return None
 
 
 class BatteryEnergyCostSensor(PowerPilotEntity, SensorEntity):

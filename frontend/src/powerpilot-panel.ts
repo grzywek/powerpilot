@@ -6,6 +6,7 @@ interface PlanHour {
   start: string;
   inverter_mode: string;
   charge_power: string;
+  charge_power_kw: number;
   grid_connected: boolean;
   ev_charge: boolean;
   ev_charge_kwh: number;
@@ -96,6 +97,7 @@ interface SeriesHour {
   forecast: TipSide | null;
   battery_charge_kwh: number | null;
   battery_discharge_kwh: number | null;
+  charge_power_kw: number | null;
   battery_energy_cost: number | null;
   grid_buy_kwh: number | null;
   ev_charge_kwh: number | null;
@@ -678,7 +680,7 @@ export class PowerPilotPanel extends LitElement {
             "Tryb falownika",
             INVERTER_MODE_META[current.inverter_mode]?.label ?? current.inverter_mode
           )}
-          ${this._stat("Moc", current.charge_power)}
+          ${this._stat("Moc ładowania", (current.charge_power_kw ?? 0).toFixed(2) + " kW")}
           ${this._stat("SoC", current.battery_soc.toFixed(0) + " %")}
           ${this._stat("Cena w baterii", current.battery_energy_cost.toFixed(2))}
           ${this._stat("Sieć", current.grid_connected ? "tak" : "nie")}
@@ -1229,6 +1231,11 @@ export class PowerPilotPanel extends LitElement {
                 ${downRows.map(compRow).join("")}
                 ${sep}
                 <tr><td style="padding:1px 0">SoC</td>${valCells(socFn)}</tr>
+                ${
+                  h.charge_power_kw != null && h.charge_power_kw > 0.005
+                    ? `<tr><td style="padding:1px 0">Moc ładowania (sieć)</td><td colspan="${sides.length}" style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px">${fmt(h.charge_power_kw)} kW</td></tr>`
+                    : ""
+                }
               </table>
             </div>
           `;

@@ -88,6 +88,10 @@ class Decision:
     grid_buy_kwh: float = 0.0
     battery_charge_kwh: float = 0.0
     battery_discharge_kwh: float = 0.0
+    # Grid-side charge power (kW) drawn this hour — the "force charge X kW"
+    # setpoint for the inverter. Hour slots are 1 h so kWh == average kW; this is
+    # the grid draw (≈ battery_charge_kwh / η_ch), distinct from the stored kWh.
+    charge_power_kw: float = 0.0
 
     # Cost incurred during the hour (PLN), negative = earned.
     # ``hour_cost`` is the *grid* cost for the hour (energy + distribution from
@@ -125,6 +129,7 @@ class Decision:
             "grid_buy_kwh": round(self.grid_buy_kwh, 3),
             "battery_charge_kwh": round(self.battery_charge_kwh, 3),
             "battery_discharge_kwh": round(self.battery_discharge_kwh, 3),
+            "charge_power_kw": round(self.charge_power_kw, 3),
             "hour_cost": round(self.hour_cost, 4),
             "energy_cost": round(self.energy_cost, 4),
             "distribution_cost": round(self.distribution_cost, 4),

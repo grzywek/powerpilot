@@ -166,10 +166,9 @@ class TariffModule(PowerPilotModule):
         if not self.hass.services.has_service(_WORKDAY_DOMAIN, _CHECK_DATE_SERVICE):
             if not self._workday_unavailable_warned:
                 self.log_warning(
-                    f"Serwis {_WORKDAY_DOMAIN}.{_CHECK_DATE_SERVICE} jeszcze "
-                    "niedostępny (integracja workday nie załadowana?) — pomijam "
-                    "klasyfikację przyszłych dni w tym cyklu i spróbuję ponownie. "
-                    "Jeśli to powtarza się stale, sprawdź integrację workday.",
+                    f"Serwis {_WORKDAY_DOMAIN}.{_CHECK_DATE_SERVICE} zniknął "
+                    "(integracja workday przeładowywana?) — pomijam klasyfikację "
+                    "przyszłych dni w tym cyklu i spróbuję ponownie.",
                     extra={"service": f"{_WORKDAY_DOMAIN}.{_CHECK_DATE_SERVICE}"},
                 )
                 self._workday_unavailable_warned = True
@@ -307,19 +306,21 @@ class TariffModule(PowerPilotModule):
         return None, tariff.id, None
 
     def _is_day_sensor_on(self, sensor_id: str, day: date, day_offset: int) -> bool:
-        """Resolve whether ``sensor_id`` is ON for ``day``."""
+        """Resolve whether ``sensor_id`` is ON ("workday") for ``day``.
+
+        Today (D+0) is read live from the sensor; future days come from the
+        ``workday.check_date`` prefetch cache. The service is a hard requirement
+        (setup is gated on it), so the cache is populated under normal operation;
+        a transient miss (e.g. workday mid-reload) keeps the last value rather
+        than guessing.
+        """
         if day_offset == 0:
             state = self.hass.states.get(sensor_id)
             return state is not None and state.state == "on"
-        if day_offset > 0:
-            cached = self._future_day_cache.get((sensor_id, day))
-            if cached is not None:
-                return cached
-            # Cache miss → sensor likely doesn't support check_date.
-            # Best effort: today's state.
-            state = self.hass.states.get(sensor_id)
-            return state is not None and state.state == "on"
-        # Past day: best effort, use today's state.
+        cached = self._future_day_cache.get((sensor_id, day))
+        if cached is not None:
+            return cached
+        # No cached classification yet — fall back to today's live state.
         state = self.hass.states.get(sensor_id)
         return state is not None and state.state == "on"
 

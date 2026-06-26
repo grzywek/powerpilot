@@ -12,7 +12,8 @@
     "recorder",
     "weather",
     "calendar",
-    "frontend"
+    "frontend",
+    "workday"
   ],
   "codeowners": [
     "@grzywek"

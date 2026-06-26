@@ -1,14 +1,26 @@
 {
   "domain": "powerpilot",
   "name": "PowerPilot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "documentation": "https://github.com/grzywek/powerpilot",
   "issue_tracker": "https://github.com/grzywek/powerpilot/issues",
-  "dependencies": ["http", "websocket_api"],
-  "after_dependencies": ["recorder", "weather", "calendar", "frontend"],
-  "codeowners": ["@grzywek"],
+  "dependencies": [
+    "http",
+    "websocket_api"
+  ],
+  "after_dependencies": [
+    "recorder",
+    "weather",
+    "calendar",
+    "frontend"
+  ],
+  "codeowners": [
+    "@grzywek"
+  ],
   "config_flow": true,
   "iot_class": "calculated",
   "integration_type": "service",
-  "requirements": ["highspy>=1.7"]
+  "requirements": [
+    "highspy>=1.7"
+  ]
 }

@@ -128,11 +128,22 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         stored = await self._snapshot_store.async_load()
         self.snapshots = SnapshotStore.from_dict(stored)
         self.snapshots.prune()
+        # Restore the modelled battery energy cost (no sensor exists for it, so a
+        # restart would otherwise reset it to 0 and wipe the cost basis of energy
+        # already stored — making "Cena w baterii" drop to ~0 until it rebuilds).
+        if stored:
+            self._battery_energy_cost = float(stored.get("battery_energy_cost") or 0.0)
+
+    def _snapshots_payload(self) -> dict:
+        return {
+            **self.snapshots.to_dict(),
+            "battery_energy_cost": round(self._battery_energy_cost, 6),
+        }
 
     async def _async_save_snapshots(self) -> None:
         if self._snapshot_store is None:
             return
-        self._snapshot_store.async_delay_save(self.snapshots.to_dict, 30.0)
+        self._snapshot_store.async_delay_save(self._snapshots_payload, 30.0)
 
     async def async_clear_data(self) -> None:
         """Wipe all persisted data/cache for this entry, keeping configuration.

@@ -48,10 +48,11 @@ from .price_sources import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# How many past days of confirmed prices to seed into the archive. Must cover the
-# 3-week estimate lookback (+ a buffer) so estimated prices have samples.
-_ARCHIVE_BACKFILL_DAYS = 22
-_ARCHIVE_RETENTION_DAYS = 90  # how long fetched prices stay in the archive
+# Maximum past days to seed into the archive in the one-time backfill at provider
+# setup. Capped at a year (the provider may serve less — missing days are simply
+# skipped). After this runs once, the forward fetch maintains the archive.
+_ARCHIVE_BACKFILL_DAYS = 365
+_ARCHIVE_RETENTION_DAYS = 365  # how long fetched prices stay in the archive
 
 
 class PriceArchive:
@@ -72,6 +73,9 @@ class PriceArchive:
     def __init__(self) -> None:
         # {utc_iso_hour: {"energy","type","source","fetched_at","p10","p90"}}
         self._entries: dict[str, dict[str, Any]] = {}
+        # Whether the one-time historical backfill has completed. Persisted so it
+        # runs once at provider setup; afterwards the forward fetch maintains it.
+        self.backfilled: bool = False
 
     @staticmethod
     def _key(hour_start: datetime) -> str:
@@ -188,13 +192,14 @@ class PriceArchive:
         self._entries = kept
 
     def to_dict(self) -> dict[str, Any]:
-        return {"entries": self._entries}
+        return {"entries": self._entries, "backfilled": self.backfilled}
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "PriceArchive":
         archive = cls()
         if data:
             archive._entries = dict(data.get("entries") or {})
+            archive.backfilled = bool(data.get("backfilled"))
         return archive
 
 
@@ -208,7 +213,6 @@ class PriceModule(PowerPilotModule):
         self._data = PriceData()
         self.archive = PriceArchive()
         self._archive_store: Store | None = None
-        self._last_archive_backfill_day: date | None = None
         self._last_source_fetch: datetime | None = None
 
     def _build_source(self) -> PriceSource:
@@ -226,15 +230,21 @@ class PriceModule(PowerPilotModule):
         self.archive = PriceArchive.from_dict(archived)
         self.archive.prune()
 
-        await self._maybe_backfill_archive()
+        # The year-long backfill can take a while (many provider calls), so run it
+        # off the setup path. On success it sets the persisted flag; if it fails or
+        # HA stops mid-run it stays unset and re-runs (idempotently) next setup.
+        if not self.archive.backfilled:
+            self.hass.async_create_background_task(
+                self._ensure_initial_backfill(), "powerpilot_price_backfill"
+            )
 
     def _refresh_interval(self) -> timedelta:
         hours = float(self.config.get(CONF_PRICE_REFRESH_HOURS, 3) or 3)
         return timedelta(hours=max(hours, 0.0))
 
     async def async_update(self) -> None:
-        await self._maybe_backfill_archive()
-
+        # Historical backfill is one-time (scheduled in async_setup); the update
+        # path only fetches forward.
         now = dt_util.now()
         # Throttle the actual source hit: forecasts only change every few hours,
         # so the optimizer runs off cached prices in between. A fresh restart
@@ -308,48 +318,53 @@ class PriceModule(PowerPilotModule):
         archived = self.archive.get(hour)
         return archived is not None and archived["type"] == PRICE_TYPE_CERTAIN
 
-    async def _maybe_backfill_archive(self) -> None:
-        """Seed the archive with settled past days so estimates have history.
+    async def _ensure_initial_backfill(self) -> None:
+        """One-time maximal historical backfill, run once at provider setup.
 
-        The archive must hold ~3 weeks of confirmed prices for the weighted
-        estimate to produce a value, so on first run (and once per day) any
-        missing past day within the lookback window is fetched and folded in.
+        Seeds the archive with up to a year of past confirmed prices (whatever
+        the provider serves — missing days are skipped). Runs once; the flag is
+        persisted, so afterwards only the forward fetch maintains the archive.
+        Re-runs after a data wipe (a fresh archive has ``backfilled=False``).
         """
         if self.config.get(CONF_PRICE_SOURCE) != PRICE_SOURCE_PRADCAST:
             return
-        today = dt_util.now().date()
-        if self._last_archive_backfill_day == today:
+        if self.archive.backfilled:
             return
 
+        source = self._build_source()
+        if not isinstance(source, PradcastPriceSource):
+            return
+
+        today = dt_util.now().date()
         wanted = [
             today - timedelta(days=offset)
             for offset in range(1, _ARCHIVE_BACKFILL_DAYS + 1)
             if not self._archive_has_day(today - timedelta(days=offset))
         ]
         if wanted:
-            source = self._build_source()
-            if isinstance(source, PradcastPriceSource):
-                data = await source.async_fetch_days(wanted)
-                stamp = dt_util.now().isoformat()
-                dirty = False
-                for hour in data.confirmed_hours:
-                    price = data.buy.get(hour)
-                    if price is None:
-                        continue
-                    if self.archive.record(
-                        hour,
-                        price,
-                        PRICE_TYPE_CERTAIN,
-                        PRICE_SOURCE_PRADCAST,
-                        stamp,
-                        formula=self._formula_for(data.tge.get(hour)),
-                    ):
-                        dirty = True
-                if dirty:
-                    self.archive.prune()
-                    await self._async_save_archive()
+            data = await source.async_fetch_days(wanted)
+            stamp = dt_util.now().isoformat()
+            for hour in data.confirmed_hours:
+                price = data.buy.get(hour)
+                if price is None:
+                    continue
+                self.archive.record(
+                    hour,
+                    price,
+                    PRICE_TYPE_CERTAIN,
+                    PRICE_SOURCE_PRADCAST,
+                    stamp,
+                    formula=self._formula_for(data.tge.get(hour)),
+                )
 
-        self._last_archive_backfill_day = today
+        self.archive.backfilled = True
+        self.archive.prune()
+        await self._async_save_archive()
+        self.log_info(
+            f"Backfill historii cen zakończony: {len(self.archive)} godzin "
+            f"(do {_ARCHIVE_BACKFILL_DAYS} dni wstecz). Dalej tylko do przodu.",
+            extra={"archive_hours": len(self.archive)},
+        )
 
     def _archive_has_day(self, day: date) -> bool:
         """Whether the archive already holds a representative hour of ``day``."""
@@ -408,8 +423,7 @@ class PriceModule(PowerPilotModule):
         if self._archive_store is not None:
             await self._archive_store.async_remove()
         self._data = PriceData()
-        self.archive = PriceArchive()
-        self._last_archive_backfill_day = None
+        self.archive = PriceArchive()  # backfilled=False → re-backfills next setup
         self._last_source_fetch = None
 
     def contribute(self, forecast: Forecast) -> None:

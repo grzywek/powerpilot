@@ -48,8 +48,10 @@ from ..const import (
 from ..models import Forecast, Tariff, tariff_for_day
 from .base import PowerPilotModule
 
-# How many days of past snapshots to keep.
-_SNAPSHOT_RETENTION_DAYS = 90
+# How many days of past snapshots to keep (matches the price archive's year).
+_SNAPSHOT_RETENTION_DAYS = 365
+# How far back the one-time distribution backfill seeds snapshots at setup.
+_SNAPSHOT_BACKFILL_DAYS = 365
 
 # How many future days to pre-fetch workday.check_date for (full 7-day horizon).
 _FUTURE_DAYS_TO_PREFETCH = 7
@@ -79,6 +81,8 @@ class TariffModule(PowerPilotModule):
         # Whether we've already warned that the workday service is missing, so a
         # startup race (workday not loaded yet) warns once instead of every cycle.
         self._workday_unavailable_warned = False
+        # Whether the one-time historical distribution backfill has run (persisted).
+        self._snapshots_backfilled = False
 
     # ------------------------------------------------------------------ setup
 
@@ -90,7 +94,15 @@ class TariffModule(PowerPilotModule):
         )
         stored = await self._store.async_load() or {}
         self._snapshots = self._prune(stored.get("snapshots") or {})
+        self._snapshots_backfilled = bool(stored.get("snapshots_backfilled"))
         self._reload_config()
+        # Year-long distribution backfill runs off the setup path (many
+        # check_date calls); sets its persisted flag on success, retries on a
+        # later setup otherwise.
+        if not self._snapshots_backfilled and self._tariffs:
+            self.hass.async_create_background_task(
+                self._ensure_snapshot_backfill(), "powerpilot_tariff_backfill"
+            )
 
     def _reload_config(self) -> None:
         raw_tariffs = self.config.get(CONF_TARIFFS) or []
@@ -274,11 +286,17 @@ class TariffModule(PowerPilotModule):
     # ------------------------------------------------------------- resolution
 
     def _resolve_price(
-        self, slot_dt: datetime, day_offset: int
+        self,
+        slot_dt: datetime,
+        day_offset: int,
+        day_on: Any | None = None,
     ) -> tuple[float | None, str | None, str | None]:
         """Return ``(price, tariff_id, period_id)`` for the given hour.
 
         Price is gross: ``(base_component_kwh + period.price_kwh) * (1 + vat_rate)``.
+        ``day_on`` overrides the workday lookup with ``day_on(sensor) -> bool``
+        (used by the historical backfill, which classifies each past day via
+        ``check_date`` up front); otherwise the live ``_is_day_sensor_on`` is used.
         """
         tariff = tariff_for_day(self._tariffs, slot_dt.date())
         if tariff is None:
@@ -292,7 +310,12 @@ class TariffModule(PowerPilotModule):
             if period.day_sensor is None:
                 price = (tariff.base_component_kwh + period.price_kwh) * vat_mul
                 return price, tariff.id, period.id
-            if not self._is_day_sensor_on(period.day_sensor, slot_dt.date(), day_offset):
+            on = (
+                day_on(period.day_sensor)
+                if day_on is not None
+                else self._is_day_sensor_on(period.day_sensor, slot_dt.date(), day_offset)
+            )
+            if not on:
                 continue
             price = (tariff.base_component_kwh + period.price_kwh) * vat_mul
             return price, tariff.id, period.id
@@ -324,6 +347,94 @@ class TariffModule(PowerPilotModule):
         state = self.hass.states.get(sensor_id)
         return state is not None and state.state == "on"
 
+    # --------------------------------------------------------------- backfill
+
+    async def _classify_day(self, sensor_id: str, day: date) -> bool | None:
+        """Workday status of a *past* ``day`` via ``workday.check_date``.
+
+        ``check_date`` computes for any date, so historical peak/off-peak is
+        resolved from the real calendar — never guessed. ``None`` on failure.
+        """
+        try:
+            response = await self.hass.services.async_call(
+                _WORKDAY_DOMAIN,
+                _CHECK_DATE_SERVICE,
+                {"check_date": day.isoformat()},
+                target={"entity_id": sensor_id},
+                blocking=True,
+                return_response=True,
+            )
+        except Exception as err:  # noqa: BLE001 — one bad day must not abort backfill
+            _LOGGER.debug("check_date backfill failed for %s %s: %s", sensor_id, day, err)
+            return None
+        return self._parse_check_date_response(response, sensor_id)
+
+    async def _ensure_snapshot_backfill(self) -> None:
+        """One-time backfill of distribution snapshots for the past year.
+
+        Lets the cost chart show full history: each past hour gets its gross
+        distribution price, with peak/off-peak resolved per day via
+        ``workday.check_date`` (the same hard source as live, never guessed).
+        Runs once — the flag is persisted; afterwards ``contribute`` maintains
+        snapshots going forward. Re-runs after a data wipe.
+        """
+        if self._snapshots_backfilled or not self._tariffs:
+            return
+        if not self.hass.services.has_service(_WORKDAY_DOMAIN, _CHECK_DATE_SERVICE):
+            # Required source not ready — skip WITHOUT marking done, retry next setup.
+            return
+
+        today = dt_util.now().date()
+        days = [today - timedelta(days=o) for o in range(1, _SNAPSHOT_BACKFILL_DAYS + 1)]
+
+        # Classify every (day_sensor, day) the relevant tariffs need, once.
+        needed: set[tuple[str, date]] = set()
+        for day in days:
+            tariff = tariff_for_day(self._tariffs, day)
+            if tariff is None:
+                continue
+            for period in tariff.periods:
+                if period.day_sensor:
+                    needed.add((period.day_sensor, day))
+        classifications: dict[tuple[str, date], bool] = {}
+        for sensor_id, day in needed:
+            result = await self._classify_day(sensor_id, day)
+            if result is not None:
+                classifications[(sensor_id, day)] = result
+
+        dirty = False
+        for day in days:
+            if tariff_for_day(self._tariffs, day) is None:
+                continue
+            for hour in range(24):
+                slot_dt = dt_util.start_of_local_day(day) + timedelta(hours=hour)
+                key = self._snapshot_key(slot_dt)
+                if key in self._snapshots:
+                    continue
+                price, tariff_id, period_id = self._resolve_price(
+                    slot_dt,
+                    -1,
+                    day_on=lambda s, d=day: classifications.get((s, d), False),
+                )
+                if price is not None:
+                    self._snapshots[key] = {
+                        "price": price,
+                        "tariff_id": tariff_id,
+                        "period_id": period_id,
+                        "backfilled": True,
+                    }
+                    dirty = True
+
+        self._snapshots_backfilled = True
+        if dirty:
+            self._snapshots = self._prune(self._snapshots)
+        self._schedule_save()
+        self.log_info(
+            f"Backfill dystrybucji zakończony: {len(self._snapshots)} godzin "
+            f"(do {_SNAPSHOT_BACKFILL_DAYS} dni wstecz).",
+            extra={"snapshot_hours": len(self._snapshots)},
+        )
+
     # --------------------------------------------------------------- snapshot
 
     @staticmethod
@@ -349,7 +460,10 @@ class TariffModule(PowerPilotModule):
         self._store.async_delay_save(self._serialise_snapshots, 30.0)
 
     def _serialise_snapshots(self) -> dict[str, Any]:
-        return {"snapshots": self._snapshots}
+        return {
+            "snapshots": self._snapshots,
+            "snapshots_backfilled": self._snapshots_backfilled,
+        }
 
     async def async_clear_data(self) -> None:
         """Drop recorded tariff snapshots and day-sensor caches.
@@ -360,6 +474,7 @@ class TariffModule(PowerPilotModule):
         if self._store is not None:
             await self._store.async_remove()
         self._snapshots = {}
+        self._snapshots_backfilled = False  # re-backfills on next setup
         self._future_day_cache = {}
         self._unsupported_sensors = set()
         self._reload_config()

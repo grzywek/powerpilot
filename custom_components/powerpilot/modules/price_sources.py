@@ -37,6 +37,9 @@ _LOGGER = logging.getLogger(__name__)
 
 PRADCAST_BASE = "https://api.pradcast.pl"
 PRADCAST_HORIZON_DAYS = 3  # today + D+1..D+3
+# Cap concurrent day fetches so the one-time year-long backfill doesn't storm the
+# API (and trip rate limits). Normal forward fetches are only a few days.
+PRADCAST_MAX_CONCURRENCY = 6
 
 _FORECAST_ATTRS = ("raw_today", "raw_tomorrow", "forecast", "prices", "today", "tomorrow")
 _START_KEYS = ("start", "hour", "from", "datetime", "time")
@@ -185,8 +188,14 @@ class PradcastPriceSource(PriceSource):
         excise = float(self.config.get(CONF_EXCISE_KWH, 0.0) or 0.0)
         session = async_get_clientsession(self.hass)
 
+        sem = asyncio.Semaphore(PRADCAST_MAX_CONCURRENCY)
+
+        async def _throttled(day: date) -> dict | None:
+            async with sem:
+                return await self._fetch_day(session, api_key, day)
+
         results = await asyncio.gather(
-            *(self._fetch_day(session, api_key, day) for day in days),
+            *(_throttled(day) for day in days),
             return_exceptions=True,
         )
         for day, payload in zip(days, results):
@@ -201,21 +210,28 @@ class PradcastPriceSource(PriceSource):
         return await self._get_json(session, api_key, f"{PRADCAST_BASE}/prices/date/{day.isoformat()}")
 
     async def _get_json(
-        self, session: aiohttp.ClientSession, api_key: str, url: str
+        self, session: aiohttp.ClientSession, api_key: str, url: str, retries: int = 3
     ) -> dict | None:
-        try:
-            async with asyncio.timeout(15):
-                async with session.get(url, headers={"X-API-Key": api_key}) as resp:
-                    if resp.status == 429:
-                        _LOGGER.warning("Pradcast rate-limited (429): %s", url)
-                        return None
-                    if resp.status != 200:
-                        _LOGGER.debug("Pradcast %s returned HTTP %s", url, resp.status)
-                        return None
-                    return await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            _LOGGER.debug("Pradcast fetch failed for %s: %s", url, err)
-            return None
+        for attempt in range(retries):
+            try:
+                async with asyncio.timeout(15):
+                    async with session.get(url, headers={"X-API-Key": api_key}) as resp:
+                        if resp.status == 429:
+                            if attempt + 1 < retries:
+                                await asyncio.sleep(1.5 * (attempt + 1))
+                                continue
+                            _LOGGER.warning(
+                                "Pradcast rate-limited (429) po %d próbach: %s", retries, url
+                            )
+                            return None
+                        if resp.status != 200:
+                            _LOGGER.debug("Pradcast %s returned HTTP %s", url, resp.status)
+                            return None
+                        return await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                _LOGGER.debug("Pradcast fetch failed for %s: %s", url, err)
+                return None
+        return None
 
     async def async_fetch_forecasts(self, target_date: date) -> dict:
         """Return horizon-indexed forecasts for a date (for the D+1..D+3 overlay).

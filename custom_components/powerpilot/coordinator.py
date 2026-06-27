@@ -507,6 +507,108 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             },
         }
 
+    async def async_consumption_stats(self, days: int = 63) -> dict:
+        """Per-profile daily kWh history + week/month trend KPIs for the panel.
+
+        For the whole-house meter and each sub-metered device, bucket the last
+        ``days`` of hourly recorder energy into local-day totals, then derive
+        rolling-window indicators (7-day and 30-day totals vs the preceding
+        window) so the panel can show "consumption up/down XX %". Today is left
+        out of the comparison windows because it is only partially elapsed.
+        """
+        from collections import defaultdict
+
+        from .const import (
+            CONF_CONSUMPTION_SENSOR,
+            CONF_DEVICE_SENSORS,
+            CONF_SENSOR_PARENTS,
+        )
+        from .hierarchy import exclusive_series
+
+        now = dt_util.now()
+        today = dt_util.start_of_local_day(now)
+        start = today - timedelta(days=days - 1)
+        end_date = now.date()
+
+        main = self.config.get(CONF_CONSUMPTION_SENSOR)
+        device_ids = list(self.config.get(CONF_DEVICE_SENSORS) or [])
+
+        # Hourly energy per sensor over the window (one recorder read each).
+        hourly: dict[str, dict] = {}
+        if main:
+            hourly[main] = await self.consumption.async_range_kwh(main, start, now)
+        for eid in device_ids:
+            hourly[eid] = await self.consumption.async_range_kwh(eid, start, now)
+
+        # Collapse nested meters to exclusive (own) energy so device totals never
+        # double-count a sub-meter and "Tło" is the true background load.
+        background = None
+        if main:
+            parents = self.config.get(CONF_SENSOR_PARENTS) or {}
+            exclusive = exclusive_series(main, device_ids, parents, hourly)
+            background = exclusive.get(main, {})
+
+        def _name(eid: str) -> str:
+            state = self.hass.states.get(eid)
+            return (state and state.attributes.get("friendly_name")) or eid
+
+        def _profile(key: str, name: str, series: dict, icon: str) -> dict:
+            daily: dict = defaultdict(float)
+            for hour, kwh in series.items():
+                daily[dt_util.as_local(hour).date()] += kwh
+            out_series = []
+            day = start.date()
+            while day <= end_date:
+                out_series.append(
+                    {
+                        "date": day.isoformat(),
+                        "kwh": round(daily.get(day, 0.0), 3),
+                        "partial": day == end_date,
+                    }
+                )
+                day += timedelta(days=1)
+
+            def window(offset: int, length: int) -> float:
+                return sum(
+                    daily.get(end_date - timedelta(days=i), 0.0)
+                    for i in range(offset, offset + length)
+                )
+
+            def pct(cur: float, prev: float) -> float | None:
+                if prev <= 1e-6:
+                    return None
+                return round((cur - prev) / prev * 100.0, 1)
+
+            # Complete days only — start one day back so today's partial is excluded.
+            week, prev_week = window(1, 7), window(8, 7)
+            month, prev_month = window(1, 30), window(31, 30)
+            return {
+                "key": key,
+                "name": name,
+                "icon": icon,
+                "daily": out_series,
+                "avg_daily": round(week / 7.0, 3),
+                "week_total": round(week, 3),
+                "week_change_pct": pct(week, prev_week),
+                "month_total": round(month, 3),
+                "month_change_pct": pct(month, prev_month),
+            }
+
+        profiles: list[dict] = []
+        if main:
+            profiles.append(_profile("__main__", "Dom (całość)", hourly[main], "mdi:home-lightning-bolt"))
+            if device_ids and background is not None:
+                profiles.append(_profile("__base__", "Tło (baza)", background, "mdi:home-outline"))
+        for eid in device_ids:
+            profiles.append(_profile(eid, _name(eid), hourly.get(eid, {}), "mdi:flash"))
+
+        return {
+            "generated_at": now.isoformat(),
+            "window_days": days,
+            "learned_days": self.consumption.base.observed_days,
+            "profiles": profiles,
+        }
+
     async def get_diagnostics(self) -> dict:
         """Readiness report: does the optimizer have every input it needs?
 
@@ -1190,6 +1292,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             devices: dict | None = None,
             soc_start: float | None = None,
             soc_end: float | None = None,
+            ev_soc_start: float | None = None,
+            ev_soc_end: float | None = None,
         ) -> dict | None:
             """One side (realized or forecast) of the tooltip's split breakdown.
 
@@ -1217,6 +1321,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "devices": dev,
                 "soc_start": _r(soc_start, 1),
                 "soc_end": _r(soc_end, 1),
+                "ev_soc_start": _r(ev_soc_start, 1),
+                "ev_soc_end": _r(ev_soc_end, 1),
             }
 
         hours: list[dict] = []
@@ -1228,6 +1334,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # forward; seed from the hour just before the window (the recorder reads
         # one extra hour back exactly for this).
         prev_soc = soc_real.get(past_start - timedelta(hours=1))
+        prev_ev_soc = ev_soc_real.get(past_start - timedelta(hours=1))
 
         # ----- Past hours -----
         h = past_start
@@ -1302,6 +1409,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 devices=dev_real_h,
                 soc_start=prev_soc,
                 soc_end=soc_real.get(h),
+                ev_soc_start=prev_ev_soc,
+                ev_soc_end=ev_soc_real.get(h),
             )
             # Forecast side = the single plan made AT this hour (vintage run_at==h,
             # index 0), so soc/charge/grid all belong to one coherent trajectory.
@@ -1369,6 +1478,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
             if h in soc_real:
                 prev_soc = soc_real[h]
+            if h in ev_soc_real:
+                prev_ev_soc = ev_soc_real[h]
             h += timedelta(hours=1)
 
         # ----- Current (in-progress) hour: realized-so-far + whole-hour forecast -----
@@ -1426,6 +1537,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # Realized-so-far per-component breakdown.
             cur_dev_sum = sum(v for v in cur_devices.values() if v is not None)
             cur_base = max(0.0, cur_main - cur_dev_sum) if cur_main is not None else None
+            cur_ev_soc = ev_soc_real.get(now)
+            if cur_ev_soc is None:
+                cur_ev_soc = self.ev.soc
             realized_side = _side(
                 grid=cur_grid,
                 discharge=cur_discharge,
@@ -1435,6 +1549,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 devices=cur_devices,
                 soc_start=prev_soc,
                 soc_end=live_soc,
+                ev_soc_start=prev_ev_soc,
+                ev_soc_end=cur_ev_soc,
             )
             # Whole-hour forecast from the plan's current-hour decision.
             cur_dec = cur_slot = None
@@ -1454,6 +1570,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     devices=dev_forecast,
                     soc_start=prev_soc,
                     soc_end=cur_dec.battery_soc,
+                    ev_soc_start=prev_ev_soc,
+                    ev_soc_end=cur_dec.ev_soc,
                 )
             hours.append(
                 {
@@ -1524,6 +1642,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             emitted_current = True
             if live_soc:
                 prev_soc = live_soc
+            if cur_ev_soc is not None:
+                prev_ev_soc = cur_ev_soc
 
         # ----- Future hours from plan -----
         plan = self.data
@@ -1565,6 +1685,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                             devices=dev_forecast,
                             soc_start=prev_soc,
                             soc_end=decision.battery_soc,
+                            ev_soc_start=prev_ev_soc,
+                            ev_soc_end=decision.ev_soc,
                         ),
                         "buy_price": slot.buy_price,
                         "distribution_price_kwh": slot.distribution_price_kwh,
@@ -1597,6 +1719,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     }
                 )
                 prev_soc = decision.battery_soc
+                if decision.ev_soc is not None:
+                    prev_ev_soc = decision.ev_soc
 
         return {
             # Exact present instant — the panel draws the "teraz" line here.

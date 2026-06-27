@@ -88,6 +88,25 @@ interface Profiles {
   devices: Record<string, Matrix>;
 }
 
+interface StatProfile {
+  key: string;
+  name: string;
+  icon: string;
+  daily: { date: string; kwh: number; partial: boolean }[];
+  avg_daily: number;
+  week_total: number;
+  week_change_pct: number | null;
+  month_total: number;
+  month_change_pct: number | null;
+}
+
+interface ConsumptionStats {
+  generated_at: string;
+  window_days: number;
+  learned_days: number;
+  profiles: StatProfile[];
+}
+
 interface ForecastPoint {
   hour: number;
   buy: number | null;
@@ -142,6 +161,8 @@ interface TipSide {
   devices: Record<string, number>;
   soc_start: number | null;
   soc_end: number | null;
+  ev_soc_start: number | null;
+  ev_soc_end: number | null;
 }
 
 interface Series {
@@ -344,6 +365,9 @@ export class PowerPilotPanel extends LitElement {
   @state() private _status: Status | null = null;
   @state() private _log: LogEvent[] = [];
   @state() private _profiles: Profiles | null = null;
+  @state() private _stats: ConsumptionStats | null = null;
+  @state() private _statsLoading = false;
+  @state() private _statsKey: string | null = null;
   @state() private _forecasts: Forecasts | null = null;
   @state() private _series: Series | null = null;
   @state() private _error: string | null = null;
@@ -496,9 +520,29 @@ export class PowerPilotPanel extends LitElement {
     }
   }
 
+  private async _loadStats(): Promise<void> {
+    if (!this.hass) return;
+    this._statsLoading = true;
+    try {
+      this._stats = await this.hass.callWS({ type: "powerpilot/consumption_stats" });
+      // Default selection: whole-house profile, else the first one.
+      if (this._stats?.profiles?.length && !this._statsKey) {
+        this._statsKey = this._stats.profiles[0].key;
+      }
+      this._error = null;
+    } catch (err: any) {
+      this._error = err?.message ?? String(err);
+    } finally {
+      this._statsLoading = false;
+    }
+  }
+
   private _selectTab(tab: Tab): void {
     this._tab = tab;
-    if (tab === "profiles") this._loadForecasts();
+    if (tab === "profiles") {
+      this._loadForecasts();
+      this._loadStats();
+    }
     if (tab === "prices") this._loadPrices();
     if (tab === "simulations") this._loadSimulations();
     if (tab === "diagnostics") this._loadDiagnostics();
@@ -1115,7 +1159,7 @@ export class PowerPilotPanel extends LitElement {
     return {
       chart: {
         type: "line",
-        height: 460,
+        height: 598, // ~30% taller than the original 460
         stacked: true,
         animations: { enabled: false },
         toolbar: {
@@ -1258,6 +1302,11 @@ export class PowerPilotPanel extends LitElement {
             g.soc_start == null && g.soc_end == null
               ? "—"
               : `${g.soc_start != null ? g.soc_start.toFixed(0) : "—"} → ${g.soc_end != null ? g.soc_end.toFixed(0) : "—"} %`;
+          const evSocFn = (g: TipSide) =>
+            g.ev_soc_start == null && g.ev_soc_end == null
+              ? "—"
+              : `${g.ev_soc_start != null ? g.ev_soc_start.toFixed(0) : "—"} → ${g.ev_soc_end != null ? g.ev_soc_end.toFixed(0) : "—"} %`;
+          const hasEvSoc = sides.some((s) => s.g.ev_soc_start != null || s.g.ev_soc_end != null);
           const sep = `<tr><td colspan="${sides.length + 1}" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>`;
           const header =
             sides.length > 1
@@ -1281,6 +1330,7 @@ export class PowerPilotPanel extends LitElement {
                 ${downRows.map(compRow).join("")}
                 ${sep}
                 <tr><td style="padding:1px 0">SoC</td>${valCells(socFn)}</tr>
+                ${hasEvSoc ? `<tr><td style="padding:1px 0">SoC EV</td>${valCells(evSocFn)}</tr>` : ""}
                 ${
                   h.charge_power_kw != null && h.charge_power_kw > 0.005
                     ? `<tr><td style="padding:1px 0">Moc ładowania (sieć)</td><td colspan="${sides.length}" style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px">${fmt(h.charge_power_kw)} kW</td></tr>`
@@ -2092,21 +2142,159 @@ export class PowerPilotPanel extends LitElement {
   // Profiles (7×24 heatmaps + D+1..D+3 overlay)
   // ------------------------------------------------------------------
   private _renderProfiles(): TemplateResult {
-    const p = this._profiles;
+    const stats = this._stats;
+    if (this._statsLoading && !stats)
+      return html`<div class="card empty">Ładowanie profili zużycia…</div>`;
+    if (!stats || !stats.profiles.length)
+      return html`<div class="card empty">
+        Brak danych o zużyciu — skonfiguruj czujnik zużycia (i opcjonalnie czujniki urządzeń).
+      </div>`;
+
+    const sel =
+      stats.profiles.find((p) => p.key === this._statsKey) ?? stats.profiles[0];
+
     return html`
-      ${p
-        ? html`
-            <div class="card">
-              <div class="card-title">Profil zużycia (bazowy) — 7×24 (${p.consumption_days} dni)</div>
-              ${this._heatmap(p.consumption, "kWh")}
-            </div>
-          `
-        : html`<div class="card empty">Ładowanie profili…</div>`}
+      <div class="card">
+        <div class="card-title">Profile zużycia</div>
+        <div class="prof-chips">
+          ${stats.profiles.map(
+            (p) => html`
+              <button
+                class="prof-chip ${p.key === sel.key ? "active" : ""}"
+                @click=${() => {
+                  this._statsKey = p.key;
+                }}
+              >
+                <ha-icon icon=${p.icon}></ha-icon>
+                <span>${p.name}</span>
+                <span class="prof-chip-kwh">${p.avg_daily.toFixed(1)} kWh/d</span>
+              </button>
+            `
+          )}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">${sel.name} — wskaźniki</div>
+        <div class="kpi-grid">
+          ${this._kpi("Średnio / dzień", `${sel.avg_daily.toFixed(1)} kWh`, null, "ost. 7 dni")}
+          ${this._kpi(
+            "Ten tydzień",
+            `${sel.week_total.toFixed(1)} kWh`,
+            sel.week_change_pct,
+            "vs poprzednie 7 dni"
+          )}
+          ${this._kpi(
+            "Ten miesiąc",
+            `${sel.month_total.toFixed(1)} kWh`,
+            sel.month_change_pct,
+            "vs poprzednie 30 dni"
+          )}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Zużycie dzienne — ostatnie ${Math.min(sel.daily.length, 30)} dni</div>
+        ${this._dailyBars(sel)}
+      </div>
+
+      ${this._heatmapForKey(sel.key)}
+
       <div class="card">
         <div class="card-title">
-          Prognozy D+1..D+3 ${this._forecasts ? "— " + this._forecasts.date : ""}
+          Prognozy cen D+1..D+3 ${this._forecasts ? "— " + this._forecasts.date : ""}
         </div>
         ${this._renderForecastOverlay()}
+      </div>
+    `;
+  }
+
+  /** A single KPI tile; `change` colours green (down = good for consumption). */
+  private _kpi(
+    label: string,
+    value: string,
+    change: number | null,
+    sub: string
+  ): TemplateResult {
+    return html`
+      <div class="kpi">
+        <div class="kpi-label">${label}</div>
+        <div class="kpi-value">${value}</div>
+        <div class="kpi-sub">
+          ${change == null
+            ? html`<span class="muted">${sub}</span>`
+            : html`<span class="kpi-delta ${change <= 0 ? "down" : "up"}">
+                  ${change <= 0 ? "▼" : "▲"} ${Math.abs(change).toFixed(1)}%
+                </span>
+                <span class="muted">${sub}</span>`}
+        </div>
+      </div>
+    `;
+  }
+
+  /** SVG daily bar chart for the last 30 days of a profile. */
+  private _dailyBars(p: StatProfile): TemplateResult {
+    const days = p.daily.slice(-30);
+    if (!days.length) return html`<div class="empty">Brak danych dziennych.</div>`;
+    const max = Math.max(0.001, ...days.map((d) => d.kwh));
+    const w = 760;
+    const ht = 200;
+    const padB = 26;
+    const padT = 8;
+    const gap = 3;
+    const bw = (w - (days.length - 1) * gap) / days.length;
+    const dark = this._isDark();
+    const fg = dark ? "#9ca3af" : "#6b7280";
+    return html`
+      <svg viewBox="0 0 ${w} ${ht}" class="chart" style="width:100%">
+        ${days.map((d, i) => {
+          const h = (d.kwh / max) * (ht - padB - padT);
+          const x = i * (bw + gap);
+          const y = ht - padB - h;
+          const dt = new Date(d.date + "T00:00:00");
+          const weekend = dt.getDay() === 0 || dt.getDay() === 6;
+          const color = d.partial ? "#9ca3af" : weekend ? "#f59e0b" : "#3b82f6";
+          const label = `${dt.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" })}: ${d.kwh.toFixed(2)} kWh${d.partial ? " (dziś, niepełny)" : ""}`;
+          return svg`<rect x=${x} y=${y} width=${Math.max(bw, 0.5)} height=${Math.max(h, 0)}
+              rx="1.5" fill=${color} opacity=${d.partial ? 0.5 : 0.9}>
+              <title>${label}</title></rect>
+            ${
+              i % 5 === 0
+                ? svg`<text x=${x + bw / 2} y=${ht - 8} text-anchor="middle" font-size="10" fill=${fg}>${dt.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" })}</text>`
+                : nothing
+            }`;
+        })}
+        <text x="2" y="12" font-size="10" fill=${fg}>${max.toFixed(1)} kWh</text>
+      </svg>
+      <div class="legend-row">
+        <span><i class="dot-sq" style="background:#3b82f6"></i> dzień roboczy</span>
+        <span><i class="dot-sq" style="background:#f59e0b"></i> weekend</span>
+        <span><i class="dot-sq" style="background:#9ca3af"></i> dziś (niepełny)</span>
+      </div>
+    `;
+  }
+
+  /** 7×24 heatmap for the selected profile, mapped from the learned matrices. */
+  private _heatmapForKey(key: string): TemplateResult {
+    const p = this._profiles;
+    if (!p) return html``;
+    let matrix: Matrix | null = null;
+    let note = "";
+    if (key === "__base__") {
+      matrix = p.consumption;
+    } else if (key === "__main__") {
+      note = "Heatmapa 7×24 dostępna dla tła i poszczególnych urządzeń.";
+    } else {
+      matrix = p.devices[key] ?? null;
+    }
+    return html`
+      <div class="card">
+        <div class="card-title">
+          Profil tygodniowy 7×24 (${p.consumption_days} dni nauki)
+        </div>
+        ${matrix
+          ? this._heatmap(matrix, "kWh")
+          : html`<div class="empty">${note || "Brak wyuczonego profilu."}</div>`}
       </div>
     `;
   }
@@ -2686,6 +2874,98 @@ export class PowerPilotPanel extends LitElement {
       margin-top: 10px;
       font-size: 12px;
       color: var(--secondary-text-color);
+    }
+    .prof-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .prof-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--divider-color, #444);
+      background: var(--card-background-color, #1c1c1c);
+      color: var(--primary-text-color);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.12s ease;
+    }
+    .prof-chip:hover {
+      border-color: var(--primary-color);
+    }
+    .prof-chip.active {
+      background: var(--primary-color);
+      border-color: var(--primary-color);
+      color: #fff;
+    }
+    .prof-chip ha-icon {
+      --mdc-icon-size: 18px;
+    }
+    .prof-chip-kwh {
+      opacity: 0.65;
+      font-variant-numeric: tabular-nums;
+      font-size: 12px;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+    }
+    .kpi {
+      padding: 14px 16px;
+      border-radius: 10px;
+      background: var(--secondary-background-color, rgba(255, 255, 255, 0.04));
+      border: 1px solid var(--divider-color, #333);
+    }
+    .kpi-label {
+      font-size: 12px;
+      color: var(--secondary-text-color);
+      margin-bottom: 4px;
+    }
+    .kpi-value {
+      font-size: 24px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .kpi-sub {
+      margin-top: 6px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .kpi-delta {
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 6px;
+      font-variant-numeric: tabular-nums;
+    }
+    .kpi-delta.down {
+      color: #16a34a;
+      background: rgba(22, 163, 74, 0.13);
+    }
+    .kpi-delta.up {
+      color: #dc2626;
+      background: rgba(220, 38, 38, 0.13);
+    }
+    .legend-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--secondary-text-color);
+    }
+    .legend-row .dot-sq {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      margin-right: 4px;
+      vertical-align: middle;
     }
     .legend-bar {
       flex: 1;

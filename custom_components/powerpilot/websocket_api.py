@@ -163,6 +163,19 @@ async def ws_diagnostics(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], result)
 
 
+@websocket_api.websocket_command(
+    {vol.Required("type"): "powerpilot/consumption_stats", vol.Optional("days"): int}
+)
+@websocket_api.async_response
+async def ws_consumption_stats(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass)
+    if not coordinator:
+        connection.send_result(msg["id"], {})
+        return
+    result = await coordinator.async_consumption_stats(msg.get("days", 63))
+    connection.send_result(msg["id"], result)
+
+
 @callback
 def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_plan)
@@ -177,3 +190,4 @@ def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_accuracy)
     websocket_api.async_register_command(hass, ws_debug)
     websocket_api.async_register_command(hass, ws_diagnostics)
+    websocket_api.async_register_command(hass, ws_consumption_stats)

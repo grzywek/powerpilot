@@ -404,32 +404,24 @@ export class PowerPilotPanel extends LitElement {
     super.disconnectedCallback();
   }
 
-  /** Compute the start/end ISO strings for the current window. */
-  private _computeWindow(): { start: Date; end: Date; pastHours: number } {
-    const hours = RANGE_HOURS[this._rangeMode];
-    // anchor = right edge of window. Null means "live" — extend the right
-    // edge to the end of whatever forecast horizon the backend currently
-    // has (up to 96h), capped to a sensible default if no plan loaded yet.
-    const live = this._anchor === null;
-    const end = live ? this._liveEdge() : new Date(this._anchor!);
-    const start = new Date(end.getTime() - hours * 3600 * 1000);
-    return { start, end, pastHours: hours };
+  /** Local midnight (00:00) of the given date. */
+  private _midnight(d: Date): Date {
+    const m = new Date(d);
+    m.setHours(0, 0, 0, 0);
+    return m;
   }
 
-  /** Right edge of the "live" window: end of plan horizon or now+24h fallback. */
-  private _liveEdge(): Date {
-    const plan = this._plan;
-    if (plan?.hours?.length) {
-      const last = plan.hours[plan.hours.length - 1];
-      const t = new Date(last.start);
-      if (!isNaN(t.getTime())) return new Date(t.getTime() + 3600 * 1000);
-    }
-    if (plan?.forecast?.length) {
-      const last = plan.forecast[plan.forecast.length - 1];
-      const t = new Date(last.start);
-      if (!isNaN(t.getTime())) return new Date(t.getTime() + 3600 * 1000);
-    }
-    return new Date(Date.now() + 24 * 3600 * 1000);
+  /** Compute the start/end of the current window.
+   *
+   * The window always starts at **local midnight** of the selected day and
+   * spans whole days: 24h = one day, 3d = three days, 7d = a week. `_anchor`
+   * holds that start day; `null` means "today" (live). The selected date is
+   * therefore always the left edge of the chart. */
+  private _computeWindow(): { start: Date; end: Date; pastHours: number } {
+    const hours = RANGE_HOURS[this._rangeMode];
+    const start = this._midnight(this._anchor ?? new Date());
+    const end = new Date(start.getTime() + hours * 3600 * 1000);
+    return { start, end, pastHours: hours };
   }
 
   private async _refresh(): Promise<void> {
@@ -469,12 +461,13 @@ export class PowerPilotPanel extends LitElement {
     this._refresh();
   }
 
-  private _shiftAnchor(deltaHours: number): void {
-    const { end } = this._computeWindow();
-    const next = new Date(end.getTime() + deltaHours * 3600 * 1000);
-    // Snap back to live mode if user navigates past the available horizon edge.
-    const liveEdge = this._liveEdge().getTime();
-    this._anchor = next.getTime() >= liveEdge ? null : next;
+  /** Move the window's start day by ±1 day (the « / » buttons). */
+  private _shiftDay(delta: number): void {
+    const start = this._midnight(this._anchor ?? new Date());
+    start.setDate(start.getDate() + delta);
+    // Landing back on today returns to live mode (so "teraz" lights up).
+    const today = this._midnight(new Date());
+    this._anchor = start.getTime() === today.getTime() ? null : start;
     this._refresh();
   }
 
@@ -486,9 +479,11 @@ export class PowerPilotPanel extends LitElement {
   private _onDatePick(ev: Event): void {
     const value = (ev.target as HTMLInputElement).value;
     if (!value) return;
-    // Treat date picker value as end-of-day local time so users see that day's data.
-    const d = new Date(value + "T23:59:59");
-    this._anchor = d;
+    // The picked date is the window's start (local midnight). Picking today
+    // returns to live mode.
+    const picked = this._midnight(new Date(value + "T00:00:00"));
+    const today = this._midnight(new Date());
+    this._anchor = picked.getTime() === today.getTime() ? null : picked;
     this._refresh();
   }
 
@@ -726,26 +721,31 @@ export class PowerPilotPanel extends LitElement {
   private _renderNavBar(): TemplateResult {
     const { start, end } = this._computeWindow();
     const isLive = this._anchor === null;
+    // `end` is the exclusive midnight after the window; the last day shown is
+    // the day before it.
+    const lastDay = new Date(end.getTime() - 24 * 3600 * 1000);
     const fmtDay = (d: Date) =>
       d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit", year: "numeric" });
-    const fmtHour = (d: Date) =>
-      d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+    // Date picker shows the window START (local day), formatted in local time
+    // so it matches what the user picked (not a UTC-shifted day).
     const datePickerValue = (() => {
-      const d = isLive ? new Date() : new Date(this._anchor!);
-      return d.toISOString().slice(0, 10);
+      const d = this._midnight(this._anchor ?? new Date());
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
     })();
-    const stepHours = this._rangeMode === "24h" ? 24 : this._rangeMode === "3d" ? 24 : 24;
     return html`
       <div class="card nav-card">
         <div class="nav-row">
-          <button class="nav-btn" @click=${() => this._shiftAnchor(-stepHours)} title="Cofnij o dzień">«</button>
+          <button class="nav-btn" @click=${() => this._shiftDay(-1)} title="Poprzedni dzień">«</button>
           <input
             type="date"
             class="nav-date"
             .value=${datePickerValue}
             @change=${this._onDatePick}
           />
-          <button class="nav-btn" @click=${() => this._shiftAnchor(stepHours)} title="Następny dzień">»</button>
+          <button class="nav-btn" @click=${() => this._shiftDay(1)} title="Następny dzień">»</button>
           <button class="nav-btn ${isLive ? "active" : ""}" @click=${this._goLive} title="Na żywo">● teraz</button>
           <div class="nav-spacer"></div>
           ${(["24h", "3d", "7d"] as RangeMode[]).map(
@@ -760,8 +760,8 @@ export class PowerPilotPanel extends LitElement {
           )}
         </div>
         <div class="nav-info">
-          Okno: <strong>${fmtDay(start)} ${fmtHour(start)}</strong> →
-          <strong>${fmtDay(end)} ${fmtHour(end)}</strong>
+          Okno: <strong>${fmtDay(start)}</strong> →
+          <strong>${fmtDay(lastDay)}</strong>
           ${isLive ? html`<span class="muted"> · tryb live</span>` : nothing}
         </div>
       </div>
@@ -978,6 +978,9 @@ export class PowerPilotPanel extends LitElement {
   private _buildEnergyOptions(s: Series): any {
     const hrs = s.hours;
     const ts = hrs.map((h) => new Date(h.start).getTime());
+    const { start: winStartD, end: winEndD } = this._computeWindow();
+    const winStart = winStartD.getTime();
+    const winEnd = winEndD.getTime();
 
     const pair = (extract: (h: SeriesHour) => number | null) =>
       ts.map((t, i) => ({ x: t, y: extract(hrs[i]) }));
@@ -1137,6 +1140,10 @@ export class PowerPilotPanel extends LitElement {
       series,
       xaxis: {
         type: "datetime",
+        // Pin the axis to the whole requested window so the chart always spans
+        // midnight→end-of-window, even when data is missing at an edge.
+        min: winStart,
+        max: winEnd,
         labels: {
           datetimeUTC: false,
           format: this._rangeMode === "24h" ? "HH:mm" : "dd.MM HH:mm",
@@ -1297,6 +1304,7 @@ export class PowerPilotPanel extends LitElement {
         xaxis: [
           ...this._inverterModeAnnotations(s),
           ...this._dayBoundaryAnnotations(s),
+          ...this._evForcedAnnotations(),
           {
             x: nowTs,
             borderColor: nowColor,
@@ -1308,14 +1316,72 @@ export class PowerPilotPanel extends LitElement {
             },
           },
         ],
+        points: this._evDeadlineAnnotations(),
       },
     };
+  }
+
+  /** Calendar deadline targets ("Kotek 100%") as points on the SoC axis, drawn
+   *  at (deadline, target SoC%) so the chart shows where the car must reach a
+   *  given charge level. */
+  private _evDeadlineAnnotations(): any[] {
+    const targets = this._status?.ev?.targets ?? [];
+    return targets
+      .map((t) => ({ ts: new Date(t.deadline).getTime(), soc: t.target_soc }))
+      .filter((t) => !isNaN(t.ts))
+      .map((t) => ({
+        x: t.ts,
+        y: t.soc,
+        yAxisIndex: 1,
+        marker: { size: 6, fillColor: "#3498db", strokeColor: "#ffffff", strokeWidth: 2 },
+        label: {
+          text: `🚗 ${t.soc}%`,
+          borderColor: "#3498db",
+          style: { background: "#3498db", color: "#ffffff", fontSize: "11px" },
+        },
+      }));
+  }
+
+  /** Manual ("forced") calendar windows as shaded x-axis regions. */
+  private _evForcedAnnotations(): any[] {
+    const HOUR = 3600 * 1000;
+    const hours = (this._status?.ev?.forced_hours ?? [])
+      .map((iso) => new Date(iso).getTime())
+      .filter((t) => !isNaN(t))
+      .sort((a, b) => a - b);
+    if (!hours.length) return [];
+    // Merge consecutive 1-hour slots into one region.
+    const regions: { x: number; x2: number }[] = [];
+    let start = hours[0];
+    let prev = hours[0];
+    for (let i = 1; i <= hours.length; i++) {
+      const cur = hours[i];
+      if (cur !== prev + HOUR) {
+        regions.push({ x: start, x2: prev + HOUR });
+        if (cur != null) start = cur;
+      }
+      prev = cur;
+    }
+    return regions.map((r) => ({
+      x: r.x,
+      x2: r.x2,
+      fillColor: "#3498db",
+      opacity: 0.1,
+      label: {
+        text: "EV",
+        position: "top",
+        style: { background: "#3498db", color: "#ffffff", fontSize: "10px" },
+      },
+    }));
   }
 
   /** Build ApexCharts options for the price chart (PLN/kWh line + PLN/h bars). */
   private _buildPriceOptions(s: Series): any {
     const hrs = s.hours;
     const ts = hrs.map((h) => new Date(h.start).getTime());
+    const { start: winStartD, end: winEndD } = this._computeWindow();
+    const winStart = winStartD.getTime();
+    const winEnd = winEndD.getTime();
 
     // Single continuous line for total price (energy + distribution).
     // Tooltip shows the breakdown + confirmed/forecast indicator.
@@ -1363,6 +1429,8 @@ export class PowerPilotPanel extends LitElement {
       series,
       xaxis: {
         type: "datetime",
+        min: winStart,
+        max: winEnd,
         labels: {
           datetimeUTC: false,
           format: this._rangeMode === "24h" ? "HH:mm" : "dd.MM HH:mm",

@@ -1037,6 +1037,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_BATTERY_DISCHARGE_SENSOR,
             CONF_CONSUMPTION_SENSOR,
             CONF_DEVICE_SENSORS,
+            CONF_EV_ENERGY_ADDED_SENSOR,
             CONF_EV_SOC_SENSOR,
             CONF_GRID_IMPORT_SENSOR,
             CONF_SENSOR_PARENTS,
@@ -1124,6 +1125,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         bat_charge_real = await _read_opt(CONF_BATTERY_CHARGE_SENSOR)
         bat_discharge_real = await _read_opt(CONF_BATTERY_DISCHARGE_SENSOR)
         grid_import_real = await _read_opt(CONF_GRID_IMPORT_SENSOR)
+        # Realized EV charging per hour from the session energy-added counter
+        # (total_increasing; async_range_kwh already ignores session resets).
+        ev_charge_real = await _read_opt(CONF_EV_ENERGY_ADDED_SENSOR)
 
         # Realized inverter mode from the measured battery flows (so the history
         # shows what the inverter *actually* did, not a plan). Charging wins ties.
@@ -1253,6 +1257,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 grid=g_real,
                 discharge=d_real,
                 base=base_real,
+                ev=ev_charge_real.get(h),
                 charge=c_real,
                 devices=dev_real_h,
                 soc_start=prev_soc,
@@ -1305,7 +1310,14 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     # snapshot capture of this field.
                     "battery_energy_cost": bcost,
                     "grid_buy_kwh": round(grid_import_real[h], 3) if h in grid_import_real else None,
-                    "ev_charge_kwh": None,
+                    # Realized EV charge from the energy-added meter; when that
+                    # sensor isn't configured, fall back to the planned EV charge
+                    # recorded for this hour so charging stays visible.
+                    "ev_charge_kwh": (
+                        round(ev_charge_real[h], 3)
+                        if h in ev_charge_real
+                        else sn.run0_at(h, "ev")
+                    ),
                     "hour_cost": real_hour_cost,
                     "energy_cost": real_energy_cost,
                     "distribution_cost": real_dist_cost,
@@ -1324,8 +1336,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # part forecast. We draw the realized-so-far bar (so SoC and bars agree)
         # and the tooltip shows both sides: realized up to ``real_now`` and the
         # plan's forecast for the whole hour.
+        # Only when the live hour actually falls inside the requested window —
+        # a past-day window ends at/before `now`, a future-day window starts
+        # after it; in both cases the in-progress hour is off-screen.
         emitted_current = False
-        if real_now > now and (window_end is None or window_end > now):
+        if (
+            real_now > now
+            and now >= past_start
+            and (window_end is None or window_end > now)
+        ):
 
             async def _partial(conf_key: str) -> float | None:
                 sensor = self.config.get(conf_key)
@@ -1336,6 +1355,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             cur_charge = await _partial(CONF_BATTERY_CHARGE_SENSOR)
             cur_discharge = await _partial(CONF_BATTERY_DISCHARGE_SENSOR)
             cur_grid = await _partial(CONF_GRID_IMPORT_SENSOR)
+            cur_ev = await _partial(CONF_EV_ENERGY_ADDED_SENSOR)
             cur_main = (
                 await self.consumption.async_partial_kwh(main_sensor, now, real_now)
                 if main_sensor
@@ -1370,6 +1390,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 grid=cur_grid,
                 discharge=cur_discharge,
                 base=cur_base,
+                ev=cur_ev,
                 charge=cur_charge,
                 devices=cur_devices,
                 soc_start=prev_soc,
@@ -1425,7 +1446,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     ),
                     "battery_energy_cost": round(self._battery_energy_cost, 4),
                     "grid_buy_kwh": round(cur_grid, 3) if cur_grid is not None else None,
-                    "ev_charge_kwh": None,
+                    # Realized so far, else the plan's EV charge for this hour.
+                    "ev_charge_kwh": (
+                        round(cur_ev, 3)
+                        if cur_ev is not None
+                        else (round(cur_dec.ev_charge_kwh, 3) if cur_dec is not None else None)
+                    ),
                     # Realized-so-far costs for the in-progress hour (partial flows).
                     "hour_cost": (
                         round(cur_grid * total_price, 4)

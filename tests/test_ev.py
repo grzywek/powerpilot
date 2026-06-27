@@ -129,11 +129,12 @@ def test_target_fills_cheapest_hours_before_deadline() -> None:
         targets=[EVChargeTarget(deadline=BASE + timedelta(hours=5), target_soc=50.0)],
     )
     alloc = _hours(_optimizer()._plan_ev(fc, req))
-    # Full-power blocks: 18 kWh needed at 7 kW → 3 hours = 21 kWh (overshoots by
-    # one whole hour rather than throttling the last one).
-    assert round(sum(alloc.values()), 3) == 21.0
-    # Cheapest available pre-deadline hours filled first, each at full power.
-    assert alloc[2] == 7.0 and alloc[3] == 7.0 and alloc[4] == 7.0
+    # 18 kWh at 7 kW → 3 on-hours (ceil), exact: two full blocks + a 4 kWh
+    # remainder. Full power lands on the two cheapest hours (h2/h3 @ 0.2); the
+    # remainder lands on the priciest valid top-off hour (h4 @ 0.8), since the
+    # partial buys less energy there — cost-optimal, not an overshoot.
+    assert round(sum(alloc.values()), 3) == 18.0
+    assert alloc[2] == 7.0 and alloc[3] == 7.0 and round(alloc[4], 3) == 4.0
     assert all(h < 5 for h in alloc)
 
 
@@ -161,7 +162,34 @@ def test_partial_lands_on_last_chronological_hour_not_cheapest() -> None:
     # Early hours full power (incl. the priciest chosen one), remainder last.
     assert alloc[0] == 10.5 and alloc[1] == 10.5
     assert round(alloc[2], 3) == 0.75
-    assert 0 in alloc and 1 in alloc and 2 in alloc
+
+
+def test_skips_expensive_full_hour_for_cheaper_remainder() -> None:
+    # The key cost-optimal case: a real on/off charger draws FULL power the moment
+    # an hour opens, so the planner must not start in an expensive hour just to
+    # later top off cheaply. With 3h10m of charging needed and:
+    #   h0 0.50 | h1 0.20 | h2 0.20 | h3 0.20 | h4 0.60
+    # the right answer is full power on the three 0.20 hours (h1-h3) and the small
+    # remainder on h4 (0.60) — NOT a full hour at h0 (0.50). Charging 10.5 kWh at
+    # 0.50 to save a few minutes elsewhere would be far more expensive.
+    prices = [0.50, 0.20, 0.20, 0.20, 0.60]
+    fc = _forecast(prices)
+    # 200 kWh pack so capacity isn't the binding limit; need 33.25 kWh = 3h10m at
+    # 10.5 kW (3 full + 1.75 remainder).
+    req = EVRequest(
+        enabled=True,
+        charger_kw=3.5,
+        phases=3,  # 10.5 kW full power
+        battery_kwh=200.0,
+        current_soc=50.0,
+        required_kwh=33.25,
+        available_hours={s.start for s in fc.slots},
+    )
+    alloc = _hours(_optimizer()._plan_ev(fc, req))
+    assert round(sum(alloc.values()), 3) == 33.25
+    assert alloc[1] == 10.5 and alloc[2] == 10.5 and alloc[3] == 10.5
+    assert round(alloc[4], 3) == 1.75
+    assert 0 not in alloc  # the expensive 0.50 hour is never used
 
 
 def test_earlier_deadline_honoured_before_later() -> None:
@@ -217,10 +245,12 @@ def test_default_topup_uses_cheapest_hours() -> None:
         available_hours={s.start for s in fc.slots},
     )
     alloc = _hours(_optimizer()._plan_ev(fc, req))
-    # Full-power blocks: 5 kWh needed at 3 kW → 2 hours = 6 kWh (overshoot).
-    assert round(sum(alloc.values()), 3) == 6.0
-    # The two cheapest hours (h1, h3) are filled at full power.
-    assert alloc[1] == 3.0 and alloc[3] == 3.0
+    # 5 kWh at 3 kW → 2 on-hours, exact: one full block + a 2 kWh remainder. Both
+    # land on the two cheapest hours (h1/h3 @ 0.2) — full power on the earlier
+    # one, the remainder on the later (the chronological top-off).
+    assert round(sum(alloc.values()), 3) == 5.0
+    assert alloc[1] == 3.0 and round(alloc[3], 3) == 2.0
+    assert set(alloc) == {1, 3}
 
 
 def test_not_actionable_returns_empty() -> None:

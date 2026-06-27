@@ -62,6 +62,7 @@ stay consistent with the rest of the integration.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -82,7 +83,7 @@ _EPS = 1e-6
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # full-power-block allocator or a stale import.
-EV_ALLOCATOR_VERSION = "full-power-blocks-chrono-2026-06"
+EV_ALLOCATOR_VERSION = "cost-optimal-blocks-2026-06"
 
 
 @dataclass
@@ -522,18 +523,29 @@ class Optimizer:
     ) -> dict[datetime, float]:
         """Allocate EV charging across the horizon.
 
-        Three layers, applied in order and never exceeding the battery's physical
-        room to 100 %:
+        The charger is **on/off at full power** — it cannot dose a fraction of an
+        hour. So reaching a deficit of ``D`` kWh means turning the charger on for
+        ``K = ceil(D / P)`` hours (``P`` = full charge power); the car draws full
+        power in each and its BMS tops off — leaving an unavoidable partial of
+        ``D - (K-1)·P`` on whichever hour is **chronologically last** among the
+        chosen ones (that is where charging actually finishes).
 
-        1. **Forced windows** — charge at full charger power for every hour the
-           user marked in the calendar (bare ``"<keyword>"`` events). No SoC
-           limit beyond the pack capacity.
-        2. **Deadline targets** — for each ``"<keyword> NN%"`` event, fill the
-           deficit to ``NN%`` using the cheapest available hours strictly before
-           the deadline (earliest deadline first, so earlier commitments are
-           honoured before later, cheaper hours are spent on a later target).
-        3. **Default top-up** — when the calendar contributes nothing, reach
-           ``required_kwh`` in the cheapest available hours.
+        Because that partial buys *less* energy, the cost-minimising choice is to
+        spend full hours on the cheapest slots and let the partial land on a
+        pricier slot — but only one that can legitimately be the top-off hour
+        (i.e. has enough earlier hours to hold the full blocks). We therefore try
+        every candidate top-off hour, pick the cheapest full blocks before it,
+        and keep the globally cheapest combination. This is what stops the plan
+        from e.g. wasting a whole expensive hour just to shave a few minutes.
+
+        Three layers, never exceeding the pack's room to 100 %:
+
+        1. **Forced windows** — bare ``"<keyword>"`` calendar events: charge full
+           power in exactly those hours (user's explicit choice, not cost-driven).
+        2. **Deadline targets** — ``"<keyword> NN%"`` events: cost-optimal blocks
+           among available hours before the deadline (earliest deadline first).
+        3. **Default top-up** — no calendar: cost-optimal blocks for the deficit
+           to the target SoC.
         """
         if ev_request is None or not ev_request.is_actionable:
             return {}
@@ -541,9 +553,6 @@ class Optimizer:
         slots_by_start = {
             s.start: s for s in forecast.slots if s.buy_price is not None
         }
-        # EV always charges at full charger power (all phases). The only thing
-        # that ever clips an hour below full power is the battery's own 100 %
-        # ceiling on the very last charging hour.
         charger_kw = max(ev_request.charger_power_kw, 0.1)
         battery_kwh = max(ev_request.battery_kwh, 0.0)
         soc0_kwh = (
@@ -553,32 +562,68 @@ class Optimizer:
         )
 
         allocation: dict[datetime, float] = {}
-        scheduled = 0.0  # total kWh added across the horizon so far
 
-        def remaining_capacity() -> float:
+        def capacity_left() -> float:
             if battery_kwh <= 0:
                 return float("inf")
-            return max(0.0, battery_kwh - soc0_kwh - scheduled)
+            return max(0.0, battery_kwh - soc0_kwh - sum(allocation.values()))
 
-        def block(start: datetime) -> float:
-            """Full-power energy for one free hour, clipped only by 100 % SoC."""
-            if start in allocation:
-                return 0.0
-            return min(charger_kw, remaining_capacity())
+        def select(deficit: float, candidates: list) -> dict[datetime, float]:
+            """Cost-optimal on/off full-power hours for ``deficit`` kWh.
 
-        # 1. Forced windows: full power for every marked, available hour.
+            ``candidates`` = eligible, not-yet-allocated slots. Returns full power
+            on the cheapest blocks plus the unavoidable remainder on the cheapest
+            valid top-off hour. The car fills the chosen hours chronologically, so
+            the remainder must sit on the chronologically last chosen hour.
+            """
+            deficit = min(deficit, capacity_left())
+            if deficit <= _EPS:
+                return {}
+            slots = sorted(
+                (s for s in candidates if s.start not in allocation),
+                key=lambda s: s.start,
+            )
+            if not slots:
+                return {}
+            needed = max(1, math.ceil(deficit / charger_kw - 1e-9))
+            needed = min(needed, len(slots))  # can't reach target → use them all
+            # Remainder on the top-off hour, in (0, P]. Clamps to full power when
+            # there aren't enough hours to fully reach the target.
+            remainder = min(max(deficit - (needed - 1) * charger_kw, _EPS), charger_kw)
+            best: tuple[float, datetime, list] | None = None
+            for li in range(needed - 1, len(slots)):
+                top_off = slots[li]
+                fulls = sorted(slots[:li], key=lambda s: s.buy_price)[: needed - 1]
+                if len(fulls) < needed - 1:
+                    continue
+                cost = (
+                    charger_kw * sum(s.buy_price for s in fulls)
+                    + remainder * top_off.buy_price
+                )
+                if best is None or cost < best[0]:
+                    best = (cost, top_off.start, [s.start for s in fulls])
+            if best is None:
+                return {}
+            _, top_off_start, full_starts = best
+            out = {start: charger_kw for start in full_starts}
+            out[top_off_start] = remainder
+            return out
+
+        def commit(chosen: dict[datetime, float]) -> None:
+            for start, kwh in chosen.items():
+                allocation[start] = allocation.get(start, 0.0) + kwh
+
+        # 1. Forced windows: full power in the user's chosen hours, chronological
+        #    cap (the car can't take more than its room to 100 %).
         for start in sorted(ev_request.forced_hours):
             if start not in ev_request.available_hours or start not in slots_by_start:
                 continue
-            take = block(start)
+            take = min(charger_kw, capacity_left())
             if take <= _EPS:
-                continue
+                break
             allocation[start] = take
-            scheduled += take
 
-        # 2. Deadline targets, earliest deadline first. Each chosen hour charges
-        #    at full power; the deficit may be slightly overshot (one extra full
-        #    hour) rather than throttled.
+        # 2. Deadline targets, earliest deadline first.
         for target in sorted(ev_request.targets, key=lambda t: t.deadline):
             target_kwh = (
                 target.target_soc / 100.0 * battery_kwh if battery_kwh else 0.0
@@ -586,66 +631,20 @@ class Optimizer:
             before = soc0_kwh + sum(
                 kwh for start, kwh in allocation.items() if start < target.deadline
             )
-            deficit = target_kwh - before
-            if deficit <= _EPS:
-                continue
             candidates = [
                 slot
                 for start, slot in slots_by_start.items()
-                if start < target.deadline
-                and start in ev_request.available_hours
-                and start not in allocation
+                if start < target.deadline and start in ev_request.available_hours
             ]
-            candidates.sort(key=lambda s: s.buy_price)
-            for slot in candidates:
-                if deficit <= _EPS:
-                    break
-                take = block(slot.start)
-                if take <= _EPS:
-                    break
-                allocation[slot.start] = take
-                scheduled += take
-                deficit -= take
+            commit(select(target_kwh - before, candidates))
 
-        # 3. Default top-up (no calendar plan): cheapest available hours, full
-        #    power, possibly overshooting required_kwh by one hour.
-        remaining = min(ev_request.required_kwh, remaining_capacity())
-        if remaining > _EPS:
+        # 3. Default top-up (no calendar plan).
+        if ev_request.required_kwh > _EPS:
             candidates = [
                 slot
                 for start, slot in slots_by_start.items()
-                if start in ev_request.available_hours and start not in allocation
+                if start in ev_request.available_hours
             ]
-            candidates.sort(key=lambda s: s.buy_price)
-            for slot in candidates:
-                if remaining <= _EPS:
-                    break
-                take = block(slot.start)
-                if take <= _EPS:
-                    break
-                allocation[slot.start] = take
-                scheduled += take
-                remaining -= take
-
-        # Make the profile physically achievable. The layers above pick the
-        # cheapest hours but may leave a *fractional* amount on an expensive hour
-        # to "save money" — which a real on/off charger can't honour: the moment
-        # that hour's window opens it draws FULL power, not a fraction. So
-        # redistribute the same total energy across the same chosen hours
-        # chronologically: full power from the first charging hour onward, with
-        # the unavoidable remainder landing on the hour where the car tops off.
-        # Same total, same hours, same deadline feasibility (front-loading only
-        # reaches each target earlier) — but a shape the charger can reproduce.
-        if allocation:
-            total = sum(allocation.values())
-            physical: dict[datetime, float] = {}
-            remaining_energy = total
-            for start in sorted(allocation):
-                if remaining_energy <= _EPS:
-                    break
-                take = min(charger_kw, remaining_energy)
-                physical[start] = take
-                remaining_energy -= take
-            allocation = physical
+            commit(select(ev_request.required_kwh, candidates))
 
         return allocation

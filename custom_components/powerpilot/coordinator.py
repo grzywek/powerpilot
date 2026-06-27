@@ -949,8 +949,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             hours.append(row)
         return {"date": target.isoformat(), "hours": hours}
 
-    async def _recent_soc(self, start: datetime, end: datetime) -> dict:
-        """Battery SoC (%) at each hour's END, sampled from the sensor's history.
+    async def _recent_soc(
+        self, start: datetime, end: datetime, entity_id: str | None = None
+    ) -> dict:
+        """SoC (%) at each hour's END, sampled from a sensor's history.
 
         ``out[h]`` is the instantaneous SoC at ``h + 1h`` — the boundary the
         battery crosses *leaving* hour ``h`` — so ``soc_start``/``soc_end`` line
@@ -958,12 +960,16 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         charging ramp across the hour: a battery going 4 %→28 % over the 13:00
         hour means ~15 % and would show "4 → 15" instead of "4 → 28".) Returns
         ``{}`` when the sensor has no usable history for the window.
+
+        Defaults to the home-battery SoC sensor; pass ``entity_id`` to sample a
+        different one (e.g. the EV SoC sensor).
         """
         from homeassistant.components.recorder import get_instance, history
 
         from .const import CONF_SOC_SENSOR
 
-        entity_id = self.config.get(CONF_SOC_SENSOR)
+        if entity_id is None:
+            entity_id = self.config.get(CONF_SOC_SENSOR)
         if not entity_id:
             return {}
 
@@ -1031,6 +1037,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_BATTERY_DISCHARGE_SENSOR,
             CONF_CONSUMPTION_SENSOR,
             CONF_DEVICE_SENSORS,
+            CONF_EV_SOC_SENSOR,
             CONF_GRID_IMPORT_SENSOR,
             CONF_SENSOR_PARENTS,
         )
@@ -1073,6 +1080,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
         soc_real = (
             await self._recent_soc(past_start - timedelta(hours=1), past_end)
+            if past_end > past_start
+            else {}
+        )
+        ev_soc_real = (
+            await self._recent_soc(
+                past_start - timedelta(hours=1),
+                past_end,
+                self.config.get(CONF_EV_SOC_SENSOR),
+            )
             if past_end > past_start
             else {}
         )
@@ -1274,6 +1290,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "consumption_forecast": forecast_c,
                     "base_consumption_forecast": round(base_fc, 3) if base_fc is not None else None,
                     "soc": round(soc_real[h], 1) if h in soc_real else None,
+                    "ev_soc": round(ev_soc_real[h], 1) if h in ev_soc_real else None,
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                     "inverter_mode": _real_mode(
                         bat_charge_real.get(h), bat_discharge_real.get(h)
@@ -1393,6 +1410,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "consumption_forecast": None,
                     "base_consumption_forecast": None,
                     "soc": round(live_soc, 1) if live_soc else None,
+                    "ev_soc": (
+                        round(ev_soc_real[now], 1)
+                        if now in ev_soc_real
+                        else (round(self.ev.soc, 1) if self.ev.soc is not None else None)
+                    ),
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                     "inverter_mode": _real_mode(cur_charge, cur_discharge),
                     "battery_charge_kwh": round(cur_charge, 3) if cur_charge is not None else None,
@@ -1486,6 +1508,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "consumption_forecast": round(slot.total_consumption_kwh, 3),
                         "base_consumption_forecast": round(slot.base_consumption_kwh, 3),
                         "soc": round(decision.battery_soc, 1),
+                        "ev_soc": (
+                            round(decision.ev_soc, 1)
+                            if decision.ev_soc is not None
+                            else None
+                        ),
                         "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                         "inverter_mode": decision.inverter_mode,
                         "battery_charge_kwh": round(decision.battery_charge_kwh, 3),
@@ -1513,6 +1540,53 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "end": (window_end or (plan.forecast.slots[-1].start + timedelta(hours=1) if plan and plan.forecast.slots else past_end)).isoformat() if (window_end or plan) else past_end.isoformat(),
             "device_ids": device_ids,
             "hours": hours,
+        }
+
+    def ev_control(self) -> dict:
+        """Advisory EV control surface for automations.
+
+        PowerPilot decides *when* and *to what* the car should charge; an HA
+        automation does the actual steering off these values.
+        """
+        ev = self.ev
+        if not ev.enabled:
+            return {
+                "enabled": False,
+                "connect_charger": False,
+                "charging_now": False,
+                "charge_start": None,
+                "soc_limit": None,
+                "charge_power_kw": 0.0,
+                "soc": None,
+            }
+
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        horizon_24h = now + timedelta(hours=24)
+        plan = self.data
+        charge_start: datetime | None = None
+        connect = False
+        charging_now = False
+        if plan:
+            for decision in plan.decisions:
+                if decision.ev_charge_kwh <= 0 or decision.start < now:
+                    continue
+                if charge_start is None or decision.start < charge_start:
+                    charge_start = decision.start
+                if decision.start < horizon_24h:
+                    connect = True
+            current = plan.current
+            charging_now = bool(current and current.ev_charge)
+        if charging_now:
+            connect = True
+
+        return {
+            "enabled": True,
+            "connect_charger": connect,
+            "charging_now": charging_now,
+            "charge_start": charge_start.isoformat() if charge_start else None,
+            "soc_limit": ev.soc_limit_now(),
+            "charge_power_kw": round(ev.charger_power_kw, 3) if charging_now else 0.0,
+            "soc": ev.soc,
         }
 
     def get_status(self) -> dict:
@@ -1570,6 +1644,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         ]
 
         ev_summary = self.ev.plan_summary()
+        ev_summary["control"] = self.ev_control()
         ev_summary["planned_hours"] = (
             [
                 {"start": d.start.isoformat(), "kwh": round(d.ev_charge_kwh, 3)}

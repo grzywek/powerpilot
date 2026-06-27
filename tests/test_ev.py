@@ -14,7 +14,9 @@ from custom_components.powerpilot.const import (
     CONF_EV_BATTERY_KWH,
     CONF_EV_CHARGER_KW,
     CONF_EV_CHARGER_PHASE,
+    CONF_EV_CHARGER_PHASES,
     CONF_EV_ENABLED,
+    CONF_EV_TARGET_SOC_SENSOR,
 )
 from custom_components.powerpilot.models import Forecast, HourSlot
 from custom_components.powerpilot.modules.ev import (
@@ -127,10 +129,11 @@ def test_target_fills_cheapest_hours_before_deadline() -> None:
         targets=[EVChargeTarget(deadline=BASE + timedelta(hours=5), target_soc=50.0)],
     )
     alloc = _hours(_optimizer()._plan_ev(fc, req))
-    assert round(sum(alloc.values()), 3) == 18.0
-    # Cheapest available pre-deadline hours filled first (h2, h3 at full power).
-    assert alloc[2] == 7.0 and alloc[3] == 7.0
-    assert alloc[4] == 4.0
+    # Full-power blocks: 18 kWh needed at 7 kW → 3 hours = 21 kWh (overshoots by
+    # one whole hour rather than throttling the last one).
+    assert round(sum(alloc.values()), 3) == 21.0
+    # Cheapest available pre-deadline hours filled first, each at full power.
+    assert alloc[2] == 7.0 and alloc[3] == 7.0 and alloc[4] == 7.0
     assert all(h < 5 for h in alloc)
 
 
@@ -187,9 +190,10 @@ def test_default_topup_uses_cheapest_hours() -> None:
         available_hours={s.start for s in fc.slots},
     )
     alloc = _hours(_optimizer()._plan_ev(fc, req))
-    assert round(sum(alloc.values()), 3) == 5.0
-    # The two cheapest hours (h1, h3) are filled first.
-    assert alloc[1] == 3.0 and alloc[3] == 2.0
+    # Full-power blocks: 5 kWh needed at 3 kW → 2 hours = 6 kWh (overshoot).
+    assert round(sum(alloc.values()), 3) == 6.0
+    # The two cheapest hours (h1, h3) are filled at full power.
+    assert alloc[1] == 3.0 and alloc[3] == 3.0
 
 
 def test_not_actionable_returns_empty() -> None:
@@ -280,6 +284,8 @@ def _module_with_state(**state) -> EVModule:
         CONF_EV_BATTERY_KWH: 60.0,
         CONF_EV_CHARGER_KW: 7.0,
         CONF_EV_CHARGER_PHASE: 1,
+        CONF_EV_CHARGER_PHASES: state.get("phases", 1),
+        CONF_EV_TARGET_SOC_SENSOR: None,
     }
     module._soc = state.get("soc")
     module._target_soc = state.get("target_soc")
@@ -325,3 +331,68 @@ def test_get_request_unavailable_has_no_hours() -> None:
     module = _module_with_state(soc=20.0, available=False)
     req = module.get_request(fc)
     assert req.available_hours == set()
+
+
+# ---------------------------------------------------------------------------
+# Charger phases / full power
+# ---------------------------------------------------------------------------
+
+
+def test_charger_power_scales_with_phases() -> None:
+    assert EVRequest(charger_kw=3.5, phases=1).charger_power_kw == 3.5
+    assert EVRequest(charger_kw=3.5, phases=3).charger_power_kw == 10.5
+
+
+def test_three_phase_charges_at_full_power() -> None:
+    fc = _forecast([0.8] * 6)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=3.5,
+        phases=3,
+        battery_kwh=60.0,
+        current_soc=20.0,
+        available_hours={s.start for s in fc.slots},
+        forced_hours={BASE + timedelta(hours=2)},
+    )
+    alloc = _hours(_optimizer()._plan_ev(fc, req))
+    # One forced hour at the full 3-phase power, not the per-phase 3.5 kW.
+    assert alloc == {2: 10.5}
+
+
+def test_get_request_passes_phases() -> None:
+    fc = _forecast([0.5] * 6)
+    module = _module_with_state(soc=20.0, phases=3)
+    req = module.get_request(fc)
+    assert req.phases == 3
+    assert req.charger_power_kw == 21.0  # 7 kW × 3
+
+
+# ---------------------------------------------------------------------------
+# SoC limit advisory
+# ---------------------------------------------------------------------------
+
+
+def test_soc_limit_forced_window_is_unlimited() -> None:
+    now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    module = _module_with_state(forced_hours={now_hour})
+    assert module.soc_limit_now() == 100.0
+
+
+def test_soc_limit_uses_next_target() -> None:
+    module = _module_with_state(
+        targets=[
+            EVChargeTarget(deadline=BASE + timedelta(hours=8), target_soc=90.0),
+            EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=60.0),
+        ]
+    )
+    assert module.soc_limit_now() == 60.0
+
+
+def test_soc_limit_defaults_to_target_sensor() -> None:
+    module = _module_with_state(target_soc=70.0)
+    assert module.soc_limit_now() == 70.0
+
+
+def test_soc_limit_falls_back_to_default() -> None:
+    module = _module_with_state()
+    assert module.soc_limit_now() == DEFAULT_TARGET_SOC

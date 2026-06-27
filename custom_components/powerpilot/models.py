@@ -79,6 +79,9 @@ class Decision:
     grid_connected: bool = True
     ev_charge: bool = False
     ev_charge_kwh: float = 0.0
+    # Projected EV state-of-charge (%) at the end of the hour. ``None`` when the
+    # EV SoC sensor is unset so the trajectory can't be projected.
+    ev_soc: float | None = None
 
     # Resulting battery state at the *end* of the hour.
     battery_soc: float = 0.0  # %
@@ -124,6 +127,7 @@ class Decision:
             "grid_connected": self.grid_connected,
             "ev_charge": self.ev_charge,
             "ev_charge_kwh": round(self.ev_charge_kwh, 3),
+            "ev_soc": round(self.ev_soc, 1) if self.ev_soc is not None else None,
             "battery_soc": round(self.battery_soc, 1),
             "battery_energy_cost": round(self.battery_energy_cost, 4),
             "grid_buy_kwh": round(self.grid_buy_kwh, 3),

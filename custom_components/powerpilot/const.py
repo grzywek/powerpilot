@@ -99,6 +99,7 @@ CONF_EV_BATTERY_KWH: Final = "ev_battery_kwh"
 CONF_EV_WEEKLY_KM: Final = "ev_weekly_km"  # off-calendar weekly km
 CONF_EV_CHARGER_KW: Final = "ev_charger_kw"  # per-phase draw (e.g. 3.5)
 CONF_EV_CHARGER_PHASE: Final = "ev_charger_phase"  # shared phase index 1..3
+CONF_EV_CHARGER_PHASES: Final = "ev_charger_phases"  # number of phases the charger uses (1 or 3)
 # Charger / charging telemetry. All optional; each has a concrete planning use.
 CONF_EV_CHARGER_CONNECTED_SENSOR: Final = "ev_charger_connected_sensor"  # plugged in (bool) → gates availability
 CONF_EV_CHARGING_SENSOR: Final = "ev_charging_sensor"  # actively drawing (bool) → plan-vs-reality reminders
@@ -164,6 +165,7 @@ DEFAULTS: Final = {
     CONF_EV_WEEKLY_KM: 200,
     CONF_EV_CHARGER_KW: 3.5,
     CONF_EV_CHARGER_PHASE: 1,
+    CONF_EV_CHARGER_PHASES: 1,
     CONF_EV_CALENDAR_KEYWORD: "Kotek",
 }
 
@@ -224,3 +226,8 @@ SENSOR_PLAN: Final = "plan"
 SENSOR_NEXT_ACTION: Final = "next_action"
 BINARY_GRID_CONNECTED: Final = "grid_connected"
 BINARY_EV_CHARGE: Final = "ev_charge"
+# EV control surface (the integration advises; an automation does the steering).
+SENSOR_EV_CHARGE_START: Final = "ev_charge_start"  # next planned charge start (timestamp)
+SENSOR_EV_SOC_LIMIT: Final = "ev_soc_limit"  # target SoC the car should charge to (%)
+SENSOR_EV_CHARGE_POWER: Final = "ev_charge_power"  # recommended charge power now (kW)
+BINARY_EV_CONNECT_CHARGER: Final = "ev_connect_charger"  # charging planned within 24 h

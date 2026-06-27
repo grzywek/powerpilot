@@ -33,6 +33,7 @@ from ..const import (
     CONF_EV_CHARGER_CONNECTED_SENSOR,
     CONF_EV_CHARGER_KW,
     CONF_EV_CHARGER_PHASE,
+    CONF_EV_CHARGER_PHASES,
     CONF_EV_CHARGING_SENSOR,
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
@@ -78,12 +79,18 @@ class EVRequest:
     required_kwh: float = 0.0
     charger_kw: float = 3.5
     phase: int = 1
+    phases: int = 1
     battery_kwh: float = 60.0
     current_soc: float | None = None
     available_hours: set[datetime] = field(default_factory=set)
     # Calendar-driven plans.
     forced_hours: set[datetime] = field(default_factory=set)
     targets: list[EVChargeTarget] = field(default_factory=list)
+
+    @property
+    def charger_power_kw(self) -> float:
+        """Total charger draw (kW) = per-phase power × number of phases."""
+        return max(self.charger_kw, 0.0) * max(self.phases, 1)
 
     @property
     def is_actionable(self) -> bool:
@@ -349,6 +356,7 @@ class EVModule(PowerPilotModule):
             required_kwh=required_kwh,
             charger_kw=float(self.config.get(CONF_EV_CHARGER_KW, 3.5)),
             phase=int(self.config.get(CONF_EV_CHARGER_PHASE, 1)),
+            phases=int(self.config.get(CONF_EV_CHARGER_PHASES, 1)),
             battery_kwh=battery_kwh,
             current_soc=self._soc,
             available_hours=available_hours,
@@ -388,9 +396,11 @@ class EVModule(PowerPilotModule):
             "available": self._available,
             "soc": self._soc,
             "target_soc": self._target_soc,
+            "soc_limit": self.soc_limit_now(),
             "energy_added_kwh": self._energy_added,
             "connected": self._connected,
             "charging": self._charging,
+            "charger_power_kw": self.charger_power_kw,
             "targets": [
                 {
                     "deadline": target.deadline.isoformat(),
@@ -401,6 +411,44 @@ class EVModule(PowerPilotModule):
             ],
             "forced_hours": [hour.isoformat() for hour in sorted(self._forced_hours)],
         }
+
+    def soc_limit_now(self) -> float | None:
+        """The SoC (%) the car should be allowed to charge to right now.
+
+        A bare calendar window means "charge with no limit" → 100 %. With
+        deadline targets the soonest upcoming one sets the ceiling. Otherwise the
+        car's own target sensor (or the built-in default) applies.
+        """
+        if not self.enabled:
+            return None
+        now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        if now_hour in self._forced_hours:
+            return 100.0
+        if self._targets:
+            upcoming = sorted(self._targets, key=lambda t: t.deadline)
+            return upcoming[0].target_soc
+        if self._forced_hours:
+            return 100.0
+        return self._target_soc if self._target_soc is not None else DEFAULT_TARGET_SOC
+
+    @property
+    def charger_power_kw(self) -> float:
+        """Total charger draw (kW) at full power across all phases."""
+        per_phase = float(self.config.get(CONF_EV_CHARGER_KW, 3.5))
+        phases = int(self.config.get(CONF_EV_CHARGER_PHASES, 1) or 1)
+        return per_phase * max(phases, 1)
+
+    @property
+    def soc(self) -> float | None:
+        return self._soc
+
+    @property
+    def connected(self) -> bool | None:
+        return self._connected
+
+    @property
+    def charging(self) -> bool | None:
+        return self._charging
 
     @property
     def weekly_km(self) -> int:

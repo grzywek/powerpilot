@@ -41,9 +41,18 @@ interface EVPlan {
   energy_added_kwh: number | null;
   connected: boolean | null;
   charging: boolean | null;
+  soc_limit: number | null;
+  charger_power_kw: number | null;
   targets: { deadline: string; target_soc: number; label: string }[];
   forced_hours: string[];
   planned_hours: { start: string; kwh: number }[];
+  control: {
+    connect_charger: boolean;
+    charging_now: boolean;
+    charge_start: string | null;
+    soc_limit: number | null;
+    charge_power_kw: number;
+  };
 }
 
 interface Status {
@@ -103,6 +112,7 @@ interface SeriesHour {
   consumption_forecast: number | null;
   base_consumption_forecast: number | null;
   soc: number | null;
+  ev_soc: number | null;
   battery_soc_start: number | null;
   inverter_mode: string | null;
   partial?: boolean;
@@ -1081,6 +1091,21 @@ export class PowerPilotPanel extends LitElement {
       color: "#22c55e",
     });
 
+    // EV SoC on the same right axis. `ev_soc` is the END-of-hour state (real for
+    // past hours, forecast for future), so plot it on the hour-end boundary
+    // (t + 1h) to line up with the right edge of the EV-charge bar. Only drawn
+    // when the EV module actually reports SoC for some hour.
+    const HOUR = 3600 * 1000;
+    const hasEvSoc = hrs.some((h) => h.ev_soc != null);
+    if (hasEvSoc) {
+      series.push({
+        name: "EV SoC %",
+        type: "line",
+        data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].ev_soc })),
+        color: "#3498db",
+      });
+    }
+
     const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
     const dark = this._isDark();
     const nowColor = dark ? "#ffffff" : "#333333";
@@ -1099,7 +1124,12 @@ export class PowerPilotPanel extends LitElement {
         background: "transparent",
       },
       theme: { mode: dark ? "dark" : "light" },
-      stroke: { width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)), curve: "straight" },
+      stroke: {
+        width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)),
+        // EV SoC dashed so it reads apart from the solid battery SoC line.
+        dashArray: series.map((sx: any) => (sx.name === "EV SoC %" ? 6 : 0)),
+        curve: "straight",
+      },
       // Near-full width so each midpoint-plotted bar fills its hour [H, H+1]
       // and its left edge lands on the hour gridline.
       plotOptions: { bar: { columnWidth: "95%", borderRadius: 0 } },
@@ -1129,7 +1159,7 @@ export class PowerPilotPanel extends LitElement {
           labels: { formatter: (v: number) => (v != null ? Math.abs(v).toFixed(2) : "") },
         },
         {
-          seriesName: "SoC %",
+          seriesName: ["SoC %", "EV SoC %"],
           opposite: true,
           min: 0,
           max: 100,
@@ -1861,6 +1891,22 @@ export class PowerPilotPanel extends LitElement {
         ${!ev.targets.length && !forcedRanges.length && !ev.planned_hours.length
           ? html`<div class="check muted">Brak zaplanowanego ładowania.</div>`
           : nothing}
+        <div class="check"><b>Sterowanie (encje dla automatyzacji)</b></div>
+        <div class="check">
+          Podłącz ładowarkę: <b>${this._evBool(ev.control.connect_charger, "tak", "nie")}</b> ·
+          Ładuj teraz: <b>${this._evBool(ev.control.charging_now, "tak", "nie")}</b>
+        </div>
+        <div class="check">
+          Start ładowania:
+          <b>${ev.control.charge_start ? this._fmtRun(ev.control.charge_start) : "—"}</b> ·
+          Limit SoC: <b>${ev.control.soc_limit !== null ? `${ev.control.soc_limit}%` : "—"}</b>
+        </div>
+        <div class="check">
+          Moc ładowania: <b>${ev.control.charge_power_kw.toFixed(1)} kW</b>
+          ${ev.charger_power_kw
+            ? html`<span class="muted">maks. ${ev.charger_power_kw.toFixed(1)} kW</span>`
+            : nothing}
+        </div>
       </div>
     `;
   }

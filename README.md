@@ -84,9 +84,13 @@ flow (Settings → Devices & Services → PowerPilot → Configure → 🚗 EV).
 | Charging now | on/off | plan-vs-reality check — warns when a charging window is due but the charger draws no power |
 | Energy added this session | `kWh` (increasing) | how much energy the current session has delivered (shown in the panel) |
 | EV location (home/away) | tracker | fallback availability signal when no "charger connected" sensor is set |
+| Charging power per phase | `kW` | the charger's per-phase power |
+| Charger phases | `1` / `3` | number of phases — total charge power is *per-phase × phases* (e.g. 3.5 kW × 3 = 10.5 kW) |
 
 With neither a "charger connected" sensor nor a location tracker, the car is
-assumed to be available.
+assumed to be available. EV charging always runs at the **full** charger power
+(per-phase × phases) for any hour it's scheduled — never a throttled fraction —
+clipped only by the pack's 100 % ceiling on the final hour.
 
 ### Calendar plans
 
@@ -109,7 +113,22 @@ matching upcoming events, PowerPilot simply tops the car up to the target SoC in
 the cheapest hours.
 
 The planned charging, upcoming deadlines and manual windows are shown on the
-panel's **Status** tab.
+panel's **Status** tab, and the forecast EV SoC is drawn as a dashed line on the
+energy chart's SoC axis.
+
+### Steering the charger
+
+PowerPilot decides *when* and *to what level* to charge, then exposes that as
+entities so a Home Assistant **automation** does the actual steering (start/stop,
+set the SoC limit). It does not drive the charger itself.
+
+| Entity | Type | Meaning |
+|--------|------|---------|
+| `binary_sensor.powerpilot_ev_connect_charger` | on/off | charging is planned within the next 24 h — plug in / enable the charger |
+| `sensor.powerpilot_ev_charge_start` | timestamp | when the next charging hour begins (HA shows a live "in X" countdown) |
+| `binary_sensor.powerpilot_ev_charge` | on/off | a charging hour is active right now |
+| `sensor.powerpilot_ev_soc_limit` | `%` | the SoC the car should charge to right now |
+| `sensor.powerpilot_ev_charge_power` | `kW` | the charge-power setpoint (full charger power while active, otherwise 0) |
 
 ## Status
 

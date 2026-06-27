@@ -43,6 +43,12 @@ integration installable and working.
 - [x] EV module: SoC, home/away location, km-per-charge, weekly off-calendar km.
 - [x] Charger telemetry: connected (availability gate), charging (plan-vs-reality),
       energy added (session kWh), target SoC (default charge goal).
+- [x] 1/3-phase charger setting → full charge power = per-phase × phases; EV always
+      charges at full power (whole-hour blocks), clipped only by the 100 % ceiling.
+- [x] EV SoC tracking: real (sensor history) + forecast (`decision.ev_soc`),
+      drawn as a dashed SoC line on the energy chart.
+- [x] Control surface for automations: connect-charger (planned within 24 h),
+      charge-start timestamp, SoC limit, charge-power setpoint.
 - [ ] 3-phase charger sharing one phase with the inverter → power-limit coupling.
 - [x] Calendar read (any HA `calendar.*` entity: Google, CalDAV/iCloud, Local).
       Keyword events: `<kw> NN%` = deadline target (be at NN% by event start,

@@ -222,6 +222,7 @@ class Optimizer:
             total_price=total_price,
             demand=demand,
             ev_kwh=ev_kwh,
+            ev_request=ev_request,
             reminders=reminders,
         )
 
@@ -359,13 +360,25 @@ class Optimizer:
         total_price: list[float],
         demand: list[float],
         ev_kwh: list[float],
-        reminders: list[str] | None,
+        ev_request: EVRequest | None = None,
+        reminders: list[str] | None = None,
     ) -> Plan:
         cfg = self.config
         ceff = max(battery.charge_efficiency, _EPS)
         deff = max(battery.discharge_efficiency, _EPS)
         wear = battery.wear_cost
         n = len(total_price)
+        # EV SoC forecast: project the car's charge forward from its live SoC as
+        # planned charging is delivered. Only possible when the SoC sensor and a
+        # battery size are known; otherwise the line stays blank.
+        ev_battery_kwh = ev_request.battery_kwh if ev_request else 0.0
+        ev_soc_kwh: float | None = (
+            ev_request.current_soc / 100.0 * ev_battery_kwh
+            if ev_request is not None
+            and ev_request.current_soc is not None
+            and ev_battery_kwh > 0
+            else None
+        )
         p_term = (
             cfg.terminal_price
             if cfg.terminal_price is not None
@@ -407,6 +420,9 @@ class Optimizer:
             decision.inverter_mode = mode
             decision.ev_charge = ev > 0
             decision.ev_charge_kwh = ev
+            if ev_soc_kwh is not None:
+                ev_soc_kwh = min(ev_battery_kwh, ev_soc_kwh + ev)
+                decision.ev_soc = round(ev_soc_kwh / ev_battery_kwh * 100.0, 1)
             decision.charge_power = (
                 ChargePower.LIMITED if ev > 0 else ChargePower.FULL
             )
@@ -520,7 +536,10 @@ class Optimizer:
         slots_by_start = {
             s.start: s for s in forecast.slots if s.buy_price is not None
         }
-        charger_kw = max(ev_request.charger_kw, 0.1)
+        # EV always charges at full charger power (all phases). The only thing
+        # that ever clips an hour below full power is the battery's own 100 %
+        # ceiling on the very last charging hour.
+        charger_kw = max(ev_request.charger_power_kw, 0.1)
         battery_kwh = max(ev_request.battery_kwh, 0.0)
         soc0_kwh = (
             max(0.0, (ev_request.current_soc or 0.0) / 100.0 * battery_kwh)
@@ -536,20 +555,25 @@ class Optimizer:
                 return float("inf")
             return max(0.0, battery_kwh - soc0_kwh - scheduled)
 
-        def room(start: datetime) -> float:
-            return max(0.0, charger_kw - allocation.get(start, 0.0))
+        def block(start: datetime) -> float:
+            """Full-power energy for one free hour, clipped only by 100 % SoC."""
+            if start in allocation:
+                return 0.0
+            return min(charger_kw, remaining_capacity())
 
         # 1. Forced windows: full power for every marked, available hour.
         for start in sorted(ev_request.forced_hours):
             if start not in ev_request.available_hours or start not in slots_by_start:
                 continue
-            take = min(room(start), remaining_capacity())
+            take = block(start)
             if take <= _EPS:
                 continue
-            allocation[start] = allocation.get(start, 0.0) + take
+            allocation[start] = take
             scheduled += take
 
-        # 2. Deadline targets, earliest deadline first.
+        # 2. Deadline targets, earliest deadline first. Each chosen hour charges
+        #    at full power; the deficit may be slightly overshot (one extra full
+        #    hour) rather than throttled.
         for target in sorted(ev_request.targets, key=lambda t: t.deadline):
             target_kwh = (
                 target.target_soc / 100.0 * battery_kwh if battery_kwh else 0.0
@@ -557,7 +581,7 @@ class Optimizer:
             before = soc0_kwh + sum(
                 kwh for start, kwh in allocation.items() if start < target.deadline
             )
-            deficit = min(target_kwh - before, remaining_capacity())
+            deficit = target_kwh - before
             if deficit <= _EPS:
                 continue
             candidates = [
@@ -565,33 +589,37 @@ class Optimizer:
                 for start, slot in slots_by_start.items()
                 if start < target.deadline
                 and start in ev_request.available_hours
-                and room(start) > _EPS
+                and start not in allocation
             ]
             candidates.sort(key=lambda s: s.buy_price)
             for slot in candidates:
                 if deficit <= _EPS:
                     break
-                take = min(room(slot.start), deficit, remaining_capacity())
+                take = block(slot.start)
                 if take <= _EPS:
-                    continue
-                allocation[slot.start] = allocation.get(slot.start, 0.0) + take
+                    break
+                allocation[slot.start] = take
                 scheduled += take
                 deficit -= take
 
-        # 3. Default top-up (no calendar plan): cheapest available hours.
+        # 3. Default top-up (no calendar plan): cheapest available hours, full
+        #    power, possibly overshooting required_kwh by one hour.
         remaining = min(ev_request.required_kwh, remaining_capacity())
         if remaining > _EPS:
             candidates = [
                 slot
                 for start, slot in slots_by_start.items()
-                if start in ev_request.available_hours and room(start) > _EPS
+                if start in ev_request.available_hours and start not in allocation
             ]
             candidates.sort(key=lambda s: s.buy_price)
             for slot in candidates:
                 if remaining <= _EPS:
                     break
-                take = min(room(slot.start), remaining)
-                allocation[slot.start] = allocation.get(slot.start, 0.0) + take
+                take = block(slot.start)
+                if take <= _EPS:
+                    break
+                allocation[slot.start] = take
+                scheduled += take
                 remaining -= take
 
         return allocation

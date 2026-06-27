@@ -32,6 +32,7 @@ from .const import (
     CONF_EV_CALENDAR_KEYWORD,
     CONF_EV_CHARGER_CONNECTED_SENSOR,
     CONF_EV_CHARGER_KW,
+    CONF_EV_CHARGER_PHASES,
     CONF_EV_CHARGING_SENSOR,
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
@@ -265,6 +266,14 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             ),
             vol.Optional(CONF_EV_CHARGER_KW, default=d(CONF_EV_CHARGER_KW)): _NUMBER(
                 _NUM(min=1, max=22, step=0.1, unit_of_measurement="kW", mode="box")
+            ),
+            vol.Optional(
+                CONF_EV_CHARGER_PHASES, default=str(d(CONF_EV_CHARGER_PHASES))
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=["1", "3"],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
             ),
         }
     )

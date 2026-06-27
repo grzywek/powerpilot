@@ -59,7 +59,8 @@
           "ev_range_km": "Range on a full charge (km)",
           "ev_battery_kwh": "EV battery capacity (kWh)",
           "ev_weekly_km": "Weekly off-calendar km",
-          "ev_charger_kw": "Charger power per phase (kW)"
+          "ev_charger_kw": "Charger power per phase (kW)",
+          "ev_charger_phases": "Charger phases (1 or 3)"
         }
       }
     }
@@ -155,7 +156,8 @@
           "ev_range_km": "Range on a full charge (km)",
           "ev_battery_kwh": "EV battery capacity (kWh)",
           "ev_weekly_km": "Weekly off-calendar km",
-          "ev_charger_kw": "Charger power per phase (kW)"
+          "ev_charger_kw": "Charger power per phase (kW)",
+          "ev_charger_phases": "Charger phases (1 or 3)"
         }
       },
       "tariff_list": {
@@ -241,6 +243,15 @@
       },
       "next_action": {
         "name": "Next action"
+      },
+      "ev_charge_start": {
+        "name": "EV next charge start"
+      },
+      "ev_soc_limit": {
+        "name": "EV charge limit (SoC)"
+      },
+      "ev_charge_power": {
+        "name": "EV charge power"
       }
     },
     "binary_sensor": {
@@ -249,6 +260,9 @@
       },
       "ev_charge": {
         "name": "EV charge"
+      },
+      "ev_connect_charger": {
+        "name": "EV connect charger"
       }
     }
   }

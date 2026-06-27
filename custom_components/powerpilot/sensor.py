@@ -13,11 +13,15 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
     SENSOR_BATTERY_ENERGY_COST,
     SENSOR_CHARGE_POWER,
+    SENSOR_EV_CHARGE_POWER,
+    SENSOR_EV_CHARGE_START,
+    SENSOR_EV_SOC_LIMIT,
     SENSOR_INVERTER_MODE,
     SENSOR_NEXT_ACTION,
     SENSOR_PLAN,
@@ -37,6 +41,9 @@ async def async_setup_entry(
             BatteryEnergyCostSensor(coordinator, entry),
             PlanSensor(coordinator, entry),
             NextActionSensor(coordinator, entry),
+            EVChargeStartSensor(coordinator, entry),
+            EVSocLimitSensor(coordinator, entry),
+            EVChargePowerSensor(coordinator, entry),
         ]
     )
 
@@ -180,3 +187,61 @@ class NextActionSensor(PowerPilotEntity, SensorEntity):
         if not self.plan or not self.plan.current:
             return {}
         return {"reminders": self.plan.current.reminders}
+
+
+class EVChargeStartSensor(PowerPilotEntity, SensorEntity):
+    """When the next planned EV charging hour starts (None if nothing planned).
+
+    Exposed as a timestamp so an automation (or the UI) gets a live "in X"
+    countdown without the value going stale between re-plans.
+    """
+
+    _attr_translation_key = SENSOR_EV_CHARGE_START
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-start"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_EV_CHARGE_START)
+
+    @property
+    def native_value(self):
+        start = self.coordinator.ev_control().get("charge_start")
+        return dt_util.parse_datetime(start) if start else None
+
+
+class EVSocLimitSensor(PowerPilotEntity, SensorEntity):
+    """Target SoC (%) the car should charge to right now."""
+
+    _attr_translation_key = SENSOR_EV_SOC_LIMIT
+    _attr_native_unit_of_measurement = "%"
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-charging-90"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_EV_SOC_LIMIT)
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.ev_control().get("soc_limit")
+
+
+class EVChargePowerSensor(PowerPilotEntity, SensorEntity):
+    """Recommended EV charge power now (kW).
+
+    Full charger power while a planned charging hour is active, otherwise 0 — the
+    setpoint an automation pushes to the charger.
+    """
+
+    _attr_translation_key = SENSOR_EV_CHARGE_POWER
+    _attr_native_unit_of_measurement = "kW"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:ev-station"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_EV_CHARGE_POWER)
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.ev_control().get("charge_power_kw")

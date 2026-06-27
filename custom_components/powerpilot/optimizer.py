@@ -82,7 +82,7 @@ _EPS = 1e-6
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # full-power-block allocator or a stale import.
-EV_ALLOCATOR_VERSION = "full-power-blocks-2026-06"
+EV_ALLOCATOR_VERSION = "full-power-blocks-chrono-2026-06"
 
 
 @dataclass
@@ -626,5 +626,26 @@ class Optimizer:
                 allocation[slot.start] = take
                 scheduled += take
                 remaining -= take
+
+        # Make the profile physically achievable. The layers above pick the
+        # cheapest hours but may leave a *fractional* amount on an expensive hour
+        # to "save money" — which a real on/off charger can't honour: the moment
+        # that hour's window opens it draws FULL power, not a fraction. So
+        # redistribute the same total energy across the same chosen hours
+        # chronologically: full power from the first charging hour onward, with
+        # the unavoidable remainder landing on the hour where the car tops off.
+        # Same total, same hours, same deadline feasibility (front-loading only
+        # reaches each target earlier) — but a shape the charger can reproduce.
+        if allocation:
+            total = sum(allocation.values())
+            physical: dict[datetime, float] = {}
+            remaining_energy = total
+            for start in sorted(allocation):
+                if remaining_energy <= _EPS:
+                    break
+                take = min(charger_kw, remaining_energy)
+                physical[start] = take
+                remaining_energy -= take
+            allocation = physical
 
         return allocation

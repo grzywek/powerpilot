@@ -137,6 +137,33 @@ def test_target_fills_cheapest_hours_before_deadline() -> None:
     assert all(h < 5 for h in alloc)
 
 
+def test_partial_lands_on_last_chronological_hour_not_cheapest() -> None:
+    # Real on/off charger: it draws FULL power the moment an hour opens, so a
+    # fractional remainder must land on the hour where the car tops off (the last
+    # chronological charging hour) — never on an earlier, pricier hour the cost
+    # model would otherwise "save" on. Reproduces the reported 0.75-at-11:00 bug:
+    # h0 is fractionally the priciest of the three chosen, but it must still be a
+    # full-power hour; the 0.75-style remainder belongs on h2.
+    prices = [0.2014, 0.2001, 0.2001, 0.30, 0.30]
+    fc = _forecast(prices)
+    # 75 kWh pack, 71 % → 53.25 kWh; target 100 % → 75 kWh; need 21.75 kWh.
+    req = EVRequest(
+        enabled=True,
+        charger_kw=3.5,
+        phases=3,  # 3.5 × 3 = 10.5 kW full power
+        battery_kwh=75.0,
+        current_soc=71.0,
+        available_hours={s.start for s in fc.slots},
+        targets=[EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=100.0)],
+    )
+    alloc = _hours(_optimizer()._plan_ev(fc, req))
+    assert round(sum(alloc.values()), 3) == 21.75
+    # Early hours full power (incl. the priciest chosen one), remainder last.
+    assert alloc[0] == 10.5 and alloc[1] == 10.5
+    assert round(alloc[2], 3) == 0.75
+    assert 0 in alloc and 1 in alloc and 2 in alloc
+
+
 def test_earlier_deadline_honoured_before_later() -> None:
     # h0 cheapest, but the first deadline is at h2 so it cannot be used for it.
     prices = [0.1, 0.9, 0.9, 0.9, 0.9, 0.9]

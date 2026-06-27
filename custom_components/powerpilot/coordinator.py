@@ -541,8 +541,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             hourly[eid] = await self.consumption.async_range_kwh(eid, start, now)
 
         # Collapse nested meters to exclusive (own) energy so device totals never
-        # double-count a sub-meter and "Tło" is the true background load.
+        # double-count a sub-meter and "Tło" is the true background load. This is
+        # exactly what the optimizer/simulation consumes (base + Σ exclusive
+        # device profiles telescope back to the whole-house reading), and it
+        # matches the learned 7×24 heatmaps — so every view here is consistent.
         background = None
+        exclusive: dict = {}
         if main:
             parents = self.config.get(CONF_SENSOR_PARENTS) or {}
             exclusive = exclusive_series(main, device_ids, parents, hourly)
@@ -600,7 +604,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             if device_ids and background is not None:
                 profiles.append(_profile("__base__", "Tło (baza)", background, "mdi:home-outline"))
         for eid in device_ids:
-            profiles.append(_profile(eid, _name(eid), hourly.get(eid, {}), "mdi:flash"))
+            # Own (exclusive) energy — for a meter nesting sub-meters this excludes
+            # the children, consistent with the optimizer and the learned heatmap.
+            own = exclusive.get(eid, hourly.get(eid, {}))
+            profiles.append(_profile(eid, _name(eid), own, "mdi:flash"))
 
         return {
             "generated_at": now.isoformat(),

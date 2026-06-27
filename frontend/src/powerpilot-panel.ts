@@ -1130,10 +1130,20 @@ export class PowerPilotPanel extends LitElement {
     // provides `battery_soc_start` — the SoC the battery *enters* each hour
     // with — so the rise/fall lines up with the bar and inverter-mode band of
     // the hour that caused it, including the very first hour of the window.
+    const HOUR = 3600 * 1000;
+    // The SoC line is plotted at hour *starts* (battery_soc_start), so without a
+    // closing point it would stop one hour short of the window's right edge.
+    // Append the last hour's END-of-hour SoC at that hour's end so the line runs
+    // to the edge and the final hour's rise/fall is visible.
+    const socData = pair((h) => h.battery_soc_start);
+    const lastH = hrs[hrs.length - 1];
+    if (lastH && lastH.soc != null && ts.length) {
+      socData.push({ x: ts[ts.length - 1] + HOUR, y: lastH.soc });
+    }
     series.push({
       name: "SoC %",
       type: "line",
-      data: pair((h) => h.battery_soc_start),
+      data: socData,
       color: "#22c55e",
     });
 
@@ -1141,7 +1151,6 @@ export class PowerPilotPanel extends LitElement {
     // past hours, forecast for future), so plot it on the hour-end boundary
     // (t + 1h) to line up with the right edge of the EV-charge bar. Only drawn
     // when the EV module actually reports SoC for some hour.
-    const HOUR = 3600 * 1000;
     const hasEvSoc = hrs.some((h) => h.ev_soc != null);
     if (hasEvSoc) {
       series.push({
@@ -2232,44 +2241,63 @@ export class PowerPilotPanel extends LitElement {
     `;
   }
 
-  /** SVG daily bar chart for the last 30 days of a profile. */
+  /** SVG daily bar chart for the last 30 days of a profile, with a kWh axis. */
   private _dailyBars(p: StatProfile): TemplateResult {
     const days = p.daily.slice(-30);
     if (!days.length) return html`<div class="empty">Brak danych dziennych.</div>`;
     const max = Math.max(0.001, ...days.map((d) => d.kwh));
     const w = 760;
-    const ht = 200;
-    const padB = 26;
-    const padT = 8;
+    const ht = 220;
+    const padB = 26; // x labels
+    const padT = 10;
+    const padL = 42; // y labels
     const gap = 3;
-    const bw = (w - (days.length - 1) * gap) / days.length;
+    const plotW = w - padL;
+    const plotH = ht - padB - padT;
+    const bw = (plotW - (days.length - 1) * gap) / days.length;
     const dark = this._isDark();
     const fg = dark ? "#9ca3af" : "#6b7280";
+    const grid = dark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.08)";
+    const yFor = (v: number) => padT + plotH - (v / max) * plotH;
+    // "Nice" gridline step so labels read cleanly (e.g. 0 / 5 / 10 / 15 kWh).
+    const rawStep = max / 4;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const niceStep = [1, 2, 2.5, 5, 10].find((m) => m * mag >= rawStep)! * mag;
+    const ticks: number[] = [];
+    for (let v = 0; v <= max + 1e-9; v += niceStep) ticks.push(v);
+
     return html`
       <svg viewBox="0 0 ${w} ${ht}" class="chart" style="width:100%">
+        ${ticks.map(
+          (v) => svg`
+            <line x1=${padL} y1=${yFor(v)} x2=${w} y2=${yFor(v)} stroke=${grid} stroke-width="1"></line>
+            <text x=${padL - 6} y=${yFor(v) + 3} text-anchor="end" font-size="10" fill=${fg}>${v.toFixed(v < 10 ? 1 : 0)}</text>`
+        )}
+        <text x="2" y=${padT + 4} font-size="10" fill=${fg}>kWh</text>
         ${days.map((d, i) => {
-          const h = (d.kwh / max) * (ht - padB - padT);
-          const x = i * (bw + gap);
-          const y = ht - padB - h;
+          const h = (d.kwh / max) * plotH;
+          const x = padL + i * (bw + gap);
+          const y = padT + plotH - h;
           const dt = new Date(d.date + "T00:00:00");
           const weekend = dt.getDay() === 0 || dt.getDay() === 6;
           const color = d.partial ? "#9ca3af" : weekend ? "#f59e0b" : "#3b82f6";
-          const label = `${dt.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" })}: ${d.kwh.toFixed(2)} kWh${d.partial ? " (dziś, niepełny)" : ""}`;
+          const ds = dt.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" });
+          const label = `${ds}: ${d.kwh.toFixed(2)} kWh${d.partial ? " (dziś, niepełny)" : ""}`;
           return svg`<rect x=${x} y=${y} width=${Math.max(bw, 0.5)} height=${Math.max(h, 0)}
               rx="1.5" fill=${color} opacity=${d.partial ? 0.5 : 0.9}>
               <title>${label}</title></rect>
             ${
               i % 5 === 0
-                ? svg`<text x=${x + bw / 2} y=${ht - 8} text-anchor="middle" font-size="10" fill=${fg}>${dt.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" })}</text>`
+                ? svg`<text x=${x + bw / 2} y=${ht - 8} text-anchor="middle" font-size="10" fill=${fg}>${ds}</text>`
                 : nothing
             }`;
         })}
-        <text x="2" y="12" font-size="10" fill=${fg}>${max.toFixed(1)} kWh</text>
       </svg>
       <div class="legend-row">
         <span><i class="dot-sq" style="background:#3b82f6"></i> dzień roboczy</span>
         <span><i class="dot-sq" style="background:#f59e0b"></i> weekend</span>
         <span><i class="dot-sq" style="background:#9ca3af"></i> dziś (niepełny)</span>
+        <span class="muted">najedź na słupek, by zobaczyć dokładną wartość</span>
       </div>
     `;
   }

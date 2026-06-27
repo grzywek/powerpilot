@@ -811,11 +811,51 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "generated_at": dt_util.now().isoformat(),
             "config": _redact(dict(self.config)),
             "plan": plan.as_dict() if plan else None,
+            "ev_debug": self._ev_debug(plan),
             "status": self.get_status(),
             "profiles": self.get_profiles(),
             "series": series,
             "sensor_reads": sensor_reads,
             "log": self.get_log(),
+        }
+
+    def _ev_debug(self, plan: Plan | None) -> dict:
+        """EV allocator inputs + per-hour output, for diagnosing charge decisions.
+
+        ``allocator_version`` proves which code is actually loaded: if it's
+        missing or stale after a deploy, only the config entry was reloaded and
+        Home Assistant needs a full restart to re-import the changed modules.
+        ``hours`` pairs each planned charge with its price so a fractional hour
+        is immediately explainable (price order, deadline, or the 100% ceiling).
+        """
+        from .optimizer import EV_ALLOCATOR_VERSION
+
+        request = self.ev.request_debug()
+        forced = set(self.ev._request.forced_hours)
+        available = self.ev._request.available_hours
+        hours: list[dict] = []
+        if plan is not None:
+            for slot, decision in zip(plan.forecast.slots, plan.decisions):
+                if decision.ev_charge_kwh <= 0 and slot.start not in forced:
+                    continue
+                hours.append(
+                    {
+                        "start": slot.start.isoformat(),
+                        "buy_price": slot.buy_price,
+                        "total_price_kwh": slot.total_price_kwh,
+                        "ev_charge_kwh": round(decision.ev_charge_kwh, 3),
+                        "ev_soc": decision.ev_soc,
+                        "available": slot.start in available,
+                        "forced": slot.start in forced,
+                    }
+                )
+        return {
+            "allocator_version": EV_ALLOCATOR_VERSION,
+            "request": request,
+            "planned_kwh_total": round(
+                sum(h["ev_charge_kwh"] for h in hours), 3
+            ),
+            "hours": hours,
         }
 
     async def get_forecasts(self, date_str: str | None) -> dict:

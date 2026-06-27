@@ -130,6 +130,9 @@ class EVModule(PowerPilotModule):
             self.log_info("EV wyłączony w konfiguracji.")
             return
 
+        # Live SoC only — never fabricate or carry forward a stale value. When
+        # the sensor is unavailable the SoC forecast simply isn't drawn (same
+        # hard rule as the house battery), rather than projecting from a guess.
         self._soc = self._read_float(self.config.get(CONF_EV_SOC_SENSOR))
         self._target_soc = self._read_float(self.config.get(CONF_EV_TARGET_SOC_SENSOR))
         self._energy_added = self._read_float(
@@ -410,6 +413,39 @@ class EVModule(PowerPilotModule):
                 for target in sorted(self._targets, key=lambda t: t.deadline)
             ],
             "forced_hours": [hour.isoformat() for hour in sorted(self._forced_hours)],
+        }
+
+    def request_debug(self) -> dict:
+        """The exact EVRequest last fed to the optimizer — the allocator inputs.
+
+        Everything needed to reproduce ``_plan_ev`` offline: live SoC, pack size,
+        per-phase power × phases, the resulting full charge power, the top-up
+        deficit, calendar targets/forced windows and how many hours the car was
+        deemed available for.
+        """
+        r = self._request
+        avail = sorted(r.available_hours)
+        return {
+            "enabled": r.enabled,
+            "is_actionable": r.is_actionable,
+            "current_soc": r.current_soc,
+            "battery_kwh": r.battery_kwh,
+            "charger_kw": r.charger_kw,
+            "phases": r.phases,
+            "charger_power_kw": round(r.charger_power_kw, 3),
+            "required_kwh": round(r.required_kwh, 3),
+            "available_hours_count": len(avail),
+            "available_from": avail[0].isoformat() if avail else None,
+            "available_to": avail[-1].isoformat() if avail else None,
+            "forced_hours": [h.isoformat() for h in sorted(r.forced_hours)],
+            "targets": [
+                {
+                    "deadline": t.deadline.isoformat(),
+                    "target_soc": t.target_soc,
+                    "label": t.label,
+                }
+                for t in sorted(r.targets, key=lambda t: t.deadline)
+            ],
         }
 
     def soc_limit_now(self) -> float | None:

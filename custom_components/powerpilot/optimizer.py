@@ -79,6 +79,11 @@ _LOGGER = logging.getLogger(__name__)
 
 _EPS = 1e-6
 
+# Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
+# so it's obvious from a JSON paste whether the running code is the current
+# full-power-block allocator or a stale import.
+EV_ALLOCATOR_VERSION = "full-power-blocks-2026-06"
+
 
 @dataclass
 class ChargeCurve:

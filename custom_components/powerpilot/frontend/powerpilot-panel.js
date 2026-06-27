@@ -1327,10 +1327,9 @@ rect.legend-mouseover-inactive,
           <b>${e.control.charge_start?this._fmtRun(e.control.charge_start):"\u2014"}</b> ·
           Limit SoC: <b>${e.control.soc_limit!==null?`${e.control.soc_limit}%`:"\u2014"}</b>
         </div>
-        <div class="check">
-          Moc ładowania: <b>${e.control.charge_power_kw.toFixed(1)} kW</b>
-          ${e.charger_power_kw?H`<span class="muted">maks. ${e.charger_power_kw.toFixed(1)} kW</span>`:G}
-        </div>
+        ${e.charger_power_kw?H`<div class="check muted">
+              Ładowanie zawsze pełną mocą ładowarki: ${e.charger_power_kw.toFixed(1)} kW
+            </div>`:G}
       </div>
     `}_renderStatus(){let e=this._status;return e?H`
       <div class="card">

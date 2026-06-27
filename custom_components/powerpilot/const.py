@@ -229,5 +229,4 @@ BINARY_EV_CHARGE: Final = "ev_charge"
 # EV control surface (the integration advises; an automation does the steering).
 SENSOR_EV_CHARGE_START: Final = "ev_charge_start"  # next planned charge start (timestamp)
 SENSOR_EV_SOC_LIMIT: Final = "ev_soc_limit"  # target SoC the car should charge to (%)
-SENSOR_EV_CHARGE_POWER: Final = "ev_charge_power"  # recommended charge power now (kW)
 BINARY_EV_CONNECT_CHARGER: Final = "ev_connect_charger"  # charging planned within 24 h

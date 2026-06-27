@@ -1556,7 +1556,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "charging_now": False,
                 "charge_start": None,
                 "soc_limit": None,
-                "charge_power_kw": 0.0,
                 "soc": None,
             }
 
@@ -1585,7 +1584,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "charging_now": charging_now,
             "charge_start": charge_start.isoformat() if charge_start else None,
             "soc_limit": ev.soc_limit_now(),
-            "charge_power_kw": round(ev.charger_power_kw, 3) if charging_now else 0.0,
             "soc": ev.soc,
         }
 

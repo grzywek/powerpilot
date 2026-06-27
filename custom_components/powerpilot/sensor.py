@@ -19,7 +19,6 @@ from .const import (
     DOMAIN,
     SENSOR_BATTERY_ENERGY_COST,
     SENSOR_CHARGE_POWER,
-    SENSOR_EV_CHARGE_POWER,
     SENSOR_EV_CHARGE_START,
     SENSOR_EV_SOC_LIMIT,
     SENSOR_INVERTER_MODE,
@@ -43,7 +42,6 @@ async def async_setup_entry(
             NextActionSensor(coordinator, entry),
             EVChargeStartSensor(coordinator, entry),
             EVSocLimitSensor(coordinator, entry),
-            EVChargePowerSensor(coordinator, entry),
         ]
     )
 
@@ -224,24 +222,3 @@ class EVSocLimitSensor(PowerPilotEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         return self.coordinator.ev_control().get("soc_limit")
-
-
-class EVChargePowerSensor(PowerPilotEntity, SensorEntity):
-    """Recommended EV charge power now (kW).
-
-    Full charger power while a planned charging hour is active, otherwise 0 — the
-    setpoint an automation pushes to the charger.
-    """
-
-    _attr_translation_key = SENSOR_EV_CHARGE_POWER
-    _attr_native_unit_of_measurement = "kW"
-    _attr_device_class = SensorDeviceClass.POWER
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:ev-station"
-
-    def __init__(self, coordinator, entry) -> None:
-        super().__init__(coordinator, entry, SENSOR_EV_CHARGE_POWER)
-
-    @property
-    def native_value(self) -> float | None:
-        return self.coordinator.ev_control().get("charge_power_kw")

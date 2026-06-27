@@ -51,7 +51,6 @@ interface EVPlan {
     charging_now: boolean;
     charge_start: string | null;
     soc_limit: number | null;
-    charge_power_kw: number;
   };
 }
 
@@ -1901,12 +1900,11 @@ export class PowerPilotPanel extends LitElement {
           <b>${ev.control.charge_start ? this._fmtRun(ev.control.charge_start) : "—"}</b> ·
           Limit SoC: <b>${ev.control.soc_limit !== null ? `${ev.control.soc_limit}%` : "—"}</b>
         </div>
-        <div class="check">
-          Moc ładowania: <b>${ev.control.charge_power_kw.toFixed(1)} kW</b>
-          ${ev.charger_power_kw
-            ? html`<span class="muted">maks. ${ev.charger_power_kw.toFixed(1)} kW</span>`
-            : nothing}
-        </div>
+        ${ev.charger_power_kw
+          ? html`<div class="check muted">
+              Ładowanie zawsze pełną mocą ładowarki: ${ev.charger_power_kw.toFixed(1)} kW
+            </div>`
+          : nothing}
       </div>
     `;
   }

@@ -48,7 +48,7 @@ integration installable and working.
 - [x] EV SoC tracking: real (sensor history) + forecast (`decision.ev_soc`),
       drawn as a dashed SoC line on the energy chart.
 - [x] Control surface for automations: connect-charger (planned within 24 h),
-      charge-start timestamp, SoC limit, charge-power setpoint.
+      charge-start timestamp, SoC limit (charging is always full charger power).
 - [ ] 3-phase charger sharing one phase with the inverter → power-limit coupling.
 - [x] Calendar read (any HA `calendar.*` entity: Google, CalDAV/iCloud, Local).
       Keyword events: `<kw> NN%` = deadline target (be at NN% by event start,

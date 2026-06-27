@@ -128,7 +128,9 @@ set the SoC limit). It does not drive the charger itself.
 | `sensor.powerpilot_ev_charge_start` | timestamp | when the next charging hour begins (HA shows a live "in X" countdown) |
 | `binary_sensor.powerpilot_ev_charge` | on/off | a charging hour is active right now |
 | `sensor.powerpilot_ev_soc_limit` | `%` | the SoC the car should charge to right now |
-| `sensor.powerpilot_ev_charge_power` | `kW` | the charge-power setpoint (full charger power while active, otherwise 0) |
+
+Charging always runs at the full charger power, so there is no separate
+power-setpoint entity — the automation just starts/stops the charger.
 
 ## Status
 

@@ -249,9 +249,6 @@
       },
       "ev_soc_limit": {
         "name": "EV limit ładowania (SoC)"
-      },
-      "ev_charge_power": {
-        "name": "EV moc ładowania"
       }
     },
     "binary_sensor": {

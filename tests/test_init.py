@@ -56,3 +56,44 @@ async def test_plan_reacts_to_price_sensor(hass: HomeAssistant) -> None:
     plan = hass.states.get("sensor.powerpilot_optimization_plan")
     assert plan is not None
     assert plan.attributes.get("horizon_hours", 0) >= 1
+
+
+async def test_unready_inputs_flags_unavailable_core_sensor(hass: HomeAssistant) -> None:
+    """A configured core sensor that is unavailable/missing defers setup."""
+    from custom_components.powerpilot import _unready_inputs
+    from custom_components.powerpilot.const import (
+        CONF_CONSUMPTION_SENSOR,
+        CONF_SOC_SENSOR,
+    )
+
+    hass.states.async_set("sensor.soc", "55", {"unit_of_measurement": "%"})
+    hass.states.async_set("sensor.cons", "unavailable", {})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            **DEFAULTS,
+            CONF_SOC_SENSOR: "sensor.soc",
+            CONF_CONSUMPTION_SENSOR: "sensor.cons",  # unavailable
+        },
+    )
+    # Unavailable consumption + a never-created (still configured? no) → only the
+    # unavailable one is flagged; the available SoC is not.
+    assert _unready_inputs(hass, entry) == ["sensor.cons"]
+
+
+async def test_unready_inputs_ignores_ev_and_unset(hass: HomeAssistant) -> None:
+    """EV sensors may flap (car asleep) and must never block setup."""
+    from custom_components.powerpilot import _unready_inputs
+    from custom_components.powerpilot.const import CONF_EV_SOC_SENSOR, CONF_SOC_SENSOR
+
+    hass.states.async_set("sensor.soc", "60", {"unit_of_measurement": "%"})
+    hass.states.async_set("sensor.ev", "unavailable", {})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            **DEFAULTS,
+            CONF_SOC_SENSOR: "sensor.soc",
+            CONF_EV_SOC_SENSOR: "sensor.ev",  # unavailable but optional
+        },
+    )
+    assert _unready_inputs(hass, entry) == []

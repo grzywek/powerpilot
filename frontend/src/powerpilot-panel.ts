@@ -43,6 +43,11 @@ interface EVPlan {
   charging: boolean | null;
   soc_limit: number | null;
   charger_power_kw: number | null;
+  capacity_kwh: number | null;
+  capacity_source: string | null;
+  capacity_sessions: number;
+  capacity_ready: boolean;
+  min_capacity_sessions: number;
   targets: { deadline: string; target_soc: number; label: string }[];
   forced_hours: string[];
   planned_hours: { start: string; kwh: number }[];
@@ -1985,6 +1990,18 @@ export class PowerPilotPanel extends LitElement {
         <div class="check">
           Stan: <b>${ev.soc !== null ? `${ev.soc}%` : "—"}</b>
           ${ev.target_soc !== null ? html`<span class="muted">cel ${ev.target_soc}%</span>` : nothing}
+        </div>
+        <div class="check">
+          Pojemność baterii:
+          ${ev.capacity_kwh != null
+            ? html`<b>${ev.capacity_kwh.toFixed(1)} kWh</b>
+                <span class="muted">
+                  ${ev.capacity_source === "learned"
+                    ? `wyliczona z ${ev.capacity_sessions} sesji`
+                    : "wstępna (uczy się z ładowań)"}
+                </span>`
+            : html`<b>uczy się…</b>
+                <span class="muted">${ev.capacity_sessions}/${ev.min_capacity_sessions} sesji — EV nie planuje bez pojemności</span>`}
         </div>
         <div class="check">
           Podłączony: <b>${this._evBool(ev.connected, "tak", "nie")}</b> ·

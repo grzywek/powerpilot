@@ -113,6 +113,17 @@ CONF_EV_TARGET_SOC_SENSOR: Final = "ev_target_soc_sensor"  # car's configured ta
 CONF_EV_CALENDAR: Final = "ev_calendar"
 CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # event-summary trigger word (e.g. "Kotek")
 
+# --- EV battery capacity (learned, not configured) ---
+# Capacity is derived from charging sessions: kWh added ÷ SoC gained × 100. The
+# legacy CONF_EV_BATTERY_KWH (above) is kept only to seed the learned value on
+# upgrade — there is no capacity field in the config flow anymore.
+STORAGE_VERSION_EV: Final = 1
+CAPACITY_LEARN_DAYS: Final = 30  # history window scanned for charging sessions
+MIN_CAPACITY_SAMPLES: Final = 3  # sessions needed before a learned value is used
+MAX_CAPACITY_SAMPLES: Final = 20  # rolling window of session samples kept
+MIN_SESSION_KWH: Final = 1.0  # ignore tiny top-ups (noise)
+MIN_SESSION_SOC: Final = 15.0  # need a meaningful SoC swing for a clean estimate
+
 # --- Distribution tariffs ---
 # Stored in ``entry.options`` as a list of dicts (see ``models.Tariff.to_dict``).
 # Snapshots of resolved per-hour distribution prices live in their own
@@ -160,9 +171,6 @@ DEFAULTS: Final = {
     CONF_PRICE_REFRESH_HOURS: 3,
     CONF_CONSUMPTION_LEARN_DAYS: 21,
     CONF_EV_ENABLED: False,
-    CONF_EV_RANGE_KM: 400,
-    CONF_EV_BATTERY_KWH: 60.0,
-    CONF_EV_WEEKLY_KM: 200,
     CONF_EV_CHARGER_KW: 3.5,
     CONF_EV_CHARGER_PHASE: 1,
     CONF_EV_CHARGER_PHASES: 1,

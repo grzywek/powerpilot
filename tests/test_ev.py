@@ -24,6 +24,9 @@ from custom_components.powerpilot.modules.ev import (
     EVChargeTarget,
     EVModule,
     EVRequest,
+    _capacity_samples,
+    _segment_sessions,
+    _value_at,
 )
 from custom_components.powerpilot.optimizer import (
     ChargeCurve,
@@ -352,6 +355,8 @@ def _module_with_state(**state) -> EVModule:
     module._available = state.get("available", True)
     module._targets = state.get("targets", [])
     module._forced_hours = state.get("forced_hours", set())
+    # Capacity is learned at runtime; tests supply it directly.
+    module._capacity = state.get("capacity", 60.0)
     module._request = EVRequest()
     return module
 
@@ -453,3 +458,54 @@ def test_soc_limit_defaults_to_target_sensor() -> None:
 def test_soc_limit_falls_back_to_default() -> None:
     module = _module_with_state()
     assert module.soc_limit_now() == DEFAULT_TARGET_SOC
+
+
+# ---------------------------------------------------------------------------
+# Battery capacity learning
+# ---------------------------------------------------------------------------
+
+
+def _ts(hours: float):
+    return BASE + timedelta(hours=hours)
+
+
+def test_value_at_picks_last_sample_at_or_before() -> None:
+    hist = [(_ts(0), 10.0), (_ts(1), 20.0), (_ts(2), 30.0)]
+    assert _value_at(hist, _ts(1.5)) == 20.0
+    assert _value_at(hist, _ts(0)) == 10.0
+    assert _value_at(hist, _ts(-1)) == 10.0  # before first → earliest
+
+
+def test_segment_sessions_splits_on_reset() -> None:
+    # Two charging runs: 0→8 kWh, reset, then 0→5 kWh.
+    energy = [
+        (_ts(0), 0.0), (_ts(1), 4.0), (_ts(2), 8.0),
+        (_ts(3), 0.0), (_ts(4), 5.0),
+    ]
+    sessions = _segment_sessions(energy)
+    assert len(sessions) == 2
+    assert sessions[0][2] == 8.0 and sessions[1][2] == 5.0
+
+
+def test_capacity_samples_from_clean_session() -> None:
+    # 30 kWh added while SoC went 20% → 60% (Δ40%) → capacity = 30/40*100 = 75 kWh.
+    soc = [(_ts(0), 20.0), (_ts(1), 40.0), (_ts(2), 60.0)]
+    energy = [(_ts(0), 0.0), (_ts(1), 15.0), (_ts(2), 30.0)]
+    samples = _capacity_samples(soc, energy)
+    assert len(samples) == 1
+    assert round(samples[0], 1) == 75.0
+
+
+def test_capacity_samples_skips_tiny_soc_swing() -> None:
+    # Only 5% SoC swing → too noisy, ignored.
+    soc = [(_ts(0), 80.0), (_ts(2), 85.0)]
+    energy = [(_ts(0), 0.0), (_ts(2), 4.0)]
+    assert _capacity_samples(soc, energy) == []
+
+
+def test_get_request_not_actionable_without_capacity() -> None:
+    fc = _forecast([0.5] * 6)
+    module = _module_with_state(soc=20.0, target_soc=80.0, capacity=None)
+    req = module.get_request(fc)
+    assert req.battery_kwh == 0.0
+    assert req.is_actionable is False

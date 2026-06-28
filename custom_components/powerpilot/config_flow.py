@@ -27,7 +27,6 @@ from .const import (
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
     CONF_DISCHARGE_EFFICIENCY,
-    CONF_EV_BATTERY_KWH,
     CONF_EV_CALENDAR,
     CONF_EV_CALENDAR_KEYWORD,
     CONF_EV_CHARGER_CONNECTED_SENSOR,
@@ -37,10 +36,8 @@ from .const import (
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
-    CONF_EV_RANGE_KM,
     CONF_EV_SOC_SENSOR,
     CONF_EV_TARGET_SOC_SENSOR,
-    CONF_EV_WEEKLY_KM,
     CONF_GRID_DISCONNECT_SOC,
     CONF_GRID_IMPORT_SENSOR,
     CONF_INVERTER_MAX_CHARGE_KW,
@@ -255,15 +252,6 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_EV_CALENDAR_KEYWORD, default=d(CONF_EV_CALENDAR_KEYWORD)
             ): selector.TextSelector(),
-            vol.Optional(CONF_EV_RANGE_KM, default=d(CONF_EV_RANGE_KM)): _NUMBER(
-                _NUM(min=50, max=1000, step=10, unit_of_measurement="km", mode="box")
-            ),
-            vol.Optional(CONF_EV_BATTERY_KWH, default=d(CONF_EV_BATTERY_KWH)): _NUMBER(
-                _NUM(min=10, max=200, step=1, unit_of_measurement="kWh", mode="box")
-            ),
-            vol.Optional(CONF_EV_WEEKLY_KM, default=d(CONF_EV_WEEKLY_KM)): _NUMBER(
-                _NUM(min=0, max=3000, step=10, unit_of_measurement="km", mode="box")
-            ),
             vol.Optional(CONF_EV_CHARGER_KW, default=d(CONF_EV_CHARGER_KW)): _NUMBER(
                 _NUM(min=1, max=22, step=0.1, unit_of_measurement="kW", mode="box")
             ),

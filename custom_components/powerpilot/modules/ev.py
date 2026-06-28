@@ -21,12 +21,15 @@ from __future__ import annotations
 
 import logging
 import re
+import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import (
+    CAPACITY_LEARN_DAYS,
     CONF_EV_BATTERY_KWH,
     CONF_EV_CALENDAR,
     CONF_EV_CALENDAR_KEYWORD,
@@ -38,11 +41,15 @@ from ..const import (
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
-    CONF_EV_RANGE_KM,
     CONF_EV_SOC_SENSOR,
     CONF_EV_TARGET_SOC_SENSOR,
-    CONF_EV_WEEKLY_KM,
     DEFAULTS,
+    DOMAIN,
+    MAX_CAPACITY_SAMPLES,
+    MIN_CAPACITY_SAMPLES,
+    MIN_SESSION_KWH,
+    MIN_SESSION_SOC,
+    STORAGE_VERSION_EV,
 )
 from ..models import Forecast
 from .base import PowerPilotModule
@@ -60,6 +67,72 @@ CALENDAR_LOOKAHEAD_HOURS = 96
 # Matches a percentage anywhere in the event-summary remainder, e.g. "100%",
 # "80 %", "55,5%".
 _PERCENT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+
+
+def _value_at(history: list[tuple[datetime, float]], when: datetime) -> float | None:
+    """Value of a (time, value) series at ``when`` (last sample at/before it)."""
+    found: float | None = None
+    for ts, value in history:
+        if ts <= when:
+            found = value
+        else:
+            break
+    if found is None and history:
+        found = history[0][1]  # nothing before → earliest known value
+    return found
+
+
+def _segment_sessions(
+    energy_history: list[tuple[datetime, float]],
+) -> list[tuple[datetime, datetime, float]]:
+    """Split a session energy counter into ``(start, end, kWh)`` charging runs.
+
+    The energy-added sensor is ``total_increasing`` and resets to ~0 at the start
+    of each session, so a downward jump marks a new session; the energy delivered
+    by a run is its peak value.
+    """
+    if not energy_history:
+        return []
+    sessions: list[tuple[datetime, datetime, float]] = []
+    run_start = energy_history[0][0]
+    run_max = energy_history[0][1]
+    prev = energy_history[0][1]
+    last_ts = energy_history[0][0]
+    for ts, value in energy_history[1:]:
+        if value < prev - 0.05:  # counter reset → previous session ended
+            sessions.append((run_start, last_ts, run_max))
+            run_start, run_max = ts, value
+        else:
+            run_max = max(run_max, value)
+        prev, last_ts = value, ts
+    sessions.append((run_start, last_ts, run_max))
+    return sessions
+
+
+def _capacity_samples(
+    soc_history: list[tuple[datetime, float]],
+    energy_history: list[tuple[datetime, float]],
+) -> list[float]:
+    """Per-session capacity (kWh) estimates: ``energy_added ÷ ΔSoC% × 100``.
+
+    Only clean sessions count — enough energy and a big enough SoC swing that
+    sensor noise doesn't dominate.
+    """
+    if len(soc_history) < 2 or len(energy_history) < 2:
+        return []
+    samples: list[float] = []
+    for start, end, energy in _segment_sessions(energy_history):
+        if energy < MIN_SESSION_KWH:
+            continue
+        soc_start = _value_at(soc_history, start)
+        soc_end = _value_at(soc_history, end)
+        if soc_start is None or soc_end is None:
+            continue
+        delta_soc = soc_end - soc_start
+        if delta_soc < MIN_SESSION_SOC:
+            continue
+        samples.append(energy / delta_soc * 100.0)
+    return samples
 
 
 @dataclass
@@ -96,6 +169,7 @@ class EVRequest:
     def is_actionable(self) -> bool:
         return (
             self.enabled
+            and self.battery_kwh > 0  # capacity learned → planning allowed
             and bool(self.available_hours)
             and (self.required_kwh > 0 or bool(self.targets) or bool(self.forced_hours))
         )
@@ -117,10 +191,40 @@ class EVModule(PowerPilotModule):
         self._targets: list[EVChargeTarget] = []
         self._forced_hours: set[datetime] = set()
         self._request = EVRequest()
+        # Learned battery capacity (kWh) — see _maybe_learn_capacity.
+        self._capacity: float | None = None
+        self._capacity_samples: list[float] = []
+        self._capacity_source: str | None = None  # "learned" | "seed"
+        self._last_capacity_learn: date | None = None
+        self._store: Store | None = None
 
     @property
     def enabled(self) -> bool:
         return bool(self.config.get(CONF_EV_ENABLED))
+
+    async def async_setup(self) -> None:
+        """Load the learned capacity, seed it from legacy config, refine it."""
+        self._store = Store(
+            self.hass,
+            STORAGE_VERSION_EV,
+            f"{DOMAIN}_{self.coordinator.entry.entry_id}_ev",
+        )
+        stored = await self._store.async_load()
+        if stored:
+            self._capacity_samples = list(stored.get("capacity_samples") or [])
+            self._capacity = stored.get("capacity")
+            self._capacity_source = stored.get("capacity_source")
+            last = stored.get("last_capacity_learn")
+            self._last_capacity_learn = date.fromisoformat(last) if last else None
+        # One-time seed from the old manual capacity so upgrades aren't blank
+        # while the first sessions are still being observed.
+        if self._capacity is None:
+            legacy = self.config.get(CONF_EV_BATTERY_KWH)
+            if legacy:
+                self._capacity = float(legacy)
+                self._capacity_source = "seed"
+        if self.enabled:
+            await self._maybe_learn_capacity()
 
     async def async_update(self) -> None:
         if not self.enabled:
@@ -147,9 +251,12 @@ class EVModule(PowerPilotModule):
         self._available = self._compute_available()
 
         await self._async_load_calendar()
+        await self._maybe_learn_capacity()
 
         self.log_info(
             f"EV: SoC={self._soc if self._soc is not None else '–'}%, "
+            f"pojemność={self._capacity if self._capacity is not None else '–'} kWh "
+            f"({self._capacity_source or 'brak'}, {len(self._capacity_samples)} sesji), "
             f"cel={self._target_soc if self._target_soc is not None else '–'}%, "
             f"podłączony={self._connected}, ładuje={self._charging}, "
             f"dostępny={self._available}, deadline'y={len(self._targets)}, "
@@ -164,6 +271,81 @@ class EVModule(PowerPilotModule):
                 "targets": len(self._targets),
                 "forced_hours": len(self._forced_hours),
             },
+        )
+
+    # ------------------------------------------------------------------
+    # Battery capacity learning
+    # ------------------------------------------------------------------
+    @property
+    def capacity_kwh(self) -> float | None:
+        """Best capacity estimate (learned median, or legacy seed, or None)."""
+        return self._capacity
+
+    async def _maybe_learn_capacity(self) -> None:
+        """Re-derive capacity from charging-session history (once per day).
+
+        Keeps refining until a learned value exists, then settles to daily.
+        """
+        today = dt_util.now().date()
+        if self._capacity_source == "learned" and self._last_capacity_learn == today:
+            return
+        soc_eid = self.config.get(CONF_EV_SOC_SENSOR)
+        energy_eid = self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
+        if not soc_eid or not energy_eid:
+            return
+        now = dt_util.now()
+        window_start = now - timedelta(days=CAPACITY_LEARN_DAYS)
+        soc_hist = await self._numeric_history(soc_eid, window_start, now)
+        energy_hist = await self._numeric_history(energy_eid, window_start, now)
+        self._last_capacity_learn = today
+        samples = _capacity_samples(soc_hist, energy_hist)
+        if not samples:
+            await self._async_save_capacity()
+            return
+        self._capacity_samples = samples[-MAX_CAPACITY_SAMPLES:]
+        if len(self._capacity_samples) >= MIN_CAPACITY_SAMPLES:
+            self._capacity = round(statistics.median(self._capacity_samples), 1)
+            self._capacity_source = "learned"
+        await self._async_save_capacity()
+
+    async def _numeric_history(
+        self, entity_id: str, start: datetime, end: datetime
+    ) -> list[tuple[datetime, float]]:
+        """Sorted ``(time, value)`` numeric state history for a sensor."""
+        from homeassistant.components.recorder import get_instance, history
+
+        changes = await get_instance(self.hass).async_add_executor_job(
+            history.state_changes_during_period,
+            self.hass,
+            start,
+            end,
+            entity_id,
+            True,  # no_attributes
+            False,  # descending
+            None,  # limit
+            True,  # include_start_time_state
+        )
+        series: list[tuple[datetime, float]] = []
+        for st in changes.get(entity_id, []):
+            try:
+                series.append((st.last_updated, float(st.state)))
+            except (TypeError, ValueError):
+                continue  # "unavailable" / "unknown"
+        series.sort(key=lambda item: item[0])
+        return series
+
+    async def _async_save_capacity(self) -> None:
+        if self._store is None:
+            return
+        await self._store.async_save(
+            {
+                "capacity": self._capacity,
+                "capacity_samples": self._capacity_samples,
+                "capacity_source": self._capacity_source,
+                "last_capacity_learn": self._last_capacity_learn.isoformat()
+                if self._last_capacity_learn
+                else None,
+            }
         )
 
     # ------------------------------------------------------------------
@@ -333,7 +515,9 @@ class EVModule(PowerPilotModule):
         if not self.enabled:
             return EVRequest(enabled=False)
 
-        battery_kwh = float(self.config.get(CONF_EV_BATTERY_KWH, 60.0))
+        # Capacity is learned from charging sessions; until it's known the request
+        # is not actionable (battery_kwh = 0 → EVRequest.is_actionable is False).
+        battery_kwh = self._capacity or 0.0
 
         available_hours = (
             {
@@ -404,6 +588,11 @@ class EVModule(PowerPilotModule):
             "connected": self._connected,
             "charging": self._charging,
             "charger_power_kw": self.charger_power_kw,
+            "capacity_kwh": self._capacity,
+            "capacity_source": self._capacity_source,
+            "capacity_sessions": len(self._capacity_samples),
+            "capacity_ready": self._capacity is not None,
+            "min_capacity_sessions": MIN_CAPACITY_SAMPLES,
             "targets": [
                 {
                     "deadline": target.deadline.isoformat(),
@@ -485,13 +674,3 @@ class EVModule(PowerPilotModule):
     @property
     def charging(self) -> bool | None:
         return self._charging
-
-    @property
-    def weekly_km(self) -> int:
-        return int(self.config.get(CONF_EV_WEEKLY_KM, 0))
-
-    @property
-    def kwh_per_km(self) -> float:
-        battery = float(self.config.get(CONF_EV_BATTERY_KWH, 60.0))
-        rng = float(self.config.get(CONF_EV_RANGE_KM, 400.0)) or 1.0
-        return battery / rng

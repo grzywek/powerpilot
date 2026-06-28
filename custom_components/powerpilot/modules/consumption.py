@@ -39,6 +39,7 @@ from ..const import (
     CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
+    CONF_EV_CHARGE_METER_SENSOR,
     CONF_SENSOR_PARENTS,
     DOMAIN,
 )
@@ -247,6 +248,13 @@ class ConsumptionModule(PowerPilotModule):
 
         learn_days = int(self.config.get(CONF_CONSUMPTION_LEARN_DAYS, 21))
         device_sensors = list(self.config.get(CONF_DEVICE_SENSORS) or [])
+        # Fold the EV charge meter into the exclusive tree so historical EV
+        # charging is removed from the base load (it is planned separately by the
+        # EV module). It is learned but NOT contributed to demand — see
+        # device_value(). Skipped if it is already a configured device.
+        ev_meter = self.config.get(CONF_EV_CHARGE_METER_SENSOR)
+        if ev_meter and ev_meter not in device_sensors:
+            device_sensors.append(ev_meter)
         parents = self.config.get(CONF_SENSOR_PARENTS) or {}
 
         start = dt_util.start_of_local_day(today - timedelta(days=learn_days))
@@ -395,7 +403,15 @@ class ConsumptionModule(PowerPilotModule):
         return self._default_profile[(weekday, hour)]
 
     def device_value(self, weekday: int, hour: int) -> float:
-        return sum(acc.value(weekday, hour) or 0.0 for acc in self.devices.values())
+        # The EV charge meter is learned (so it can be subtracted from the base)
+        # but never added back to demand — EV charging is planned by the EV module,
+        # not part of the household background load.
+        ev_meter = self.config.get(CONF_EV_CHARGE_METER_SENSOR)
+        return sum(
+            acc.value(weekday, hour) or 0.0
+            for eid, acc in self.devices.items()
+            if eid != ev_meter
+        )
 
     def contribute(self, forecast: Forecast) -> None:
         learned = self.base.observed_days > 0

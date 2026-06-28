@@ -105,6 +105,12 @@ CONF_EV_CHARGER_CONNECTED_SENSOR: Final = "ev_charger_connected_sensor"  # plugg
 CONF_EV_CHARGING_SENSOR: Final = "ev_charging_sensor"  # actively drawing (bool) → plan-vs-reality reminders
 CONF_EV_ENERGY_ADDED_SENSOR: Final = "ev_energy_added_sensor"  # session kWh (total_increasing) → delivered so far
 CONF_EV_TARGET_SOC_SENSOR: Final = "ev_target_soc_sensor"  # car's configured target SoC % → default charge target
+# Grid-side EV charging energy meter — when the charger draws through the house
+# meter, its historical charging is in the learned consumption profile. PowerPilot
+# plans EV charging explicitly, so this meter is *subtracted* from the demand
+# forecast (no double counting); realized history is unaffected. Set only when the
+# charger sits inside the main consumption meter.
+CONF_EV_CHARGE_METER_SENSOR: Final = "ev_charge_meter_sensor"
 # Calendar-driven charging plan. Reads an HA ``calendar.*`` entity (works with
 # Google, CalDAV/iCloud, Local Calendar, …). Events whose summary starts with
 # the keyword schedule charging — "Kotek 100%" = a deadline target (be at 100 %

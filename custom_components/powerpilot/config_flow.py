@@ -32,6 +32,7 @@ from .const import (
     CONF_EV_CHARGER_CONNECTED_SENSOR,
     CONF_EV_CHARGER_KW,
     CONF_EV_CHARGER_PHASES,
+    CONF_EV_CHARGE_METER_SENSOR,
     CONF_EV_CHARGING_SENSOR,
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
@@ -242,6 +243,9 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             ): _entity(["binary_sensor", "switch", "sensor"]),
             vol.Optional(
                 CONF_EV_ENERGY_ADDED_SENSOR, default=d(CONF_EV_ENERGY_ADDED_SENSOR) or vol.UNDEFINED
+            ): _entity("sensor"),
+            vol.Optional(
+                CONF_EV_CHARGE_METER_SENSOR, default=d(CONF_EV_CHARGE_METER_SENSOR) or vol.UNDEFINED
             ): _entity("sensor"),
             vol.Optional(
                 CONF_EV_LOCATION_SENSOR, default=d(CONF_EV_LOCATION_SENSOR) or vol.UNDEFINED

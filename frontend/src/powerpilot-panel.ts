@@ -48,6 +48,9 @@ interface EVPlan {
   capacity_sessions: number;
   capacity_ready: boolean;
   min_capacity_sessions: number;
+  kwh_per_km: number | null;
+  drain_days: number;
+  drain_next24_kwh: number | null;
   targets: { deadline: string; target_soc: number; label: string }[];
   forced_hours: string[];
   planned_hours: { start: string; kwh: number }[];
@@ -2003,6 +2006,15 @@ export class PowerPilotPanel extends LitElement {
             : html`<b>uczy się…</b>
                 <span class="muted">${ev.capacity_sessions}/${ev.min_capacity_sessions} sesji — EV nie planuje bez pojemności</span>`}
         </div>
+        ${ev.kwh_per_km != null || ev.drain_days > 0
+          ? html`<div class="check">
+              Zużycie jazdy:
+              <b>${ev.kwh_per_km != null ? `${ev.kwh_per_km.toFixed(3)} kWh/km` : "—"}</b>
+              ${ev.drain_next24_kwh != null
+                ? html`<span class="muted">prognoza 24 h: ${ev.drain_next24_kwh.toFixed(1)} kWh (${ev.drain_days} dni nauki)</span>`
+                : nothing}
+            </div>`
+          : nothing}
         <div class="check">
           Podłączony: <b>${this._evBool(ev.connected, "tak", "nie")}</b> ·
           Ładuje: <b>${this._evBool(ev.charging, "tak", "nie")}</b> ·

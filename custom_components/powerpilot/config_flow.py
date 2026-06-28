@@ -37,6 +37,7 @@ from .const import (
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
+    CONF_EV_ODOMETER_SENSOR,
     CONF_EV_SOC_SENSOR,
     CONF_EV_TARGET_SOC_SENSOR,
     CONF_GRID_DISCONNECT_SOC,
@@ -233,6 +234,9 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(CONF_EV_SOC_SENSOR, default=d(CONF_EV_SOC_SENSOR) or vol.UNDEFINED): _entity(["sensor", "input_number", "number"]),
             vol.Optional(
                 CONF_EV_TARGET_SOC_SENSOR, default=d(CONF_EV_TARGET_SOC_SENSOR) or vol.UNDEFINED
+            ): _entity(["sensor", "input_number", "number"]),
+            vol.Optional(
+                CONF_EV_ODOMETER_SENSOR, default=d(CONF_EV_ODOMETER_SENSOR) or vol.UNDEFINED
             ): _entity(["sensor", "input_number", "number"]),
             vol.Optional(
                 CONF_EV_CHARGER_CONNECTED_SENSOR,

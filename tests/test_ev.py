@@ -19,6 +19,7 @@ from custom_components.powerpilot.const import (
     CONF_EV_TARGET_SOC_SENSOR,
 )
 from custom_components.powerpilot.models import Forecast, HourSlot
+from custom_components.powerpilot.profiles import WeeklyAccumulator
 from custom_components.powerpilot.modules.ev import (
     DEFAULT_TARGET_SOC,
     EVChargeTarget,
@@ -357,6 +358,8 @@ def _module_with_state(**state) -> EVModule:
     module._forced_hours = state.get("forced_hours", set())
     # Capacity is learned at runtime; tests supply it directly.
     module._capacity = state.get("capacity", 60.0)
+    module._kwh_per_km = state.get("kwh_per_km")
+    module._drain_profile = state.get("drain_profile") or WeeklyAccumulator()
     module._request = EVRequest()
     return module
 
@@ -509,3 +512,47 @@ def test_get_request_not_actionable_without_capacity() -> None:
     req = module.get_request(fc)
     assert req.battery_kwh == 0.0
     assert req.is_actionable is False
+
+
+# ---------------------------------------------------------------------------
+# Driving-consumption learning + drain-based charging
+# ---------------------------------------------------------------------------
+
+
+def test_hourly_drain_attributes_soc_drops() -> None:
+    from custom_components.powerpilot.modules.ev import _hourly_drain
+
+    # 60 kWh pack; SoC 50→40 over [0,1) then steady → 6 kWh out at hour 0.
+    soc = [(_ts(0), 50.0), (_ts(1), 40.0), (_ts(2), 40.0)]
+    drain = _hourly_drain(soc, 60.0)
+    assert round(drain[_ts(0)], 3) == 6.0
+
+
+def test_kwh_per_km_from_distance_and_soc() -> None:
+    from custom_components.powerpilot.modules.ev import _kwh_per_km
+
+    # 12 kWh out (SoC 60→40 of 60 kWh) over 60 km → 0.2 kWh/km.
+    soc = [(_ts(0), 60.0), (_ts(2), 40.0)]
+    odo = [(_ts(0), 1000.0), (_ts(2), 1060.0)]
+    assert round(_kwh_per_km(soc, odo, 60.0), 3) == 0.2
+
+
+def _flat_drain(per_hour: float) -> WeeklyAccumulator:
+    """A drain profile with the same kWh every (weekday, hour)."""
+    acc = WeeklyAccumulator()
+    for i in range(7 * 24):
+        acc.observe(BASE + timedelta(hours=i), per_hour)
+    acc.mark_date_observed(BASE.date())
+    return acc
+
+
+def test_get_request_drain_based_topup() -> None:
+    # 60 kWh pack, at 20% (12 kWh), car target 80% (48 kWh), reserve 20% (12 kWh).
+    # Drain profile predicts 0.25 kWh/h → 6 kWh over the next 24 h.
+    # target_energy = min(6 + 12, 48) = 18 kWh; required = 18 - 12 = 6 kWh.
+    fc = _forecast([0.5] * 6)
+    module = _module_with_state(
+        soc=20.0, target_soc=80.0, drain_profile=_flat_drain(0.25)
+    )
+    req = module.get_request(fc)
+    assert round(req.required_kwh, 3) == 6.0

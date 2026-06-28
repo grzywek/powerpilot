@@ -1307,6 +1307,11 @@ rect.legend-mouseover-inactive,
                 </span>`:B`<b>uczy się…</b>
                 <span class="muted">${e.capacity_sessions}/${e.min_capacity_sessions} sesji — EV nie planuje bez pojemności</span>`}
         </div>
+        ${e.kwh_per_km!=null||e.drain_days>0?B`<div class="check">
+              Zużycie jazdy:
+              <b>${e.kwh_per_km!=null?`${e.kwh_per_km.toFixed(3)} kWh/km`:"\u2014"}</b>
+              ${e.drain_next24_kwh!=null?B`<span class="muted">prognoza 24 h: ${e.drain_next24_kwh.toFixed(1)} kWh (${e.drain_days} dni nauki)</span>`:U}
+            </div>`:U}
         <div class="check">
           Podłączony: <b>${this._evBool(e.connected,"tak","nie")}</b> ·
           Ładuje: <b>${this._evBool(e.charging,"tak","nie")}</b> ·

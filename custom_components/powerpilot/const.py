@@ -105,6 +105,7 @@ CONF_EV_CHARGER_CONNECTED_SENSOR: Final = "ev_charger_connected_sensor"  # plugg
 CONF_EV_CHARGING_SENSOR: Final = "ev_charging_sensor"  # actively drawing (bool) → plan-vs-reality reminders
 CONF_EV_ENERGY_ADDED_SENSOR: Final = "ev_energy_added_sensor"  # session kWh (total_increasing) → delivered so far
 CONF_EV_TARGET_SOC_SENSOR: Final = "ev_target_soc_sensor"  # car's configured target SoC % → default charge target
+CONF_EV_ODOMETER_SENSOR: Final = "ev_odometer_sensor"  # total km (increasing) → learn kWh/km + drain profile
 # Grid-side EV charging energy meter — when the charger draws through the house
 # meter, its historical charging is in the learned consumption profile. PowerPilot
 # plans EV charging explicitly, so this meter is *subtracted* from the demand
@@ -129,6 +130,14 @@ MIN_CAPACITY_SAMPLES: Final = 3  # sessions needed before a learned value is use
 MAX_CAPACITY_SAMPLES: Final = 20  # rolling window of session samples kept
 MIN_SESSION_KWH: Final = 1.0  # ignore tiny top-ups (noise)
 MIN_SESSION_SOC: Final = 15.0  # need a meaningful SoC swing for a clean estimate
+
+# --- EV driving consumption (learned) ---
+# kWh/km from odometer deltas + SoC drops × capacity; a 7×24 drain profile (kWh
+# out of the pack per hour) predicts routine driving so charging anticipates it.
+DRAIN_LEARN_DAYS: Final = 30
+MIN_TRIP_KM: Final = 2.0  # ignore sub-2 km noise when learning kWh/km
+EV_RESERVE_SOC: Final = 20.0  # keep this much SoC as a floor when sizing top-ups
+DRAIN_HORIZON_HOURS: Final = 24  # look-ahead window for predicted driving drain
 
 # --- Distribution tariffs ---
 # Stored in ``entry.options`` as a list of dicts (see ``models.Tariff.to_dict``).

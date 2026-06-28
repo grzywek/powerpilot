@@ -41,17 +41,23 @@ from ..const import (
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
+    CONF_EV_ODOMETER_SENSOR,
     CONF_EV_SOC_SENSOR,
     CONF_EV_TARGET_SOC_SENSOR,
     DEFAULTS,
     DOMAIN,
+    DRAIN_HORIZON_HOURS,
+    DRAIN_LEARN_DAYS,
+    EV_RESERVE_SOC,
     MAX_CAPACITY_SAMPLES,
     MIN_CAPACITY_SAMPLES,
     MIN_SESSION_KWH,
     MIN_SESSION_SOC,
+    MIN_TRIP_KM,
     STORAGE_VERSION_EV,
 )
 from ..models import Forecast
+from ..profiles import WeeklyAccumulator
 from .base import PowerPilotModule
 
 _LOGGER = logging.getLogger(__name__)
@@ -135,6 +141,39 @@ def _capacity_samples(
     return samples
 
 
+def _hourly_drain(
+    soc_history: list[tuple[datetime, float]], capacity: float
+) -> dict[datetime, float]:
+    """``{hour_start: kWh out of the pack}`` from SoC drops, by the start hour."""
+    out: dict[datetime, float] = {}
+    if capacity <= 0 or len(soc_history) < 2:
+        return out
+    prev_ts, prev = soc_history[0]
+    for ts, soc in soc_history[1:]:
+        if soc < prev:
+            hour = dt_util.as_local(prev_ts).replace(minute=0, second=0, microsecond=0)
+            out[hour] = out.get(hour, 0.0) + (prev - soc) / 100.0 * capacity
+        prev_ts, prev = ts, soc
+    return out
+
+
+def _kwh_per_km(
+    soc_history: list[tuple[datetime, float]],
+    odometer_history: list[tuple[datetime, float]],
+    capacity: float,
+) -> float | None:
+    """Average consumption: total SoC-drop energy ÷ distance driven."""
+    if capacity <= 0 or len(soc_history) < 2 or len(odometer_history) < 2:
+        return None
+    km = odometer_history[-1][1] - odometer_history[0][1]
+    if km < MIN_TRIP_KM:
+        return None
+    energy_out = sum(_hourly_drain(soc_history, capacity).values())
+    if energy_out <= 0:
+        return None
+    return energy_out / km
+
+
 @dataclass
 class EVChargeTarget:
     """A deadline by which the EV must reach ``target_soc`` (%)."""
@@ -197,6 +236,11 @@ class EVModule(PowerPilotModule):
         self._capacity_source: str | None = None  # "learned" | "seed"
         self._last_capacity_learn: date | None = None
         self._store: Store | None = None
+        # Learned driving consumption — kWh/km + a 7×24 drain profile (kWh out
+        # of the pack per hour) that anticipates routine driving.
+        self._kwh_per_km: float | None = None
+        self._drain_profile = WeeklyAccumulator()
+        self._last_drain_learn: date | None = None
 
     @property
     def enabled(self) -> bool:
@@ -216,6 +260,10 @@ class EVModule(PowerPilotModule):
             self._capacity_source = stored.get("capacity_source")
             last = stored.get("last_capacity_learn")
             self._last_capacity_learn = date.fromisoformat(last) if last else None
+            self._kwh_per_km = stored.get("kwh_per_km")
+            self._drain_profile = WeeklyAccumulator.from_dict(stored.get("drain_profile"))
+            drain_last = stored.get("last_drain_learn")
+            self._last_drain_learn = date.fromisoformat(drain_last) if drain_last else None
         # One-time seed from the old manual capacity so upgrades aren't blank
         # while the first sessions are still being observed.
         if self._capacity is None:
@@ -224,7 +272,7 @@ class EVModule(PowerPilotModule):
                 self._capacity = float(legacy)
                 self._capacity_source = "seed"
         if self.enabled:
-            await self._maybe_learn_capacity()
+            await self._maybe_learn()
 
     async def async_update(self) -> None:
         if not self.enabled:
@@ -251,12 +299,14 @@ class EVModule(PowerPilotModule):
         self._available = self._compute_available()
 
         await self._async_load_calendar()
-        await self._maybe_learn_capacity()
+        await self._maybe_learn()
 
         self.log_info(
             f"EV: SoC={self._soc if self._soc is not None else '–'}%, "
             f"pojemność={self._capacity if self._capacity is not None else '–'} kWh "
             f"({self._capacity_source or 'brak'}, {len(self._capacity_samples)} sesji), "
+            f"zużycie={self._kwh_per_km if self._kwh_per_km is not None else '–'} kWh/km "
+            f"({self._drain_profile.observed_days} dni), "
             f"cel={self._target_soc if self._target_soc is not None else '–'}%, "
             f"podłączony={self._connected}, ładuje={self._charging}, "
             f"dostępny={self._available}, deadline'y={len(self._targets)}, "
@@ -274,39 +324,78 @@ class EVModule(PowerPilotModule):
         )
 
     # ------------------------------------------------------------------
-    # Battery capacity learning
+    # Battery capacity + driving-consumption learning
     # ------------------------------------------------------------------
     @property
     def capacity_kwh(self) -> float | None:
         """Best capacity estimate (learned median, or legacy seed, or None)."""
         return self._capacity
 
-    async def _maybe_learn_capacity(self) -> None:
-        """Re-derive capacity from charging-session history (once per day).
+    def predicted_drain_kwh(self, hours: int = DRAIN_HORIZON_HOURS) -> float | None:
+        """Expected driving drain (kWh) over the next ``hours`` from the profile."""
+        if self._drain_profile.observed_days == 0:
+            return None
+        now = dt_util.now()
+        total = 0.0
+        for i in range(hours):
+            moment = now + timedelta(hours=i)
+            total += self._drain_profile.value(moment.weekday(), moment.hour) or 0.0
+        return total
 
-        Keeps refining until a learned value exists, then settles to daily.
-        """
+    async def _maybe_learn(self) -> None:
+        """Re-derive capacity + driving consumption from history (once per day)."""
         today = dt_util.now().date()
-        if self._capacity_source == "learned" and self._last_capacity_learn == today:
+        capacity_done = (
+            self._capacity_source == "learned" and self._last_capacity_learn == today
+        )
+        drain_done = self._last_drain_learn == today
+        if capacity_done and drain_done:
             return
         soc_eid = self.config.get(CONF_EV_SOC_SENSOR)
-        energy_eid = self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
-        if not soc_eid or not energy_eid:
+        if not soc_eid:
             return
         now = dt_util.now()
-        window_start = now - timedelta(days=CAPACITY_LEARN_DAYS)
+        window_start = now - timedelta(days=max(CAPACITY_LEARN_DAYS, DRAIN_LEARN_DAYS))
         soc_hist = await self._numeric_history(soc_eid, window_start, now)
-        energy_hist = await self._numeric_history(energy_eid, window_start, now)
-        self._last_capacity_learn = today
-        samples = _capacity_samples(soc_hist, energy_hist)
-        if not samples:
-            await self._async_save_capacity()
-            return
-        self._capacity_samples = samples[-MAX_CAPACITY_SAMPLES:]
-        if len(self._capacity_samples) >= MIN_CAPACITY_SAMPLES:
-            self._capacity = round(statistics.median(self._capacity_samples), 1)
-            self._capacity_source = "learned"
-        await self._async_save_capacity()
+
+        # Capacity from charging sessions (needs the energy-added counter).
+        energy_eid = self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
+        if energy_eid and not capacity_done:
+            energy_hist = await self._numeric_history(energy_eid, window_start, now)
+            self._last_capacity_learn = today
+            samples = _capacity_samples(soc_hist, energy_hist)
+            if samples:
+                self._capacity_samples = samples[-MAX_CAPACITY_SAMPLES:]
+                if len(self._capacity_samples) >= MIN_CAPACITY_SAMPLES:
+                    self._capacity = round(statistics.median(self._capacity_samples), 1)
+                    self._capacity_source = "learned"
+
+        # Driving consumption (needs the odometer and a known capacity).
+        odo_eid = self.config.get(CONF_EV_ODOMETER_SENSOR)
+        if odo_eid and self._capacity and not drain_done:
+            odo_hist = await self._numeric_history(odo_eid, window_start, now)
+            kpk = _kwh_per_km(soc_hist, odo_hist, self._capacity)
+            if kpk:
+                self._kwh_per_km = round(kpk, 4)
+            self._fold_drain_days(soc_hist, self._capacity, today)
+            self._last_drain_learn = today
+
+        await self._async_save()
+
+    def _fold_drain_days(
+        self, soc_hist: list[tuple[datetime, float]], capacity: float, today: date
+    ) -> None:
+        """Fold each settled day's hourly drain into the 7×24 profile (once)."""
+        drops = _hourly_drain(soc_hist, capacity)
+        covered = {dt_util.as_local(ts).date() for ts, _ in soc_hist}
+        for day in covered:
+            if day >= today or self._drain_profile.is_date_observed(day):
+                continue
+            day_start = dt_util.start_of_local_day(day)
+            for offset in range(24):
+                hour = day_start + timedelta(hours=offset)
+                self._drain_profile.observe(hour, drops.get(hour, 0.0))
+            self._drain_profile.mark_date_observed(day)
 
     async def _numeric_history(
         self, entity_id: str, start: datetime, end: datetime
@@ -334,7 +423,7 @@ class EVModule(PowerPilotModule):
         series.sort(key=lambda item: item[0])
         return series
 
-    async def _async_save_capacity(self) -> None:
+    async def _async_save(self) -> None:
         if self._store is None:
             return
         await self._store.async_save(
@@ -344,6 +433,11 @@ class EVModule(PowerPilotModule):
                 "capacity_source": self._capacity_source,
                 "last_capacity_learn": self._last_capacity_learn.isoformat()
                 if self._last_capacity_learn
+                else None,
+                "kwh_per_km": self._kwh_per_km,
+                "drain_profile": self._drain_profile.to_dict(),
+                "last_drain_learn": self._last_drain_learn.isoformat()
+                if self._last_drain_learn
                 else None,
             }
         )
@@ -528,7 +622,7 @@ class EVModule(PowerPilotModule):
             else set()
         )
 
-        # Calendar plans take over when present; otherwise top up to the target.
+        # Calendar plans take over when present; otherwise size routine charging.
         if self._targets or self._forced_hours:
             required_kwh = 0.0
         else:
@@ -536,7 +630,20 @@ class EVModule(PowerPilotModule):
                 self._target_soc if self._target_soc is not None else DEFAULT_TARGET_SOC
             )
             current_soc = self._soc if self._soc is not None else target_soc
-            required_kwh = max(0.0, (target_soc - current_soc) / 100.0 * battery_kwh)
+            current_energy = current_soc / 100.0 * battery_kwh
+            predicted = self.predicted_drain_kwh()
+            if predicted is not None and battery_kwh > 0:
+                # Charge to cover the next look-ahead of predicted driving plus a
+                # SoC reserve floor — never above the car's own target SoC. This
+                # is the learned consumption profile driving routine charging.
+                target_energy = min(
+                    predicted + EV_RESERVE_SOC / 100.0 * battery_kwh,
+                    target_soc / 100.0 * battery_kwh,
+                )
+                required_kwh = max(0.0, target_energy - current_energy)
+            else:
+                # No drain profile yet → top up to the target SoC as before.
+                required_kwh = max(0.0, target_soc / 100.0 * battery_kwh - current_energy)
 
         self._request = EVRequest(
             enabled=True,
@@ -593,6 +700,9 @@ class EVModule(PowerPilotModule):
             "capacity_sessions": len(self._capacity_samples),
             "capacity_ready": self._capacity is not None,
             "min_capacity_sessions": MIN_CAPACITY_SAMPLES,
+            "kwh_per_km": self._kwh_per_km,
+            "drain_days": self._drain_profile.observed_days,
+            "drain_next24_kwh": self.predicted_drain_kwh(24),
             "targets": [
                 {
                     "deadline": target.deadline.isoformat(),

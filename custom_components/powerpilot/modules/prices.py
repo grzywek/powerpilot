@@ -191,6 +191,35 @@ class PriceArchive:
                 kept[key] = value
         self._entries = kept
 
+    def remove_forecasts_not_in(
+        self,
+        valid_hours: set[datetime],
+        source: str,
+        from_hour: datetime,
+    ) -> bool:
+        """Drop future source forecasts absent from the latest source fetch."""
+        valid_keys = {self._key(hour) for hour in valid_hours}
+        cutoff = dt_util.as_utc(from_hour).replace(minute=0, second=0, microsecond=0)
+        kept: dict[str, dict[str, Any]] = {}
+        changed = False
+        for key, value in self._entries.items():
+            try:
+                stamp = datetime.fromisoformat(key)
+            except (ValueError, TypeError):
+                kept[key] = value
+                continue
+            if (
+                stamp >= cutoff
+                and key not in valid_keys
+                and value.get("source") == source
+                and value.get("type") == PRICE_TYPE_FORECAST
+            ):
+                changed = True
+                continue
+            kept[key] = value
+        self._entries = kept
+        return changed
+
     def to_dict(self) -> dict[str, Any]:
         return {"entries": self._entries, "backfilled": self.backfilled}
 
@@ -397,6 +426,12 @@ class PriceModule(PowerPilotModule):
         )
         stamp = fetched_at.isoformat()
         dirty = False
+        if source_label == PRICE_SOURCE_PRADCAST:
+            dirty = self.archive.remove_forecasts_not_in(
+                valid_hours=set(self._data.buy),
+                source=source_label,
+                from_hour=fetched_at,
+            )
         for hour, energy in self._data.buy.items():
             is_confirmed = hour in self._data.confirmed_hours
             price_type = PRICE_TYPE_CERTAIN if is_confirmed else PRICE_TYPE_FORECAST
@@ -454,5 +489,3 @@ class PriceModule(PowerPilotModule):
                 slot.tags.append(f"price:{self._data.levels[hour]}")
             if hour in self._data.confidence:
                 slot.tags.append(f"confidence:{self._data.confidence[hour]}")
-
-

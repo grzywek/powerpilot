@@ -46,6 +46,19 @@ _START_KEYS = ("start", "hour", "from", "datetime", "time")
 _VALUE_KEYS = ("value", "price", "total", "cost")
 
 
+def _pradcast_horizon_offset(label: Any) -> int | None:
+    """Return a supported Pradcast D+n horizon offset."""
+    if not isinstance(label, str) or not label.startswith("D+"):
+        return None
+    try:
+        offset = int(label[2:])
+    except ValueError:
+        return None
+    if offset < 1 or offset > PRADCAST_HORIZON_DAYS:
+        return None
+    return offset
+
+
 @dataclass
 class PriceData:
     """Result of a price-source fetch.
@@ -156,9 +169,8 @@ class PradcastPriceSource(PriceSource):
             return
         for horizon_label, entries in horizons.items():
             # "D+1" -> today + 1 day, etc.
-            try:
-                offset = int(horizon_label.replace("D+", ""))
-            except (ValueError, AttributeError):
+            offset = _pradcast_horizon_offset(horizon_label)
+            if offset is None:
                 continue
             day = today + timedelta(days=offset)
             for entry in entries:
@@ -257,6 +269,8 @@ class PradcastPriceSource(PriceSource):
 
         out: dict[str, list[dict]] = {}
         for horizon, block in (payload.get("forecasts") or {}).items():
+            if _pradcast_horizon_offset(horizon) is None:
+                continue
             series = []
             for entry in block.get("prices", []) or []:
                 if entry.get("price_kwh") is None:

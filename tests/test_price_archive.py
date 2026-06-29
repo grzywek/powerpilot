@@ -8,6 +8,7 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.powerpilot.const import (
     ESTIMATE_WEEKLY_WEIGHTS,
+    PRICE_SOURCE_PRADCAST,
     PRICE_TYPE_CERTAIN,
     PRICE_TYPE_FORECAST,
 )
@@ -104,6 +105,32 @@ def test_prune_drops_entries_older_than_retention() -> None:
     archive.prune()
     assert archive.get(h - timedelta(days=400)) is None
     assert archive.get(h) is not None
+
+
+def test_remove_future_forecasts_not_in_latest_source_fetch() -> None:
+    archive = PriceArchive()
+    h = _hour()
+    valid_forecast = h + timedelta(days=2)
+    stale_forecast = h + timedelta(days=4)
+    past_forecast = h - timedelta(days=1)
+    future_certain = h + timedelta(days=5)
+
+    archive.record(valid_forecast, 1.0, PRICE_TYPE_FORECAST, PRICE_SOURCE_PRADCAST, "t")
+    archive.record(stale_forecast, 2.0, PRICE_TYPE_FORECAST, PRICE_SOURCE_PRADCAST, "t")
+    archive.record(past_forecast, 3.0, PRICE_TYPE_FORECAST, PRICE_SOURCE_PRADCAST, "t")
+    archive.record(future_certain, 4.0, PRICE_TYPE_CERTAIN, PRICE_SOURCE_PRADCAST, "t")
+
+    changed = archive.remove_forecasts_not_in(
+        valid_hours={valid_forecast},
+        source=PRICE_SOURCE_PRADCAST,
+        from_hour=h,
+    )
+
+    assert changed is True
+    assert archive.get(valid_forecast) is not None
+    assert archive.get(stale_forecast) is None
+    assert archive.get(past_forecast) is not None
+    assert archive.get(future_certain) is not None
 
 
 def test_serialisation_roundtrip() -> None:

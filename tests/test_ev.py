@@ -18,6 +18,7 @@ from custom_components.powerpilot.const import (
     CONF_EV_ENABLED,
     CONF_EV_TARGET_SOC_SENSOR,
 )
+from custom_components.powerpilot.battery import BatteryModel
 from custom_components.powerpilot.models import Forecast, HourSlot
 from custom_components.powerpilot.profiles import WeeklyAccumulator
 from custom_components.powerpilot.modules.ev import (
@@ -64,6 +65,34 @@ def _hours(alloc: dict[datetime, float]) -> dict[int, float]:
         int((start - BASE).total_seconds() // 3600): round(kwh, 3)
         for start, kwh in alloc.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# Optimizer: charge curve
+# ---------------------------------------------------------------------------
+
+
+def test_optimizer_uses_battery_capacity_for_charge_curve_cuts() -> None:
+    fc = _forecast([0.2, 0.2, 0.8, 0.8])
+    optimizer = Optimizer(
+        OptimizerConfig(
+            inverter_max_charge_kw=3.0,
+            inverter_max_discharge_kw=3.0,
+            grid_disconnect_soc=15.0,
+            charge_curve=ChargeCurve(
+                default_kw=3.0,
+                segments=[
+                    {"soc_from": 0, "soc_to": 51, "max_kw": 3.0},
+                    {"soc_from": 51, "soc_to": 101, "max_kw": 1.5},
+                ],
+            ),
+        )
+    )
+    battery = BatteryModel(capacity_kwh=10.0, soc=40.0)
+
+    plan = optimizer.optimize(fc, battery)
+
+    assert len(plan.decisions) == len(fc.slots)
 
 
 # ---------------------------------------------------------------------------

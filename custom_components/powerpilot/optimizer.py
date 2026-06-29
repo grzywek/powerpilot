@@ -248,9 +248,9 @@ class Optimizer:
         ceff = max(battery.charge_efficiency, _EPS)
         deff = max(battery.discharge_efficiency, _EPS)
         wear = battery.wear_cost
-        cap = battery.capacity_kwh
-        e_min = cap * battery.min_soc / 100.0
-        e_max = cap * battery.max_soc / 100.0
+        capacity_kwh = battery.capacity_kwh
+        e_min = capacity_kwh * battery.min_soc / 100.0
+        e_max = capacity_kwh * battery.max_soc / 100.0
         e0 = min(max(battery.energy_kwh, e_min), e_max)
 
         p_term = (
@@ -278,9 +278,9 @@ class Optimizer:
         # at all (z=0). This makes every hour exactly one inverter mode and
         # forbids rationing a *partial* discharge across hours — a deliberate
         # simplification chosen over a marginally cheaper fractional plan.
-        cap = [min(demand[t], cfg.inverter_max_discharge_kw) for t in range(n)]
+        discharge_cap = [min(demand[t], cfg.inverter_max_discharge_kw) for t in range(n)]
         for t in range(n):
-            if cap[t] > _EPS:
+            if discharge_cap[t] > _EPS:
                 h.addVar(0.0, 1.0)
                 h.changeColIntegrality(n + t, highspy.HighsVarType.kInteger)
             else:
@@ -289,8 +289,8 @@ class Optimizer:
         cost = np.empty(2 * n, dtype=np.float64)
         for t in range(n):
             cost[t] = total_price[t] + wear * ceff - tv * ceff
-            # d-column is a 0/1 switch worth cap[t] kWh delivered to the house.
-            cost[n + t] = (-total_price[t] + wear + tv / deff) * cap[t]
+            # d-column is a 0/1 switch worth discharge_cap[t] kWh delivered.
+            cost[n + t] = (-total_price[t] + wear + tv / deff) * discharge_cap[t]
         h.changeColsCost(2 * n, np.arange(2 * n, dtype=np.int32), cost)
 
         # SoC band on the running reservoir level after each hour.
@@ -301,7 +301,7 @@ class Optimizer:
                 idx.append(k)
                 val.append(ceff)
                 idx.append(n + k)
-                val.append(-cap[k] / deff)
+                val.append(-discharge_cap[k] / deff)
             h.addRow(
                 e_min - e0,
                 e_max - e0,
@@ -319,11 +319,11 @@ class Optimizer:
                     rhs,
                     2,
                     np.array([t, n + t], dtype=np.int32),
-                    np.array([1.0, -cap[t]], dtype=np.float64),
+                    np.array([1.0, -discharge_cap[t]], dtype=np.float64),
                 )
 
         # SoC-dependent charge curve (only when actually configured).
-        for slope, intercept in _charge_curve_cuts(cfg.charge_curve, cap):
+        for slope, intercept in _charge_curve_cuts(cfg.charge_curve, capacity_kwh):
             if abs(slope) <= _EPS:
                 continue
             for t in range(n):
@@ -333,7 +333,7 @@ class Optimizer:
                     idx.append(k)
                     val.append(-slope * ceff)
                     idx.append(n + k)
-                    val.append(slope * cap[k] / deff)
+                    val.append(slope * discharge_cap[k] / deff)
                 h.addRow(
                     -inf,
                     intercept + slope * e0,
@@ -348,8 +348,8 @@ class Optimizer:
             raise RuntimeError(f"HiGHS did not find an optimal plan: {status}")
         sol = list(h.getSolution().col_value)
         charge = sol[:n]
-        # d-columns are 0/1 switches; expand back to delivered energy (cap kWh).
-        discharge = [cap[t] * sol[n + t] for t in range(n)]
+        # d-columns are 0/1 switches; expand back to delivered energy.
+        discharge = [discharge_cap[t] * sol[n + t] for t in range(n)]
         return charge, discharge
 
     # ------------------------------------------------------------------

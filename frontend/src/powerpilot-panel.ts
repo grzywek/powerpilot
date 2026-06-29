@@ -1518,22 +1518,21 @@ export class PowerPilotPanel extends LitElement {
       },
       yaxis: [
         {
-          seriesName: "Cena pełna",
+          // Keep both PLN/kWh lines on one scale so equal values align visually.
+          seriesName: ["Cena pełna", "Cena w baterii"],
           title: { text: "PLN/kWh" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
           forceNiceScale: true,
           decimalsInFloat: 2,
         },
-        { seriesName: "Cena w baterii", show: false, forceNiceScale: true },
         {
-          seriesName: "Koszt energii - sieć",
+          seriesName: ["Koszt energii - sieć", "Koszt energii - bateria"],
           opposite: true,
           title: { text: "PLN/h" },
           labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
           forceNiceScale: true,
           min: 0,
         },
-        { seriesName: "Koszt energii - bateria", opposite: true, show: false, forceNiceScale: true, min: 0 },
       ],
       tooltip: {
         shared: true,

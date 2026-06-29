@@ -1180,7 +1180,7 @@ rect.legend-mouseover-inactive,
                 <tr><td style="padding:1px 0">Koszt sta\u0142y</td><td style="text-align:right;font-variant-numeric:tabular-nums">${y(w.fixed_cost)} PLN/h</td></tr>
               </table>
             </div>
-          `}},legend:{position:"bottom",horizontalAlign:"center",itemMargin:{horizontal:14,vertical:2},fontSize:"12px"},annotations:{xaxis:[...this._dayBoundaryAnnotations(e),{x:f,borderColor:u,strokeDashArray:4,label:{borderColor:u,style:{background:x,color:u},text:"teraz"}}]}}}_linePath(e,s,i,a,o){let r=e.length;if(r<2)return"";let n=i-s||1,c=6,l=o-c*2,h="",d=!1;return e.forEach((g,f)=>{if(isNaN(g)){d=!1;return}let p=f/(r-1)*a,u=c+l-(g-s)/n*l;h+=`${d?"L":"M"}${p.toFixed(1)},${u.toFixed(1)} `,d=!0}),h.trim()}_renderPrices(){let e=this._pricesSelectedDay(),s=this._pricesData,i=f=>new Date(f).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}),a=f=>{if(!f)return"\u2014";let p=new Date(f);return isNaN(p.getTime())?"\u2014":p.toLocaleString("pl-PL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})},o=f=>f==null?"\u2014":f.toFixed(2),r=f=>new Date(f+"T12:00:00").toLocaleDateString("pl-PL",{weekday:"long",day:"2-digit",month:"2-digit",year:"numeric"}),n=this._localISODate(new Date),c=(()=>{let f=new Date;return f.setDate(f.getDate()+1),this._localISODate(f)})(),l=B`
+          `}},legend:{position:"bottom",horizontalAlign:"center",itemMargin:{horizontal:14,vertical:2},fontSize:"12px"},annotations:{xaxis:[...this._dayBoundaryAnnotations(e),{x:f,borderColor:u,strokeDashArray:4,label:{borderColor:u,style:{background:x,color:u},text:"teraz"}}]}}}_linePath(e,s,i,a,o){let r=e.length;if(r<2)return"";let n=i-s||1,c=6,l=o-c*2,h="",d=!1;return e.forEach((g,f)=>{if(isNaN(g)){d=!1;return}let p=f/(r-1)*a,u=c+l-(g-s)/n*l;h+=`${d?"L":"M"}${p.toFixed(1)},${u.toFixed(1)} `,d=!0}),h.trim()}_renderPrices(){let e=this._pricesSelectedDay(),s=this._pricesData,i=u=>new Date(u).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"}),a=u=>{if(!u)return"\u2014";let x=new Date(u);return isNaN(x.getTime())?"\u2014":x.toLocaleString("pl-PL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})},o=u=>u==null?"\u2014":u.toFixed(2),r=u=>new Date(u+"T12:00:00").toLocaleDateString("pl-PL",{weekday:"long",day:"2-digit",month:"2-digit",year:"numeric"}),n=this._localISODate(new Date),c=(()=>{let u=new Date;return u.setDate(u.getDate()+1),this._localISODate(u)})(),l=B`
       <div class="prices-day-nav">
         <button class="nav-btn" @click=${()=>this._shiftPricesDay(-1)} title="Poprzedni dzień">«</button>
         <input
@@ -1195,7 +1195,7 @@ rect.legend-mouseover-inactive,
         <div class="nav-spacer"></div>
         <span class="muted">${r(e)}</span>
       </div>
-    `,h=s?.hours??[],d=h.some(f=>f.energy_price_kwh!=null),g=s?d?B`
+    `,h=s?.hours??[],d=h.some(u=>u.energy_price_kwh!=null),g=h.map(u=>u.total_price_kwh).filter(u=>u!=null),f=g.length>0?{min:Math.min(...g),max:Math.max(...g)}:null,p=s?d?B`
           <div class="prices-table-wrap">
             <table class="prices-table">
               <thead>
@@ -1212,33 +1212,33 @@ rect.legend-mouseover-inactive,
                 </tr>
               </thead>
               <tbody>
-                ${h.map(f=>this._renderPriceRow(f,i,a,o))}
+                ${h.map(u=>this._renderPriceRow(u,i,a,o,f))}
               </tbody>
             </table>
           </div>
           <div class="prices-legend">
-            ${["certain","forecast","estimated"].map(f=>B`<span class="badge" style=${"background:"+di[f].color}>${di[f].label}</span>`)}
+            ${["certain","forecast","estimated"].map(u=>B`<span class="badge" style=${"background:"+di[u].color}>${di[u].label}</span>`)}
             <span class="muted">TGE / marża / dystrybucja są netto; „podatki” = akcyza + VAT, „cena pełna” = brutto. Opłata stała (abonamentowa) rozliczana osobno, poza ceną/kWh. „szacowana” = średnia ważona z 3 ostatnich tygodni — najedź na typ, by zobaczyć obliczenie.</span>
           </div>
         `:B`<div class="empty">Brak cen dla wybranego dnia — archiwum jeszcze nie sięga tak daleko.</div>`:B`<div class="empty">${this._pricesLoading?"\u0141adowanie\u2026":"Brak danych."}</div>`;return B`
       <div class="card">
         <div class="card-title">Archiwum cen — podgląd danych optymalizatora</div>
         ${l}
-        ${g}
+        ${p}
       </div>
-    `}_renderPriceRow(e,s,i,a){let o=e.type?di[e.type]:null,r=e.source?Do[e.source]??e.source:"\u2014",n=o?B`<span class="badge" style=${"background:"+o.color} title=${this._priceTooltip(e)}>${o.label}</span>`:B`<span class="muted">—</span>`,c=d=>d==null?"\u2014":d.toFixed(3),l=e.tge_kwh!=null,h=l&&e.excise_kwh!=null?`akcyza ${e.excise_kwh.toFixed(3)} + VAT ${e.vat_rate!=null?Math.round(e.vat_rate*100):""}%`:"";return B`
+    `}_renderPriceRow(e,s,i,a,o){let r=e.type?di[e.type]:null,n=e.source?Do[e.source]??e.source:"\u2014",c=r?B`<span class="badge" style=${"background:"+r.color} title=${this._priceTooltip(e)}>${r.label}</span>`:B`<span class="muted">—</span>`,l=f=>f==null?"\u2014":f.toFixed(3),h=e.tge_kwh!=null,d=h&&e.excise_kwh!=null?`akcyza ${e.excise_kwh.toFixed(3)} + VAT ${e.vat_rate!=null?Math.round(e.vat_rate*100):""}%`:"",g=o&&e.total_price_kwh!=null?this._priceHeatStyle(e.total_price_kwh,o.min,o.max):"";return B`
       <tr>
         <td>${s(e.start)}</td>
-        <td>${n}</td>
-        <td class="muted">${r}</td>
+        <td>${c}</td>
+        <td class="muted">${n}</td>
         <td class="muted">${i(e.fetched_at)}</td>
-        <td>${l?c(e.tge_kwh):B`<span class="muted">—</span>`}</td>
-        <td>${l?c(e.markup_kwh):B`<span class="muted">—</span>`}</td>
-        <td>${c(l?e.distribution_net_kwh:e.distribution_price_kwh)}</td>
-        <td class="muted" title=${h}>${l?a(e.taxes_kwh??null):B`<span class="muted">—</span>`}</td>
-        <td class="bold">${a(e.total_price_kwh)}</td>
+        <td>${h?l(e.tge_kwh):B`<span class="muted">—</span>`}</td>
+        <td>${h?l(e.markup_kwh):B`<span class="muted">—</span>`}</td>
+        <td>${l(h?e.distribution_net_kwh:e.distribution_price_kwh)}</td>
+        <td class="muted" title=${d}>${h?a(e.taxes_kwh??null):B`<span class="muted">—</span>`}</td>
+        <td class="bold price-full-cell" style=${g}>${a(e.total_price_kwh)}</td>
       </tr>
-    `}_priceTooltip(e){return e.type==="certain"?"Cena pewna (wi\u0105\u017C\u0105ca RDN) \u2014 nie zmienia si\u0119 ju\u017C.":e.type==="forecast"?`Prognoza ze \u017Ar\xF3d\u0142a \u2014 od\u015Bwie\u017Cana co kilka godzin.${e.p10!=null&&e.p90!=null?` Przedzia\u0142 P10\u2013P90: ${e.p10.toFixed(2)}\u2013${e.p90.toFixed(2)} PLN/kWh.`:""}`:e.type==="estimated"&&e.estimate_breakdown?["Cena szacowana = \u015Brednia wa\u017Cona tej samej godziny w tym samym dniu tygodnia z ostatnich 3 tygodni:",...e.estimate_breakdown.map(i=>{let a=i.value==null?"brak":`${i.value.toFixed(2)} PLN/kWh`;return`\u2022 ${i.date} (\u2212${i.weeks_ago} tyg., waga ${i.weight}): ${a}`}),"Wagi s\u0105 normalizowane do dost\u0119pnych pr\xF3bek."].join(`
+    `}_priceHeatStyle(e,s,i){return`background:${this._heatColor(e,s,i)};color:#fff`}_priceTooltip(e){return e.type==="certain"?"Cena pewna (wi\u0105\u017C\u0105ca RDN) \u2014 nie zmienia si\u0119 ju\u017C.":e.type==="forecast"?`Prognoza ze \u017Ar\xF3d\u0142a \u2014 od\u015Bwie\u017Cana co kilka godzin.${e.p10!=null&&e.p90!=null?` Przedzia\u0142 P10\u2013P90: ${e.p10.toFixed(2)}\u2013${e.p90.toFixed(2)} PLN/kWh.`:""}`:e.type==="estimated"&&e.estimate_breakdown?["Cena szacowana = \u015Brednia wa\u017Cona tej samej godziny w tym samym dniu tygodnia z ostatnich 3 tygodni:",...e.estimate_breakdown.map(i=>{let a=i.value==null?"brak":`${i.value.toFixed(2)} PLN/kWh`;return`\u2022 ${i.date} (\u2212${i.weeks_ago} tyg., waga ${i.weight}): ${a}`}),"Wagi s\u0105 normalizowane do dost\u0119pnych pr\xF3bek."].join(`
 `):""}_fmtRun(e){if(!e)return"\u2014";let s=new Date(e);return isNaN(s.getTime())?"\u2014":s.toLocaleString("pl-PL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}_renderSimulations(){let e=this._snapshotRuns;if(!e.length)return B`<div class="card empty">
         ${this._simLoading?"\u0141adowanie\u2026":"Brak zapisanych wersji. Optymalizator zapisuje jeden snapshot na godzin\u0119 \u2014 wr\xF3\u0107 tu za jaki\u015B czas."}
       </div>`;let s=o=>r=>B`
@@ -2136,6 +2136,10 @@ rect.legend-mouseover-inactive,
     }
     .prices-table .bold {
       font-weight: 600;
+    }
+    .prices-table .price-full-cell {
+      color: var(--primary-text-color);
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.24);
     }
     .prices-table th:nth-child(2),
     .prices-table td:nth-child(2),

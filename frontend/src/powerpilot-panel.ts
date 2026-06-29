@@ -1686,6 +1686,13 @@ export class PowerPilotPanel extends LitElement {
 
     const rows = data?.hours ?? [];
     const hasAny = rows.some((h) => h.energy_price_kwh != null);
+    const fullPrices = rows
+      .map((h) => h.total_price_kwh)
+      .filter((v): v is number => v !== null && v !== undefined);
+    const fullPriceHeat =
+      fullPrices.length > 0
+        ? { min: Math.min(...fullPrices), max: Math.max(...fullPrices) }
+        : null;
 
     const body = !data
       ? html`<div class="empty">${this._pricesLoading ? "Ładowanie…" : "Brak danych."}</div>`
@@ -1708,7 +1715,9 @@ export class PowerPilotPanel extends LitElement {
                 </tr>
               </thead>
               <tbody>
-                ${rows.map((h) => this._renderPriceRow(h, fmtHour, fmtStamp, fmtPrice))}
+                ${rows.map((h) =>
+                  this._renderPriceRow(h, fmtHour, fmtStamp, fmtPrice, fullPriceHeat)
+                )}
               </tbody>
             </table>
           </div>
@@ -1733,7 +1742,8 @@ export class PowerPilotPanel extends LitElement {
     h: PriceArchiveHour,
     fmtHour: (iso: string) => string,
     fmtStamp: (iso: string | null) => string,
-    fmtPrice: (v: number | null) => string
+    fmtPrice: (v: number | null) => string,
+    fullPriceHeat: { min: number; max: number } | null
   ): TemplateResult {
     const meta = h.type ? PRICE_TYPE_META[h.type] : null;
     const sourceLabel = h.source ? PRICE_SOURCE_LABEL[h.source] ?? h.source : "—";
@@ -1748,6 +1758,10 @@ export class PowerPilotPanel extends LitElement {
       hasBreakdown && h.excise_kwh != null
         ? `akcyza ${h.excise_kwh.toFixed(3)} + VAT ${h.vat_rate != null ? Math.round(h.vat_rate * 100) : ""}%`
         : "";
+    const fullPriceStyle =
+      fullPriceHeat && h.total_price_kwh != null
+        ? this._priceHeatStyle(h.total_price_kwh, fullPriceHeat.min, fullPriceHeat.max)
+        : "";
     return html`
       <tr>
         <td>${fmtHour(h.start)}</td>
@@ -1758,9 +1772,13 @@ export class PowerPilotPanel extends LitElement {
         <td>${hasBreakdown ? fmtNet(h.markup_kwh) : html`<span class="muted">—</span>`}</td>
         <td>${fmtNet(hasBreakdown ? h.distribution_net_kwh : h.distribution_price_kwh)}</td>
         <td class="muted" title=${taxesTitle}>${hasBreakdown ? fmtPrice(h.taxes_kwh ?? null) : html`<span class="muted">—</span>`}</td>
-        <td class="bold">${fmtPrice(h.total_price_kwh)}</td>
+        <td class="bold price-full-cell" style=${fullPriceStyle}>${fmtPrice(h.total_price_kwh)}</td>
       </tr>
     `;
+  }
+
+  private _priceHeatStyle(value: number, min: number, max: number): string {
+    return `background:${this._heatColor(value, min, max)};color:#fff`;
   }
 
   /** Hover text explaining how a row's price was derived. */
@@ -3179,6 +3197,10 @@ export class PowerPilotPanel extends LitElement {
     }
     .prices-table .bold {
       font-weight: 600;
+    }
+    .prices-table .price-full-cell {
+      color: var(--primary-text-color);
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.24);
     }
     .prices-table th:nth-child(2),
     .prices-table td:nth-child(2),

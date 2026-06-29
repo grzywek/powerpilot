@@ -41,7 +41,7 @@ class HourSlot:
 
     # Energy (kWh) expected during this hour.
     base_consumption_kwh: float = 0.0  # learned household profile
-    extra_load_kwh: float = 0.0  # EV + scheduled appliances + climate
+    extra_load_kwh: float = 0.0  # sub-metered devices + EV + scheduled loads + climate
 
     temperature: float | None = None  # °C, for climate modelling
 

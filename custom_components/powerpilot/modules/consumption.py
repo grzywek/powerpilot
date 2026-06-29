@@ -420,5 +420,4 @@ class ConsumptionModule(PowerPilotModule):
             slot.base_consumption_kwh += self.base_value(weekday, hour)
             if learned:
                 # Add back separately-metered devices with no smarter model yet.
-                slot.base_consumption_kwh += self.device_value(weekday, hour)
-
+                slot.extra_load_kwh += self.device_value(weekday, hour)

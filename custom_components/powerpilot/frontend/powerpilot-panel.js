@@ -1100,7 +1100,7 @@ rect.legend-mouseover-inactive,
       @click=${()=>this._selectTab(e)}
     >
       ${s}
-    </button>`}_renderOverview(){let e=this._plan;if(!e||!e.hours?.length)return B`<div class="card empty">Brak danych planu. Poczekaj na pierwsze przeliczenie.</div>`;let s=e.hours[0];return B`
+    </button>`}_currentPlanHour(e){let s=Date.now();return e.hours.find(i=>{let a=new Date(i.start).getTime();return a<=s&&s<a+36e5})??null}_renderOverview(){let e=this._plan;if(!e||!e.hours?.length)return B`<div class="card empty">Brak danych planu. Poczekaj na pierwsze przeliczenie.</div>`;let s=this._currentPlanHour(e);return s?B`
       <div class="card">
         <div class="stat-row">
           ${this._stat("Tryb falownika",gi[s.inverter_mode]?.label??s.inverter_mode)}
@@ -1121,7 +1121,7 @@ rect.legend-mouseover-inactive,
         <div class="card-title">Koszty: cena zakupu (PLN/kWh) + koszt godziny (PLN)</div>
         <div id="pp-chart-prices" class="apex-chart"></div>
       </div>
-    `}_renderNavBar(){let{start:e,end:s}=this._computeWindow(),i=this._anchor===null,a=new Date(s.getTime()-24*3600*1e3),o=n=>n.toLocaleDateString("pl-PL",{day:"2-digit",month:"2-digit",year:"numeric"}),r=(()=>{let n=this._midnight(this._anchor??new Date),c=n.getFullYear(),l=String(n.getMonth()+1).padStart(2,"0"),h=String(n.getDate()).padStart(2,"0");return`${c}-${l}-${h}`})();return B`
+    `:B`<div class="card empty">Brak danych dla bieżącej godziny.</div>`}_renderNavBar(){let{start:e,end:s}=this._computeWindow(),i=this._anchor===null,a=new Date(s.getTime()-24*3600*1e3),o=n=>n.toLocaleDateString("pl-PL",{day:"2-digit",month:"2-digit",year:"numeric"}),r=(()=>{let n=this._midnight(this._anchor??new Date),c=n.getFullYear(),l=String(n.getMonth()+1).padStart(2,"0"),h=String(n.getDate()).padStart(2,"0");return`${c}-${l}-${h}`})();return B`
       <div class="card nav-card">
         <div class="nav-row">
           <button class="nav-btn" @click=${()=>this._shiftDay(-1)} title="Poprzedni dzień">«</button>

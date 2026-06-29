@@ -66,6 +66,10 @@ class PowerPilotEntity(CoordinatorEntity[PowerPilotCoordinator]):
     def plan(self) -> Plan | None:
         return self.coordinator.data
 
+    @property
+    def current_decision(self):
+        return self.coordinator.current_decision()
+
 
 class InverterModeSensor(PowerPilotEntity, SensorEntity):
     _attr_translation_key = SENSOR_INVERTER_MODE
@@ -76,7 +80,8 @@ class InverterModeSensor(PowerPilotEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        return self.plan.current.inverter_mode if self.plan and self.plan.current else None
+        current = self.current_decision
+        return current.inverter_mode if current else None
 
 
 class ChargePowerSensor(PowerPilotEntity, SensorEntity):
@@ -98,8 +103,9 @@ class ChargePowerSensor(PowerPilotEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        if self.plan and self.plan.current:
-            return round(self.plan.current.charge_power_kw, 3)
+        current = self.current_decision
+        if current:
+            return round(current.charge_power_kw, 3)
         return None
 
 
@@ -114,8 +120,9 @@ class BatteryEnergyCostSensor(PowerPilotEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        if self.plan and self.plan.current:
-            return round(self.plan.current.battery_energy_cost, 4)
+        current = self.current_decision
+        if current:
+            return round(current.battery_energy_cost, 4)
         return None
 
 
@@ -172,19 +179,20 @@ class NextActionSensor(PowerPilotEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        if not self.plan or not self.plan.current:
+        current = self.current_decision
+        if not current:
             return None
-        d = self.plan.current
-        action = d.inverter_mode
-        if d.ev_charge:
+        action = current.inverter_mode
+        if current.ev_charge:
             action += " + EV"
         return action
 
     @property
     def extra_state_attributes(self) -> dict:
-        if not self.plan or not self.plan.current:
+        current = self.current_decision
+        if not current:
             return {}
-        return {"reminders": self.plan.current.reminders}
+        return {"reminders": current.reminders}
 
 
 class EVChargeStartSensor(PowerPilotEntity, SensorEntity):

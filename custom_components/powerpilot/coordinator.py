@@ -14,7 +14,8 @@ from collections import deque
 from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -35,7 +36,6 @@ from .const import (
     CONF_MIN_SOC,
     CONF_PHASES,
     CONF_SOC_SENSOR,
-    DEFAULT_UPDATE_INTERVAL_MINUTES,
     DEFAULTS,
     DOMAIN,
     InverterMode,
@@ -51,7 +51,7 @@ from .const import (
 )
 from . import pricing
 from .forecast import ForecastBuilder
-from .models import Plan, tariff_for_day
+from .models import Decision, Plan, tariff_for_day
 from .modules.snapshots import SnapshotStore
 from .modules import (
     CalendarModule,
@@ -82,8 +82,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(minutes=DEFAULT_UPDATE_INTERVAL_MINUTES),
+            update_interval=None,
         )
+        self._unsub_hour_boundary: CALLBACK_TYPE | None = None
 
         self.registry = ModuleRegistry()
         self.consumption = ConsumptionModule(hass, self)
@@ -114,6 +115,46 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.snapshots = SnapshotStore()
         self._snapshot_store: Store | None = None
         self._last_snapshot_hour: datetime | None = None
+
+    @callback
+    def async_start_hour_boundary_updates(self) -> None:
+        """Start exact clock-hour refreshes for hour-indexed control outputs."""
+        self._schedule_hour_boundary_update()
+
+    @callback
+    def async_stop_hour_boundary_updates(self) -> None:
+        """Cancel the pending clock-hour refresh, if any."""
+        if self._unsub_hour_boundary is not None:
+            self._unsub_hour_boundary()
+            self._unsub_hour_boundary = None
+
+    @callback
+    def _schedule_hour_boundary_update(self) -> None:
+        self.async_stop_hour_boundary_updates()
+        now = dt_util.now()
+        next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        self._unsub_hour_boundary = async_track_point_in_time(
+            self.hass, self._async_handle_hour_boundary, next_hour
+        )
+
+    async def _async_handle_hour_boundary(self, _: datetime) -> None:
+        self._unsub_hour_boundary = None
+        try:
+            if self.data is not None:
+                self.async_set_updated_data(self.data)
+            await self.async_refresh()
+        finally:
+            if not self.hass.is_stopping:
+                self._schedule_hour_boundary_update()
+
+    def current_decision(
+        self, plan: Plan | None = None, moment: datetime | None = None
+    ) -> Decision | None:
+        """Decision covering the current clock hour in the latest plan."""
+        active_plan = self.data if plan is None else plan
+        if active_plan is None:
+            return None
+        return active_plan.decision_at(moment or dt_util.now())
 
     async def async_setup_modules(self) -> None:
         await self.registry.async_setup_all()
@@ -240,8 +281,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         optimizer = self._build_optimizer()
         plan = optimizer.optimize(forecast, battery, ev_request, reminders)
 
-        if plan.current is not None:
-            self._battery_energy_cost = plan.current.battery_energy_cost
+        current = self.current_decision(plan)
+        if current is not None:
+            self._battery_energy_cost = current.battery_energy_cost
 
         await self._maybe_record_snapshot(forecast, plan)
         self._record_event(plan)
@@ -453,7 +495,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
     # Frontend support: event log + feature status
     # ------------------------------------------------------------------
     def _record_event(self, plan: Plan) -> None:
-        current = plan.current
+        current = self.current_decision(plan)
         errors = [
             f"{m.domain}: {m.last_error}" for m in self.registry.modules if m.last_error
         ]
@@ -1770,7 +1812,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     charge_start = decision.start
                 if decision.start < horizon_24h:
                     connect = True
-            current = plan.current
+            current = self.current_decision(plan)
             charging_now = bool(current and current.ev_charge)
         if charging_now:
             connect = True

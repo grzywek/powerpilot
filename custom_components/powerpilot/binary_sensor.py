@@ -42,8 +42,9 @@ class GridConnectedBinarySensor(PowerPilotEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        if self.plan and self.plan.current:
-            return self.plan.current.grid_connected
+        current = self.current_decision
+        if current:
+            return current.grid_connected
         return None
 
 
@@ -56,8 +57,9 @@ class EVChargeBinarySensor(PowerPilotEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        if self.plan and self.plan.current:
-            return self.plan.current.ev_charge
+        current = self.current_decision
+        if current:
+            return current.ev_charge
         return None
 
 

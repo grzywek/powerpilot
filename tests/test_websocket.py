@@ -5,14 +5,25 @@ from __future__ import annotations
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.powerpilot.const import DEFAULTS, DOMAIN
+from custom_components.powerpilot.const import CONF_SOC_SENSOR, DEFAULTS, DOMAIN
 
 
 async def _setup(hass: HomeAssistant) -> None:
-    entry = MockConfigEntry(domain=DOMAIN, data=dict(DEFAULTS), title="PowerPilot")
+    hass.states.async_set("sensor.soc", "55", {"unit_of_measurement": "%"})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={**DEFAULTS, CONF_SOC_SENSOR: "sensor.soc"},
+        title="PowerPilot",
+    )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    async def _empty_recent_soc(*args):
+        return {}
+
+    coordinator._recent_soc = _empty_recent_soc
 
 
 async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:

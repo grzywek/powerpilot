@@ -8,7 +8,7 @@ unit-test.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -173,6 +173,13 @@ class Plan:
     def current(self) -> Decision | None:
         """The decision for the hour we are in right now (first slot)."""
         return self.decisions[0] if self.decisions else None
+
+    def decision_at(self, moment: datetime) -> Decision | None:
+        """Decision covering ``moment`` on the hourly plan grid."""
+        for decision in self.decisions:
+            if decision.start <= moment < decision.start + timedelta(hours=1):
+                return decision
+        return None
 
     @property
     def total_cost(self) -> float:
@@ -391,4 +398,3 @@ def tariff_for_day(tariffs: list[Tariff], day: date) -> Tariff | None:
 
     candidates.sort(key=_sort_key)
     return candidates[0]
-

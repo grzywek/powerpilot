@@ -737,12 +737,25 @@ export class PowerPilotPanel extends LitElement {
   // ------------------------------------------------------------------
   // Overview
   // ------------------------------------------------------------------
+  private _currentPlanHour(plan: Plan): PlanHour | null {
+    const now = Date.now();
+    return (
+      plan.hours.find((hour) => {
+        const start = new Date(hour.start).getTime();
+        return start <= now && now < start + 3600_000;
+      }) ?? null
+    );
+  }
+
   private _renderOverview(): TemplateResult {
     const plan = this._plan;
     if (!plan || !plan.hours?.length) {
       return html`<div class="card empty">Brak danych planu. Poczekaj na pierwsze przeliczenie.</div>`;
     }
-    const current = plan.hours[0];
+    const current = this._currentPlanHour(plan);
+    if (!current) {
+      return html`<div class="card empty">Brak danych dla bieżącej godziny.</div>`;
+    }
     return html`
       <div class="card">
         <div class="stat-row">

@@ -99,10 +99,10 @@ def test_estimate_none_without_history() -> None:
 def test_prune_drops_entries_older_than_retention() -> None:
     archive = PriceArchive()
     h = _hour()
-    archive.record(h - timedelta(days=200), 1.0, PRICE_TYPE_CERTAIN, "pradcast", "t")
+    archive.record(h - timedelta(days=400), 1.0, PRICE_TYPE_CERTAIN, "pradcast", "t")
     archive.record(h, 2.0, PRICE_TYPE_CERTAIN, "pradcast", "t")
     archive.prune()
-    assert archive.get(h - timedelta(days=200)) is None
+    assert archive.get(h - timedelta(days=400)) is None
     assert archive.get(h) is not None
 
 

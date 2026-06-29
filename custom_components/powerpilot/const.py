@@ -7,11 +7,6 @@ from typing import Final
 DOMAIN: Final = "powerpilot"
 PLATFORMS: Final = ["sensor", "binary_sensor"]
 
-# How often the optimization pipeline re-plans. Prices and the consumption
-# forecast move on an hourly grid, so re-optimising hourly is enough; the panel
-# still reads live realized data (incl. the current hour so far) on every fetch.
-DEFAULT_UPDATE_INTERVAL_MINUTES: Final = 60
-
 # ---------------------------------------------------------------------------
 # Config / options keys
 # ---------------------------------------------------------------------------
@@ -62,7 +57,7 @@ CONF_EXCISE_KWH: Final = "excise_kwh"  # additive PLN/kWh netto (akcyza)
 # bill to the grosz. See ``pricing.assemble`` / ``PRICE_ROUNDING_*``.
 CONF_PRICE_ROUNDING: Final = "price_rounding"
 # How often the price source is actually re-fetched (forecasts change). The
-# optimizer still runs every DEFAULT_UPDATE_INTERVAL_MINUTES off cached prices.
+# optimizer itself runs on exact clock-hour boundaries off cached prices.
 CONF_PRICE_REFRESH_HOURS: Final = "price_refresh_hours"
 
 # Rounding schemes for the displayed gross per-kWh price.

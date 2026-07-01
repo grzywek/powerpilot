@@ -30,6 +30,7 @@ from .const import (
     CONF_GRID_DISCONNECT_SOC,
     CONF_GRID_VOLTAGE,
     CONF_INVERTER_MAX_CHARGE_KW,
+    CONF_MIN_CHARGE_POWER_KW,
     CONF_INVERTER_MAX_DISCHARGE_KW,
     CONF_MAIN_FUSE_A,
     CONF_MAX_SOC,
@@ -250,6 +251,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 grid_disconnect_soc=float(self.config[CONF_GRID_DISCONNECT_SOC]),
                 charge_curve=curve,
                 connection_power_kw=connection_power_kw,
+                min_charge_power_kw=float(
+                    self.config.get(
+                        CONF_MIN_CHARGE_POWER_KW, DEFAULTS[CONF_MIN_CHARGE_POWER_KW]
+                    )
+                ),
             )
         )
 
@@ -329,6 +335,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "base_fc": [_r(s.base_consumption_kwh, 3) for s in slots],
             "mode": [MODE_CODE.get(d.inverter_mode, "p") for d in decisions],
             "soc": [_r(d.battery_soc, 1) for d in decisions],
+            # Forecast EV SoC trajectory, so a time-traveled future view can draw
+            # the EV SoC line as it was planned. Captured from now on; older
+            # vintages predate this field and leave the line blank.
+            "ev_soc": [_r(d.ev_soc, 1) for d in decisions],
             "grid": [_r(d.grid_buy_kwh, 3) for d in decisions],
             # Planned battery flows + EV, so the chart's forecast tooltip column
             # can be reconstructed for past hours. Captured from now on.
@@ -1207,6 +1217,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         past_hours: int = 24,
         start: str | None = None,
         end: str | None = None,
+        as_of: str | None = None,
+        forecast_lead: int = 0,
     ) -> dict:
         """Unified hourly series for the chart panel.
 
@@ -1222,6 +1234,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         Each hour carries every field the chart needs to distinguish real vs
         forecast data, confirmed vs forecast prices, the planned inverter mode,
         per-device consumption breakdown and PLN-per-hour cost.
+
+        ``as_of`` moves the virtual "now": with it set (to a *past* instant) the
+        series is rendered as it stood then — realized data up to ``as_of``, and
+        the future side projected from the plan (vintage) that was current at that
+        moment, not today's live plan. ``forecast_lead`` picks how many hours out
+        each past hour's "prognoza" comparison is read from (0 = the freshest plan
+        made as the hour began).
         """
         from .const import (
             CONF_BATTERY_CHARGE_SENSOR,
@@ -1235,7 +1254,18 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         )
         from .hierarchy import exclusive_series
 
-        real_now = dt_util.now()
+        actual_now = dt_util.now()
+        # Virtual present ("teraz" marker). `as_of` time-travels to a past instant;
+        # never past the real clock (the future hasn't been realized yet), so the
+        # recorder always has the data the left side needs.
+        teraz = actual_now
+        time_travel = False
+        if as_of:
+            parsed = dt_util.parse_datetime(as_of)
+            if parsed is not None:
+                teraz = min(dt_util.as_local(parsed), actual_now)
+                time_travel = teraz < actual_now
+        real_now = teraz
         now = real_now.replace(minute=0, second=0, microsecond=0)  # current hour start
 
         # Resolve [past_start, past_end] window for recorder reads.
@@ -1385,6 +1415,17 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         prev_soc = soc_real.get(past_start - timedelta(hours=1))
         prev_ev_soc = ev_soc_real.get(past_start - timedelta(hours=1))
 
+        # Per-hour forecast read, honouring the requested lead. lead 0 keeps the
+        # coherent single-vintage read (`run0_at`, blank when no plan was made at
+        # that exact hour); lead N reads the plan current N hours before the hour.
+        sn = self.snapshots
+        lead = max(int(forecast_lead or 0), 0)
+
+        def _fc(hour: datetime, key: str):
+            if lead > 0:
+                return sn.lead_value_at(hour, key, lead)
+            return sn.run0_at(hour, key)
+
         # ----- Past hours -----
         h = past_start
         while h < past_end:
@@ -1467,14 +1508,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # value that plan seeded from — so the forecast SoC delta matches its
             # own charge instead of stitching two re-seeded vintages together.
             # Battery flows are captured only from now on → blank for old vintages.
-            sn = self.snapshots
-            fc_soc_end = sn.run0_at(h, "soc")
+            fc_soc_end = _fc(h, "soc")
             forecast_side = _side(
-                grid=sn.run0_at(h, "grid"),
-                discharge=sn.run0_at(h, "dischg"),
+                grid=_fc(h, "grid"),
+                discharge=_fc(h, "dischg"),
                 base=base_fc,
-                ev=sn.run0_at(h, "ev"),
-                charge=sn.run0_at(h, "charge"),
+                ev=_fc(h, "ev"),
+                charge=_fc(h, "charge"),
                 devices=dev_forecast,
                 soc_start=prev_soc if fc_soc_end is not None else None,
                 soc_end=fc_soc_end,
@@ -1501,8 +1541,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
                     "battery_discharge_kwh": round(bat_discharge_real[h], 3) if h in bat_discharge_real else None,
                     # Planned grid-side charge setpoint for this hour, from the
-                    # vintage recorded at h (blank for hours predating capture).
-                    "charge_power_kw": sn.run0_at(h, "charge_pw"),
+                    # plan at the requested lead (blank for hours predating capture).
+                    "charge_power_kw": _fc(h, "charge_pw"),
                     # Realized battery energy cost from the vintage recorded at h
                     # (no live sensor exists for it). Blank for hours predating
                     # snapshot capture of this field.
@@ -1566,7 +1606,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 cur_devices[eid] = await self.consumption.async_partial_kwh(
                     eid, now, real_now
                 )
-            live_soc = self._read_soc()
+            # Live sensor for the real present; a time-traveled view must not leak
+            # today's SoC — fall back to the recorded SoC entering the hour.
+            live_soc = prev_soc if time_travel else self._read_soc()
             wd, hr = now.weekday(), now.hour
             dev_forecast = {
                 eid: round(self.consumption.devices[eid].value(wd, hr) or 0.0, 3)
@@ -1588,7 +1630,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             cur_base = max(0.0, cur_main - cur_dev_sum) if cur_main is not None else None
             cur_ev_soc = ev_soc_real.get(now)
             if cur_ev_soc is None:
-                cur_ev_soc = self.ev.soc
+                # Same rule as the battery SoC: no live EV sensor value in a
+                # time-traveled view.
+                cur_ev_soc = prev_ev_soc if time_travel else self.ev.soc
             realized_side = _side(
                 grid=cur_grid,
                 discharge=cur_discharge,
@@ -1601,14 +1645,29 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 ev_soc_start=prev_ev_soc,
                 ev_soc_end=cur_ev_soc,
             )
-            # Whole-hour forecast from the plan's current-hour decision.
+            # Whole-hour forecast for the teraz hour. Live: from today's plan
+            # current-hour decision. Time-travel: from the plan (vintage) current
+            # at teraz, so the comparison column reflects what was expected then.
             cur_dec = cur_slot = None
-            if self.data and self.data.decisions:
+            forecast_side = None
+            if time_travel:
+                forecast_side = _side(
+                    grid=sn.value_at(now, "grid"),
+                    discharge=sn.value_at(now, "dischg"),
+                    base=sn.value_at(now, "base_fc"),
+                    ev=sn.value_at(now, "ev"),
+                    charge=sn.value_at(now, "charge"),
+                    devices=dev_forecast,
+                    soc_start=prev_soc,
+                    soc_end=sn.value_at(now, "soc"),
+                    ev_soc_start=prev_ev_soc,
+                    ev_soc_end=sn.value_at(now, "ev_soc"),
+                )
+            elif self.data and self.data.decisions:
                 for _sl, _dc in zip(self.data.forecast.slots, self.data.decisions):
                     if _sl.start == now:
                         cur_slot, cur_dec = _sl, _dc
                         break
-            forecast_side = None
             if cur_dec is not None:
                 forecast_side = _side(
                     grid=cur_dec.grid_buy_kwh,
@@ -1641,7 +1700,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "ev_soc": (
                         round(ev_soc_real[now], 1)
                         if now in ev_soc_real
-                        else (round(self.ev.soc, 1) if self.ev.soc is not None else None)
+                        else (round(cur_ev_soc, 1) if cur_ev_soc is not None else None)
                     ),
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                     "inverter_mode": _real_mode(cur_charge, cur_discharge),
@@ -1649,9 +1708,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "battery_discharge_kwh": round(cur_discharge, 3) if cur_discharge is not None else None,
                     # Plan's grid-side charge setpoint for this hour (forecast side).
                     "charge_power_kw": (
-                        round(cur_dec.charge_power_kw, 3) if cur_dec is not None else None
+                        sn.value_at(now, "charge_pw")
+                        if time_travel
+                        else (round(cur_dec.charge_power_kw, 3) if cur_dec is not None else None)
                     ),
-                    "battery_energy_cost": round(self._battery_energy_cost, 4),
+                    "battery_energy_cost": (
+                        sn.value_at(now, "bcost")
+                        if time_travel
+                        else round(self._battery_energy_cost, 4)
+                    ),
                     "grid_buy_kwh": round(cur_grid, 3) if cur_grid is not None else None,
                     # Realized so far, else the plan's EV charge for this hour.
                     "ev_charge_kwh": (
@@ -1704,7 +1769,91 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # When the current hour is shown as a realized partial, the plan's own
         # current-hour slot is a duplicate → forecast starts at the next hour.
         forecast_cutoff = (now + timedelta(hours=1)) if emitted_current else past_end
-        if plan:
+
+        if time_travel:
+            # Time-travel: project the future side from the plan (vintage) current
+            # at `teraz`, decoded forward from its stored arrays — so the chart
+            # shows the forecast as it stood then, not today's live plan.
+            run_key = sn.nearest_run_at(teraz)
+            rec = sn.get(run_key) if run_key else None
+            v_start = dt_util.parse_datetime(rec.get("start") or "") if rec else None
+            if rec and v_start is not None:
+                def _vat(key: str, i: int):
+                    seq = rec.get(key) or []
+                    return seq[i] if 0 <= i < len(seq) else None
+
+                for i in range(int(rec.get("n") or 0)):
+                    slot_start = v_start + timedelta(hours=i)
+                    if window_end and slot_start >= window_end:
+                        break
+                    if slot_start < forecast_cutoff:
+                        continue
+                    wd, hr = slot_start.weekday(), slot_start.hour
+                    dev_forecast = {
+                        eid: round(self.consumption.devices[eid].value(wd, hr) or 0.0, 3)
+                        if eid in self.consumption.devices
+                        else None
+                        for eid in device_ids
+                    }
+                    buy = _vat("buy", i)
+                    dist = _vat("dist", i)
+                    total = buy + dist if buy is not None and dist is not None else None
+                    grid = _vat("grid", i)
+                    dischg = _vat("dischg", i)
+                    charge = _vat("charge", i)
+                    ev = _vat("ev", i)
+                    base = _vat("base_fc", i)
+                    soc_end = _vat("soc", i)
+                    ev_soc = _vat("ev_soc", i)
+                    bcost = _vat("bcost", i)
+                    hours.append(
+                        {
+                            "start": slot_start.isoformat(),
+                            "is_past": False,
+                            "realized": None,
+                            "forecast": _side(
+                                grid=grid,
+                                discharge=dischg,
+                                base=base,
+                                ev=ev,
+                                charge=charge,
+                                devices=dev_forecast,
+                                soc_start=prev_soc,
+                                soc_end=soc_end,
+                                ev_soc_start=prev_ev_soc,
+                                ev_soc_end=ev_soc,
+                            ),
+                            "buy_price": buy,
+                            "distribution_price_kwh": dist,
+                            "total_price_kwh": total,
+                            "price_confirmed": _vat("ptype", i) == "c",
+                            "consumption_real": None,
+                            "consumption_forecast": _vat("cons_fc", i),
+                            "base_consumption_forecast": base,
+                            "soc": soc_end,
+                            "ev_soc": ev_soc,
+                            "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
+                            "inverter_mode": MODE_CODE_INV.get(_vat("mode", i)) or InverterMode.PASSTHROUGH,
+                            "battery_charge_kwh": charge,
+                            "battery_discharge_kwh": dischg,
+                            "charge_power_kw": _vat("charge_pw", i),
+                            "battery_energy_cost": bcost,
+                            "grid_buy_kwh": grid,
+                            "ev_charge_kwh": ev,
+                            "hour_cost": _vat("cost", i),
+                            "energy_cost": round(grid * buy, 4) if grid is not None and buy is not None else None,
+                            "distribution_cost": round(grid * dist, 4) if grid is not None and dist is not None else None,
+                            "battery_use_cost": round(dischg * bcost, 4) if dischg is not None and bcost is not None else None,
+                            "fixed_cost": self.tariff.fixed_hourly_for(slot_start),
+                            "devices_real": {eid: None for eid in device_ids},
+                            "devices_forecast": dev_forecast,
+                        }
+                    )
+                    if soc_end is not None:
+                        prev_soc = soc_end
+                    if ev_soc is not None:
+                        prev_ev_soc = ev_soc
+        elif plan:
             for slot, decision in zip(plan.forecast.slots, plan.decisions):
                 if window_end and slot.start >= window_end:
                     break

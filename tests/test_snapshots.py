@@ -84,6 +84,32 @@ def test_prune_drops_old_vintages() -> None:
     assert store.runs()[0]["run_at"] == store._key(base)
 
 
+def test_lead_value_at_picks_older_vintage() -> None:
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    # Two vintages: one 3 h ago, one just now. Each vintage's `soc` array is
+    # [idx0, idx1, idx2] for its own start, +1h, +2h.
+    old = _rec(base - timedelta(hours=3))
+    old["soc"] = [10.0, 11.0, 12.0]  # covers base-3h, base-2h, base-1h
+    fresh = _rec(base)
+    fresh["soc"] = [90.0, 91.0, 92.0]  # covers base, base+1h, base+2h
+    store.add(old)
+    store.add(fresh)
+
+    # For hour `base-1h`, lead 0 → freshest plan at/ before base-1h is `old`,
+    # its idx 2 (base-3h + 2h == base-1h) → 12.0.
+    assert store.lead_value_at(base - timedelta(hours=1), "soc", 0) == 12.0
+    # Lead 3 for hour `base` → plan current at base-3h == `old`, idx 3 is out of
+    # range (only 3 entries) → None.
+    assert store.lead_value_at(base, "soc", 3) is None
+    # Lead 0 for hour `base` → `fresh` idx 0 → 90.0.
+    assert store.lead_value_at(base, "soc", 0) == 90.0
+    # Lead 2 for hour `base+1h` → plan current at base-1h is still `old` (fresh
+    # was recorded at base, which is after base-1h) → idx (base+1h - (base-3h)) =
+    # 4, out of range → None. Confirms it never forward-runs past the horizon.
+    assert store.lead_value_at(base + timedelta(hours=1), "soc", 2) is None
+
+
 def test_serialisation_roundtrip() -> None:
     store = SnapshotStore()
     base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)

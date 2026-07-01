@@ -108,6 +108,34 @@ class SnapshotStore:
             return seq[idx]
         return None
 
+    def lead_value_at(self, hour: datetime, key: str, lead_hours: int) -> Any | None:
+        """Value predicted for ``hour`` by the plan current ``lead_hours`` before it.
+
+        Picks the latest vintage recorded at or before ``hour - lead_hours`` and
+        reads the entry for ``hour`` from its parallel ``key`` array. This is how
+        the chart's "prognoza" line can show, for each past hour, how the forecast
+        looked N hours out — the forecast corrects itself as the hour approaches,
+        so a stale-lead view surfaces divergences a fresh-lead view hides.
+
+        ``lead_hours == 0`` is the freshest forecast (the plan made as the hour
+        began). Returns ``None`` when no such vintage exists or the hour falls
+        outside its horizon.
+        """
+        run_key = self.nearest_run_at(hour - timedelta(hours=max(lead_hours, 0)))
+        if run_key is None:
+            return None
+        rec = self._records.get(run_key)
+        if not rec:
+            return None
+        start = dt_util.parse_datetime(rec.get("start") or "")
+        if start is None:
+            return None
+        idx = round((hour - start).total_seconds() / 3600.0)
+        seq = rec.get(key) or []
+        if 0 <= idx < len(seq):
+            return seq[idx]
+        return None
+
     def run0_at(self, run_hour: datetime, key: str) -> Any | None:
         """Index-0 value of the vintage *recorded at* ``run_hour`` (the plan made
         that hour, whose first slot is that hour).

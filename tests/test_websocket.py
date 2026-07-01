@@ -68,6 +68,43 @@ async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:
     # Should contain both past hours and the forecast horizon.
     assert any(h["is_past"] for h in msg["result"]["hours"])
 
+    # A forecast-lead selection is accepted (past "prognoza" comparison shift).
+    await client.send_json(
+        {"id": 7, "type": "powerpilot/series", "past_hours": 12, "forecast_lead": 6}
+    )
+    msg = await client.receive_json()
+    assert msg["success"]
+    assert "hours" in msg["result"]
+
+
+async def test_ws_series_time_travel(hass: HomeAssistant, hass_ws_client) -> None:
+    """`as_of` moves the virtual 'now' to a past instant and is echoed back."""
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    await _setup(hass)
+    client = await hass_ws_client(hass)
+
+    as_of = (dt_util.now() - timedelta(hours=6)).replace(
+        minute=0, second=0, microsecond=0
+    )
+    await client.send_json(
+        {
+            "id": 1,
+            "type": "powerpilot/series",
+            "past_hours": 24,
+            "as_of": as_of.isoformat(),
+        }
+    )
+    msg = await client.receive_json()
+    assert msg["success"]
+    # The "teraz" marker is reported at (or before) the requested instant, never
+    # in the real future.
+    reported = dt_util.parse_datetime(msg["result"]["now"])
+    assert reported <= dt_util.now()
+    assert reported <= as_of + timedelta(minutes=1)
+
 
 async def test_ws_prices_archive(hass: HomeAssistant, hass_ws_client) -> None:
     await _setup(hass)

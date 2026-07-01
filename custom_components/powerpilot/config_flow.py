@@ -44,6 +44,7 @@ from .const import (
     CONF_GRID_IMPORT_SENSOR,
     CONF_INVERTER_MAX_CHARGE_KW,
     CONF_INVERTER_MAX_DISCHARGE_KW,
+    CONF_MIN_CHARGE_POWER_KW,
     CONF_MAIN_FUSE_A,
     CONF_MAX_SOC,
     CONF_MIN_SOC,
@@ -127,6 +128,9 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_INVERTER_MAX_CHARGE_KW, default=d(CONF_INVERTER_MAX_CHARGE_KW)
             ): _NUMBER(_NUM(min=0.5, max=50, step=0.1, unit_of_measurement="kW", mode="box")),
+            vol.Optional(
+                CONF_MIN_CHARGE_POWER_KW, default=d(CONF_MIN_CHARGE_POWER_KW)
+            ): _NUMBER(_NUM(min=0, max=50, step=0.1, unit_of_measurement="kW", mode="box")),
             vol.Required(
                 CONF_INVERTER_MAX_DISCHARGE_KW, default=d(CONF_INVERTER_MAX_DISCHARGE_KW)
             ): _NUMBER(_NUM(min=0.5, max=50, step=0.1, unit_of_measurement="kW", mode="box")),

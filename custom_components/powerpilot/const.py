@@ -19,6 +19,9 @@ CONF_GRID_VOLTAGE: Final = "grid_voltage"  # volts per phase
 # --- Battery / inverter ---
 CONF_BATTERY_CAPACITY_KWH: Final = "battery_capacity_kwh"
 CONF_INVERTER_MAX_CHARGE_KW: Final = "inverter_max_charge_kw"
+# Below this grid-side charge power the optimizer won't force-charge at all
+# (0 disables the floor). Stops trivial sub-kW charge dribbles like 0.20 kW.
+CONF_MIN_CHARGE_POWER_KW: Final = "min_charge_power_kw"
 CONF_INVERTER_MAX_DISCHARGE_KW: Final = "inverter_max_discharge_kw"
 CONF_CHARGE_EFFICIENCY: Final = "charge_efficiency"  # 0..1
 CONF_DISCHARGE_EFFICIENCY: Final = "discharge_efficiency"  # 0..1
@@ -166,6 +169,7 @@ DEFAULTS: Final = {
     CONF_GRID_VOLTAGE: 230,
     CONF_BATTERY_CAPACITY_KWH: 10.0,
     CONF_INVERTER_MAX_CHARGE_KW: 3.0,
+    CONF_MIN_CHARGE_POWER_KW: 0.0,
     CONF_INVERTER_MAX_DISCHARGE_KW: 3.0,
     CONF_CHARGE_EFFICIENCY: 0.95,
     CONF_DISCHARGE_EFFICIENCY: 0.95,

@@ -363,6 +363,16 @@ const RANGE_HOURS: Record<RangeMode, number> = {
   "7d": 168,
 };
 
+/** Forecast lead presets for the past "prognoza" comparison, in hours.
+ *  0 = the freshest plan (made as each hour began). */
+const FORECAST_LEADS: { label: string; hours: number }[] = [
+  { label: "ostatnia", hours: 0 },
+  { label: "−3h", hours: 3 },
+  { label: "−6h", hours: 6 },
+  { label: "−12h", hours: 12 },
+  { label: "−24h", hours: 24 },
+];
+
 @customElement("powerpilot-panel")
 export class PowerPilotPanel extends LitElement {
   @property({ attribute: false }) hass: any;
@@ -391,8 +401,12 @@ export class PowerPilotPanel extends LitElement {
 
   /** Active range preset. */
   @state() private _rangeMode: RangeMode = "3d";
-  /** Right edge of the visible window. Defaults to "live" (now + horizon). */
+  /** Anchor instant. Null = live (real now). When set (to a past datetime) it is
+   *  both the virtual "teraz" and, via its local day, the window's start — so the
+   *  chart is rendered as it stood then (time-travel). */
   @state() private _anchor: Date | null = null;
+  /** Selected forecast lead (hours) for the past "prognoza" comparison. */
+  @state() private _forecastLead = 0;
   /** Selected day on the Prices tab (ISO string YYYY-MM-DD). Null = today. */
   @state() private _pricesDay: string | null = null;
   /** Price archive payload for the selected day (independent of the chart window). */
@@ -470,6 +484,10 @@ export class PowerPilotPanel extends LitElement {
           past_hours: pastHours,
           start: start.toISOString(),
           end: end.toISOString(),
+          // Time-travel: render the chart as of the anchored instant (omitted
+          // when live). `forecast_lead` picks the past "prognoza" comparison.
+          ...(this._anchor ? { as_of: this._anchor.toISOString() } : {}),
+          forecast_lead: this._forecastLead,
         }),
       ]);
       this._plan = plan;
@@ -493,13 +511,13 @@ export class PowerPilotPanel extends LitElement {
     this._refresh();
   }
 
-  /** Move the window's start day by ±1 day (the « / » buttons). */
+  /** Move the anchored instant by ±1 day (the « / » buttons), keeping the hour.
+   *  Clamped to the present — the future can't be time-traveled to. */
   private _shiftDay(delta: number): void {
-    const start = this._midnight(this._anchor ?? new Date());
-    start.setDate(start.getDate() + delta);
-    // Landing back on today returns to live mode (so "teraz" lights up).
-    const today = this._midnight(new Date());
-    this._anchor = start.getTime() === today.getTime() ? null : start;
+    const base = new Date(this._anchor ?? new Date());
+    base.setDate(base.getDate() + delta);
+    const nowMs = Date.now();
+    this._anchor = base.getTime() >= nowMs ? null : base;
     this._refresh();
   }
 
@@ -511,11 +529,16 @@ export class PowerPilotPanel extends LitElement {
   private _onDatePick(ev: Event): void {
     const value = (ev.target as HTMLInputElement).value;
     if (!value) return;
-    // The picked date is the window's start (local midnight). Picking today
-    // returns to live mode.
-    const picked = this._midnight(new Date(value + "T00:00:00"));
-    const today = this._midnight(new Date());
-    this._anchor = picked.getTime() === today.getTime() ? null : picked;
+    // datetime-local yields "YYYY-MM-DDTHH:mm" in local time. Anchoring at/after
+    // the present returns to live mode (time-travel is past-only).
+    const picked = new Date(value);
+    if (isNaN(picked.getTime())) return;
+    this._anchor = picked.getTime() >= Date.now() ? null : picked;
+    this._refresh();
+  }
+
+  private _setForecastLead(hours: number): void {
+    this._forecastLead = hours;
     this._refresh();
   }
 
@@ -775,6 +798,9 @@ export class PowerPilotPanel extends LitElement {
       <div class="card">
         <div class="card-title">Energia: ↑ sieć/bateria · ↓ zużycie (stack) + tryb falownika + SoC</div>
         <div id="pp-chart-energy" class="apex-chart"></div>
+        ${this._series && !this._series.hours?.length
+          ? html`<div class="empty">Brak danych dla wybranego okna (brak prognozy / poza horyzontem).</div>`
+          : nothing}
       </div>
       <div class="card">
         <div class="card-title">Koszty: cena zakupu (PLN/kWh) + koszt godziny (PLN)</div>
@@ -791,23 +817,33 @@ export class PowerPilotPanel extends LitElement {
     const lastDay = new Date(end.getTime() - 24 * 3600 * 1000);
     const fmtDay = (d: Date) =>
       d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit", year: "numeric" });
-    // Date picker shows the window START (local day), formatted in local time
-    // so it matches what the user picked (not a UTC-shifted day).
-    const datePickerValue = (() => {
-      const d = this._midnight(this._anchor ?? new Date());
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${day}`;
+    // Picker shows the anchored instant (or "now" when live), formatted in local
+    // time as datetime-local expects: "YYYY-MM-DDTHH:mm".
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const dateTimeValue = (() => {
+      const d = this._anchor ?? new Date();
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+        d.getHours()
+      )}:${pad(d.getMinutes())}`;
     })();
+    // Upper bound: the present (time-travel is past-only).
+    const nowMax = (() => {
+      const d = new Date();
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+        d.getHours()
+      )}:${pad(d.getMinutes())}`;
+    })();
+    const fmtTime = (d: Date) =>
+      d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
     return html`
       <div class="card nav-card">
         <div class="nav-row">
           <button class="nav-btn" @click=${() => this._shiftDay(-1)} title="Poprzedni dzień">«</button>
           <input
-            type="date"
+            type="datetime-local"
             class="nav-date"
-            .value=${datePickerValue}
+            .value=${dateTimeValue}
+            max=${nowMax}
             @change=${this._onDatePick}
           />
           <button class="nav-btn" @click=${() => this._shiftDay(1)} title="Następny dzień">»</button>
@@ -824,10 +860,26 @@ export class PowerPilotPanel extends LitElement {
             `
           )}
         </div>
+        <div class="nav-row nav-row-secondary">
+          <span class="nav-label">Prognoza:</span>
+          ${FORECAST_LEADS.map(
+            (l) => html`
+              <button
+                class="nav-btn ${this._forecastLead === l.hours ? "active" : ""}"
+                @click=${() => this._setForecastLead(l.hours)}
+                title="Porównaj z prognozą sprzed ${l.hours} h"
+              >
+                ${l.label}
+              </button>
+            `
+          )}
+        </div>
         <div class="nav-info">
           Okno: <strong>${fmtDay(start)}</strong> →
           <strong>${fmtDay(lastDay)}</strong>
-          ${isLive ? html`<span class="muted"> · tryb live</span>` : nothing}
+          ${isLive
+            ? html`<span class="muted"> · tryb live</span>`
+            : html`<span class="muted"> · teraz: ${fmtTime(this._anchor!)}</span>`}
         </div>
       </div>
     `;
@@ -904,7 +956,19 @@ export class PowerPilotPanel extends LitElement {
 
   private _mountOrUpdateCharts(): void {
     const s = this._series;
-    if (!s || !s.hours?.length) return;
+    if (!s || !s.hours?.length) {
+      // No data for this window (e.g. a future day beyond the plan horizon, or a
+      // time-traveled instant with no recorded plan): tear down any previously
+      // rendered charts so the last window's data doesn't linger on screen.
+      if (this._energyChart || this._priceChart) {
+        this._energyChart?.destroy();
+        this._priceChart?.destroy();
+        this._energyChart = undefined;
+        this._priceChart = undefined;
+        this._lastMountedSeries = undefined;
+      }
+      return;
+    }
     const energyEl = this.renderRoot.querySelector("#pp-chart-energy") as HTMLElement | null;
     const priceEl = this.renderRoot.querySelector("#pp-chart-prices") as HTMLElement | null;
     if (!energyEl || !priceEl) return;
@@ -3121,6 +3185,17 @@ export class PowerPilotPanel extends LitElement {
     }
     .nav-spacer {
       flex: 1;
+    }
+    .nav-row-secondary {
+      margin-top: 8px;
+    }
+    .nav-row-secondary .nav-btn {
+      padding: 4px 10px;
+      font-size: 12px;
+    }
+    .nav-label {
+      font-size: 12px;
+      color: var(--secondary-text-color);
     }
     .nav-info {
       margin-top: 8px;

@@ -108,6 +108,9 @@ class OptimizerConfig:
     inverter_max_discharge_kw: float
     grid_disconnect_soc: float
     charge_curve: ChargeCurve
+    # Grid-side charge power floor (kW): each hour charges 0 *or* ≥ this. 0
+    # disables it. Keeps the plan from forcing trivial sub-kW dribbles.
+    min_charge_power_kw: float = 0.0
     # Maximum grid import power (kW). 0 disables the connection-power limit.
     connection_power_kw: float = 0.0
     # Explicit terminal price (PLN/kWh) for energy left at the end of the
@@ -267,11 +270,13 @@ class Optimizer:
         inf = highspy.kHighsInf
 
         # Charge columns c[0..n-1] are continuous grid-draw power (kWh per hour).
+        charge_caps: list[float] = []
         for t in range(n):
             charge_cap = cfg.inverter_max_charge_kw
             if ev_kwh[t] > 0:
                 # EV shares a phase with the inverter; leave it head-room.
                 charge_cap = max(0.0, charge_cap - ev_charger_kw)
+            charge_caps.append(charge_cap)
             h.addVar(0.0, charge_cap)
         # Discharge columns d[0..n-1] are BINARY: each hour either covers the
         # whole house demand from the battery (z=1 → cap[t] kWh delivered) or not
@@ -340,6 +345,36 @@ class Optimizer:
                     len(idx),
                     np.array(idx, dtype=np.int32),
                     np.array(val, dtype=np.float64),
+                )
+
+        # Minimum charge power: make each charge column semi-continuous — either 0
+        # or ≥ min_charge. Add one binary indicator y[t] (columns 2n..3n-1) with
+        #   c[t] ≤ cap[t]·y[t]   (charge only when the switch is on)
+        #   c[t] ≥ min_charge·y[t]  (and then at least the floor)
+        # y is appended after every other column/row so existing indices (the SoC,
+        # connection and charge-curve rows reference cols 0..2n-1) stay valid.
+        min_charge = cfg.min_charge_power_kw or 0.0
+        if min_charge > _EPS:
+            for t in range(n):
+                h.addVar(0.0, 1.0)
+                h.changeColIntegrality(2 * n + t, highspy.HighsVarType.kInteger)
+            for t in range(n):
+                cap = charge_caps[t]
+                # c[t] - cap·y[t] ≤ 0
+                h.addRow(
+                    -inf,
+                    0.0,
+                    2,
+                    np.array([t, 2 * n + t], dtype=np.int32),
+                    np.array([1.0, -cap], dtype=np.float64),
+                )
+                # c[t] - min_charge·y[t] ≥ 0
+                h.addRow(
+                    0.0,
+                    inf,
+                    2,
+                    np.array([t, 2 * n + t], dtype=np.int32),
+                    np.array([1.0, -min_charge], dtype=np.float64),
                 )
 
         h.run()

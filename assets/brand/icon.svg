@@ -1,0 +1,68 @@
+<svg width="1000" height="1000" viewBox="0 0 1000 1000" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .blue { stroke: #29a3ef; }
+      .bluef { fill: #29a3ef; }
+      .green { fill: #6cc24a; }
+      .greens { stroke: #6cc24a; }
+      .yellow { fill: #ffd21e; }
+    </style>
+  </defs>
+
+  <!-- House outline with chimney -->
+  <path class="blue" fill="none" stroke-width="34" stroke-linejoin="round" stroke-linecap="round"
+        d="M 475 55
+           L 655 233
+           L 655 150
+           L 762 150
+           L 762 302
+           L 902 405
+           L 902 843
+           Q 902 890 855 890
+           L 122 890
+           Q 75 890 75 843
+           L 75 405
+           Z"/>
+
+  <!-- Green cycle arrows (refresh) around battery + plug -->
+  <g class="greens" fill="none" stroke-width="30" stroke-linecap="round">
+    <!-- top arc, arrowhead pointing down on the right -->
+    <path d="M 258 452 A 236 236 0 0 1 700 372"/>
+    <!-- bottom arc, arrowhead pointing up on the left -->
+    <path d="M 712 700 A 236 236 0 0 1 262 782"/>
+  </g>
+  <!-- arrowheads for the cycle -->
+  <path class="green" d="M 700 300 L 754 392 L 646 392 Z"/>
+  <path class="green" d="M 320 855 L 214 855 L 268 762 Z"/>
+
+  <!-- Battery -->
+  <g>
+    <!-- cap nub -->
+    <rect class="bluef" x="322" y="345" width="66" height="26" rx="10"/>
+    <!-- body -->
+    <rect class="blue" fill="#ffffff" stroke-width="18" x="258" y="368" width="196" height="360" rx="26"/>
+    <!-- lightning bolt -->
+    <path class="yellow" d="M 372 410 L 300 545 L 348 545 L 336 640 L 412 505 L 360 505 Z"/>
+    <!-- charge level bars -->
+    <rect class="green" x="288" y="600" width="136" height="28" rx="8"/>
+    <rect class="green" x="288" y="642" width="136" height="28" rx="8"/>
+    <rect class="green" x="288" y="684" width="136" height="28" rx="8"/>
+  </g>
+
+  <!-- Plug -->
+  <g class="bluef">
+    <!-- prongs -->
+    <rect x="512" y="372" width="26" height="86" rx="13"/>
+    <rect x="574" y="372" width="26" height="86" rx="13"/>
+    <!-- body -->
+    <path d="M 486 452 H 626 V 520 Q 626 592 556 592 Q 486 592 486 520 Z"/>
+  </g>
+  <!-- cord -->
+  <path class="blue" fill="none" stroke-width="20" stroke-linecap="round"
+        d="M 556 592 C 556 690 636 690 610 760 C 590 815 540 800 548 838"/>
+
+  <!-- Green upward trend arrow -->
+  <path class="greens" fill="none" stroke-width="26" stroke-linejoin="round" stroke-linecap="round"
+        d="M 610 662 L 676 604 L 716 640 L 792 556"/>
+  <path class="green" d="M 748 540 L 812 524 L 806 592 Z"/>
+</svg>

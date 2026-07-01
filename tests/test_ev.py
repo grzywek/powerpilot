@@ -7,6 +7,7 @@ These exercise pure logic (no Home Assistant runtime): the optimizer's
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 from homeassistant.util import dt as dt_util
 
@@ -16,7 +17,6 @@ from custom_components.powerpilot.const import (
     CONF_EV_CHARGER_PHASE,
     CONF_EV_CHARGER_PHASES,
     CONF_EV_ENABLED,
-    CONF_EV_TARGET_SOC_SENSOR,
 )
 from custom_components.powerpilot.battery import BatteryModel
 from custom_components.powerpilot.models import Forecast, HourSlot
@@ -301,6 +301,7 @@ def _bare_module() -> EVModule:
     module = object.__new__(EVModule)
     module._targets = []
     module._forced_hours = set()
+    module._unavailable_hours = set()
     return module
 
 
@@ -363,6 +364,40 @@ def test_parse_custom_keyword_case_insensitive() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Calendar-location unavailability
+# ---------------------------------------------------------------------------
+
+
+def test_mark_unavailable_marks_hours_for_non_home_location() -> None:
+    module = _bare_module()
+    module._mark_unavailable(
+        {"summary": "Wyjazd", "location": "Warszawa", "start": _iso(2), "end": _iso(4)},
+        BASE,
+    )
+    offsets = sorted(
+        int((h - BASE).total_seconds() // 3600) for h in module._unavailable_hours
+    )
+    assert offsets == [2, 3]
+
+
+def test_mark_unavailable_ignores_home_location() -> None:
+    module = _bare_module()
+    module._mark_unavailable(
+        {"summary": "Cokolwiek", "location": "dom", "start": _iso(2), "end": _iso(4)},
+        BASE,
+    )
+    assert module._unavailable_hours == set()
+
+
+def test_mark_unavailable_ignores_events_without_location() -> None:
+    module = _bare_module()
+    module._mark_unavailable(
+        {"summary": "Kotek 100%", "start": _iso(2), "end": _iso(4)}, BASE
+    )
+    assert module._unavailable_hours == set()
+
+
+# ---------------------------------------------------------------------------
 # get_request wiring
 # ---------------------------------------------------------------------------
 
@@ -375,16 +410,18 @@ def _module_with_state(**state) -> EVModule:
         CONF_EV_CHARGER_KW: 7.0,
         CONF_EV_CHARGER_PHASE: 1,
         CONF_EV_CHARGER_PHASES: state.get("phases", 1),
-        CONF_EV_TARGET_SOC_SENSOR: None,
     }
     module._soc = state.get("soc")
-    module._target_soc = state.get("target_soc")
+    target_soc = state.get("target_soc")
+    module.target_soc_entity = (
+        SimpleNamespace(native_value=target_soc) if target_soc is not None else None
+    )
     module._energy_added = None
-    module._connected = state.get("connected")
+    module._home = state.get("home")
     module._charging = state.get("charging")
-    module._available = state.get("available", True)
     module._targets = state.get("targets", [])
     module._forced_hours = state.get("forced_hours", set())
+    module._unavailable_hours = state.get("unavailable_hours", set())
     # Capacity is learned at runtime; tests supply it directly.
     module._capacity = state.get("capacity", 60.0)
     module._kwh_per_km = state.get("kwh_per_km")
@@ -420,11 +457,20 @@ def test_get_request_default_topup_falls_back_to_default_target() -> None:
     assert round(req.required_kwh, 3) == round(expected, 3)
 
 
-def test_get_request_unavailable_has_no_hours() -> None:
+def test_get_request_with_no_signals_assumes_available() -> None:
+    """No connection/location sensors configured → plan ahead regardless."""
     fc = _forecast([0.5] * 6)
-    module = _module_with_state(soc=20.0, available=False)
+    module = _module_with_state(soc=20.0)
     req = module.get_request(fc)
-    assert req.available_hours == set()
+    assert req.available_hours == {s.start for s in fc.slots}
+
+
+def test_get_request_calendar_away_hours_are_unavailable() -> None:
+    fc = _forecast([0.5] * 6)
+    away_hours = {BASE + timedelta(hours=2), BASE + timedelta(hours=3)}
+    module = _module_with_state(soc=20.0, unavailable_hours=away_hours)
+    req = module.get_request(fc)
+    assert req.available_hours == {s.start for s in fc.slots} - away_hours
 
 
 # ---------------------------------------------------------------------------

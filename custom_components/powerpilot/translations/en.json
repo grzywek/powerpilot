@@ -50,13 +50,11 @@
         "data": {
           "ev_enabled": "Enable EV optimization",
           "ev_soc_sensor": "EV SoC sensor",
-          "ev_target_soc_sensor": "EV target SoC sensor",
           "ev_odometer_sensor": "EV odometer (km, increasing)",
-          "ev_charger_connected_sensor": "Charger connected (plugged in)",
-          "ev_charging_sensor": "Charging now",
+          "ev_charging_sensor": "Charging now (used to detect plan-matching sessions and reminders)",
           "ev_energy_added_sensor": "Energy added this session (kWh)",
           "ev_charge_meter_sensor": "EV charging meter (grid-side, kWh) — excluded from the demand profile",
-          "ev_location_sensor": "EV location (home/away)",
+          "ev_location_sensor": "EV location — home/away (used for reminders and detecting away-from-home charging)",
           "ev_calendar": "Charging calendar",
           "ev_calendar_keyword": "Calendar event keyword (e.g. Kotek)",
           "ev_range_km": "Range on a full charge (km)",
@@ -150,13 +148,11 @@
         "data": {
           "ev_enabled": "Enable EV optimization",
           "ev_soc_sensor": "EV SoC sensor",
-          "ev_target_soc_sensor": "EV target SoC sensor",
           "ev_odometer_sensor": "EV odometer (km, increasing)",
-          "ev_charger_connected_sensor": "Charger connected (plugged in)",
-          "ev_charging_sensor": "Charging now",
+          "ev_charging_sensor": "Charging now (used to detect plan-matching sessions and reminders)",
           "ev_energy_added_sensor": "Energy added this session (kWh)",
           "ev_charge_meter_sensor": "EV charging meter (grid-side, kWh) — excluded from the demand profile",
-          "ev_location_sensor": "EV location (home/away)",
+          "ev_location_sensor": "EV location — home/away (used for reminders and detecting away-from-home charging)",
           "ev_calendar": "Charging calendar",
           "ev_calendar_keyword": "Calendar event keyword (e.g. Kotek)",
           "ev_range_km": "Range on a full charge (km)",
@@ -266,6 +262,11 @@
       },
       "ev_connect_charger": {
         "name": "EV connect charger"
+      }
+    },
+    "number": {
+      "ev_target_soc": {
+        "name": "EV target SoC"
       }
     }
   }

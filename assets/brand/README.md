@@ -1,10 +1,10 @@
 # PowerPilot brand icon
 
-Source and rendered brand icon for the integration.
+Master and rendered brand icon for the integration.
 
 | File | Size | Use |
 |------|------|-----|
-| `icon.svg` | vector | editable source |
+| `icon-source.png` | 960×960 | master artwork |
 | `icon.png` | 256×256 | Home Assistant brands `icon.png` |
 | `icon@2x.png` | 512×512 | Home Assistant brands `icon@2x.png` |
 
@@ -13,12 +13,12 @@ green charge bars) and a power plug, wrapped in green refresh-cycle arrows and a
 green upward trend arrow — home energy being optimised under a dynamic tariff.
 Transparent background, no tile.
 
-## Re-rendering after editing `icon.svg`
+## Re-rendering from the master
 
 ```bash
 cd assets/brand
-rsvg-convert -w 256 -h 256 icon.svg -o icon.png
-rsvg-convert -w 512 -h 512 icon.svg -o icon@2x.png
+magick icon-source.png -filter Lanczos -resize 256x256 -strip icon.png
+magick icon-source.png -filter Lanczos -resize 512x512 -strip icon@2x.png
 ```
 
 ## Showing it on the HACS / integrations page

@@ -33,7 +33,6 @@ from ..const import (
     CONF_EV_BATTERY_KWH,
     CONF_EV_CALENDAR,
     CONF_EV_CALENDAR_KEYWORD,
-    CONF_EV_CHARGER_CONNECTED_SENSOR,
     CONF_EV_CHARGER_KW,
     CONF_EV_CHARGER_PHASE,
     CONF_EV_CHARGER_PHASES,
@@ -43,12 +42,12 @@ from ..const import (
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_ODOMETER_SENSOR,
     CONF_EV_SOC_SENSOR,
-    CONF_EV_TARGET_SOC_SENSOR,
     DEFAULTS,
     DOMAIN,
     DRAIN_HORIZON_HOURS,
     DRAIN_LEARN_DAYS,
     EV_RESERVE_SOC,
+    EV_TARGET_SOC_DEFAULT,
     MAX_CAPACITY_SAMPLES,
     MIN_CAPACITY_SAMPLES,
     MIN_SESSION_KWH,
@@ -62,9 +61,8 @@ from .base import PowerPilotModule
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_TARGET_SOC = 80.0
+DEFAULT_TARGET_SOC = EV_TARGET_SOC_DEFAULT
 HOME_STATES = {"home", "on", "true", "connected"}
-CONNECTED_STATES = {"on", "true", "connected", "home", "plugged", "plugged_in"}
 CHARGING_STATES = {"on", "true", "charging"}
 
 # How far ahead calendar events are read (matches the optimizer horizon cap).
@@ -222,14 +220,19 @@ class EVModule(PowerPilotModule):
     def __init__(self, hass, coordinator) -> None:
         super().__init__(hass, coordinator)
         self._soc: float | None = None
-        self._target_soc: float | None = None
         self._energy_added: float | None = None
-        self._connected: bool | None = None
+        self._home: bool | None = None
         self._charging: bool | None = None
-        self._available: bool = False
         self._targets: list[EVChargeTarget] = []
         self._forced_hours: set[datetime] = set()
+        # Hours the car is known to be away from home (calendar events with a
+        # non-home ``location``) — the only source of *unavailability*; absent
+        # that, every forecast hour is assumed chargeable.
+        self._unavailable_hours: set[datetime] = set()
         self._request = EVRequest()
+        # The integration's own writable target-SoC entity (see number.py).
+        # Set by NumberEntity.async_added_to_hass; read-only from here.
+        self.target_soc_entity = None
         # Learned battery capacity (kWh) — see _maybe_learn_capacity.
         self._capacity: float | None = None
         self._capacity_samples: list[float] = []
@@ -245,6 +248,12 @@ class EVModule(PowerPilotModule):
     @property
     def enabled(self) -> bool:
         return bool(self.config.get(CONF_EV_ENABLED))
+
+    @property
+    def target_soc(self) -> float | None:
+        """Charge target (%) from the integration's own number entity."""
+        entity = self.target_soc_entity
+        return entity.native_value if entity is not None else None
 
     async def async_setup(self) -> None:
         """Load the learned capacity, seed it from legacy config, refine it."""
@@ -286,17 +295,13 @@ class EVModule(PowerPilotModule):
         # the sensor is unavailable the SoC forecast simply isn't drawn (same
         # hard rule as the house battery), rather than projecting from a guess.
         self._soc = self._read_float(self.config.get(CONF_EV_SOC_SENSOR))
-        self._target_soc = self._read_float(self.config.get(CONF_EV_TARGET_SOC_SENSOR))
         self._energy_added = self._read_float(
             self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
         )
-        self._connected = self._read_bool(
-            self.config.get(CONF_EV_CHARGER_CONNECTED_SENSOR), CONNECTED_STATES
-        )
+        self._home = self._read_home(self.config.get(CONF_EV_LOCATION_SENSOR))
         self._charging = self._read_bool(
             self.config.get(CONF_EV_CHARGING_SENSOR), CHARGING_STATES
         )
-        self._available = self._compute_available()
 
         await self._async_load_calendar()
         await self._maybe_learn()
@@ -307,17 +312,18 @@ class EVModule(PowerPilotModule):
             f"({self._capacity_source or 'brak'}, {len(self._capacity_samples)} sesji), "
             f"zużycie={self._kwh_per_km if self._kwh_per_km is not None else '–'} kWh/km "
             f"({self._drain_profile.observed_days} dni), "
-            f"cel={self._target_soc if self._target_soc is not None else '–'}%, "
-            f"podłączony={self._connected}, ładuje={self._charging}, "
-            f"dostępny={self._available}, deadline'y={len(self._targets)}, "
+            f"cel={self.target_soc if self.target_soc is not None else '–'}%, "
+            f"w domu={self._home}, ładuje={self._charging}, "
+            f"godziny niedostępne={len(self._unavailable_hours)}, "
+            f"deadline'y={len(self._targets)}, "
             f"godziny ręczne={len(self._forced_hours)}.",
             extra={
                 "soc": self._soc,
-                "target_soc": self._target_soc,
+                "target_soc": self.target_soc,
                 "energy_added_kwh": self._energy_added,
-                "connected": self._connected,
+                "home": self._home,
                 "charging": self._charging,
-                "available": self._available,
+                "unavailable_hours": len(self._unavailable_hours),
                 "targets": len(self._targets),
                 "forced_hours": len(self._forced_hours),
             },
@@ -476,21 +482,6 @@ class EVModule(PowerPilotModule):
             return None
         return str(state.state).lower() in HOME_STATES
 
-    def _compute_available(self) -> bool:
-        """Whether the EV can charge now.
-
-        The plug status is the stronger signal (a connected charger means the
-        car is home and ready); when configured it decides on its own. Otherwise
-        the location tracker decides. With neither configured we assume the car
-        is available.
-        """
-        if self._connected is not None:
-            return self._connected
-        home = self._read_home(self.config.get(CONF_EV_LOCATION_SENSOR))
-        if home is not None:
-            return home
-        return True
-
     # ------------------------------------------------------------------
     # Calendar
     # ------------------------------------------------------------------
@@ -498,6 +489,7 @@ class EVModule(PowerPilotModule):
         """Parse the configured calendar into deadline targets + forced windows."""
         self._targets = []
         self._forced_hours = set()
+        self._unavailable_hours = set()
 
         cal_entity = self.config.get(CONF_EV_CALENDAR)
         if not cal_entity:
@@ -513,6 +505,24 @@ class EVModule(PowerPilotModule):
 
         for event in events:
             self._parse_event(event, keyword, now)
+            # Any event with a non-home location — regardless of the charging
+            # keyword — means the car is away for its span, so those hours
+            # can't be planned into (overrides forced/deadline windows too:
+            # a self-contradictory calendar just means no charging happens).
+            self._mark_unavailable(event, now)
+
+    def _mark_unavailable(self, event: dict, now: datetime) -> None:
+        location = str(event.get("location") or "").strip()
+        if not location or location.lower() == "dom":
+            return
+        bounds = self._event_bounds(event)
+        if bounds is None:
+            return
+        start, end = bounds
+        hour = max(start, now).replace(minute=0, second=0, microsecond=0)
+        while hour < end:
+            self._unavailable_hours.add(hour)
+            hour += timedelta(hours=1)
 
     async def _async_fetch_events(
         self, cal_entity: str, start: datetime, end: datetime
@@ -613,21 +623,17 @@ class EVModule(PowerPilotModule):
         # is not actionable (battery_kwh = 0 → EVRequest.is_actionable is False).
         battery_kwh = self._capacity or 0.0
 
-        available_hours = (
-            {
-                slot.start.replace(minute=0, second=0, microsecond=0)
-                for slot in forecast.slots
-            }
-            if self._available
-            else set()
-        )
+        available_hours = {
+            slot.start.replace(minute=0, second=0, microsecond=0)
+            for slot in forecast.slots
+        } - self._unavailable_hours
 
         # Calendar plans take over when present; otherwise size routine charging.
         if self._targets or self._forced_hours:
             required_kwh = 0.0
         else:
             target_soc = (
-                self._target_soc if self._target_soc is not None else DEFAULT_TARGET_SOC
+                self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
             )
             current_soc = self._soc if self._soc is not None else target_soc
             current_energy = current_soc / 100.0 * battery_kwh
@@ -668,31 +674,40 @@ class EVModule(PowerPilotModule):
             or bool(self._request.targets)
             or bool(self._request.forced_hours)
         )
-        if not self._available and need:
+        # "Plug in" only makes sense when the car is actually home and idle —
+        # away from home there's nothing the user can do about it right now.
+        if need and self._home is not False and self._charging is False:
             reminders.append("Podłącz samochód — zaplanowane jest ładowanie EV.")
-        # Plan-vs-reality: a forced window is due this hour but the charger is idle.
+        # Plan-vs-reality: a forced window is due this hour but the charger is
+        # idle, or it's charging somewhere other than home (doesn't realize
+        # the home charging plan the optimizer priced in).
         now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
         due_now = (
             now_hour in self._request.forced_hours
             and now_hour in self._request.available_hours
         )
-        if due_now and self._connected and self._charging is False:
+        if due_now and self._charging is False:
             reminders.append(
                 "EV powinien się teraz ładować (okno z kalendarza), "
                 "ale ładowarka nie pobiera mocy."
+            )
+        elif due_now and self._charging and self._home is False:
+            reminders.append(
+                "EV ładuje się poza domem — to nie jest zaplanowana sesja z prognozy."
             )
         return reminders
 
     def plan_summary(self) -> dict:
         """Serialisable EV plan/telemetry snapshot for the panel."""
+        now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
         return {
             "enabled": self.enabled,
-            "available": self._available,
+            "available": now_hour not in self._unavailable_hours,
+            "home": self._home,
             "soc": self._soc,
-            "target_soc": self._target_soc,
+            "target_soc": self.target_soc,
             "soc_limit": self.soc_limit_now(),
             "energy_added_kwh": self._energy_added,
-            "connected": self._connected,
             "charging": self._charging,
             "charger_power_kw": self.charger_power_kw,
             "capacity_kwh": self._capacity,
@@ -752,7 +767,7 @@ class EVModule(PowerPilotModule):
 
         A bare calendar window means "charge with no limit" → 100 %. With
         deadline targets the soonest upcoming one sets the ceiling. Otherwise the
-        car's own target sensor (or the built-in default) applies.
+        integration's own target-SoC entity (or the built-in default) applies.
         """
         if not self.enabled:
             return None
@@ -764,7 +779,7 @@ class EVModule(PowerPilotModule):
             return upcoming[0].target_soc
         if self._forced_hours:
             return 100.0
-        return self._target_soc if self._target_soc is not None else DEFAULT_TARGET_SOC
+        return self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
 
     @property
     def charger_power_kw(self) -> float:
@@ -778,8 +793,8 @@ class EVModule(PowerPilotModule):
         return self._soc
 
     @property
-    def connected(self) -> bool | None:
-        return self._connected
+    def home(self) -> bool | None:
+        return self._home
 
     @property
     def charging(self) -> bool | None:

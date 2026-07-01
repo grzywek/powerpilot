@@ -29,7 +29,6 @@ from .const import (
     CONF_DISCHARGE_EFFICIENCY,
     CONF_EV_CALENDAR,
     CONF_EV_CALENDAR_KEYWORD,
-    CONF_EV_CHARGER_CONNECTED_SENSOR,
     CONF_EV_CHARGER_KW,
     CONF_EV_CHARGER_PHASES,
     CONF_EV_CHARGE_METER_SENSOR,
@@ -39,7 +38,6 @@ from .const import (
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_ODOMETER_SENSOR,
     CONF_EV_SOC_SENSOR,
-    CONF_EV_TARGET_SOC_SENSOR,
     CONF_GRID_DISCONNECT_SOC,
     CONF_GRID_IMPORT_SENSOR,
     CONF_INVERTER_MAX_CHARGE_KW,
@@ -237,15 +235,8 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Required(CONF_EV_ENABLED, default=d(CONF_EV_ENABLED)): selector.BooleanSelector(),
             vol.Optional(CONF_EV_SOC_SENSOR, default=d(CONF_EV_SOC_SENSOR) or vol.UNDEFINED): _entity(["sensor", "input_number", "number"]),
             vol.Optional(
-                CONF_EV_TARGET_SOC_SENSOR, default=d(CONF_EV_TARGET_SOC_SENSOR) or vol.UNDEFINED
-            ): _entity(["sensor", "input_number", "number"]),
-            vol.Optional(
                 CONF_EV_ODOMETER_SENSOR, default=d(CONF_EV_ODOMETER_SENSOR) or vol.UNDEFINED
             ): _entity(["sensor", "input_number", "number"]),
-            vol.Optional(
-                CONF_EV_CHARGER_CONNECTED_SENSOR,
-                default=d(CONF_EV_CHARGER_CONNECTED_SENSOR) or vol.UNDEFINED,
-            ): _entity(["binary_sensor", "switch", "input_boolean"]),
             vol.Optional(
                 CONF_EV_CHARGING_SENSOR, default=d(CONF_EV_CHARGING_SENSOR) or vol.UNDEFINED
             ): _entity(["binary_sensor", "switch", "sensor"]),

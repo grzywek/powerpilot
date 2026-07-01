@@ -50,13 +50,11 @@
         "data": {
           "ev_enabled": "Włącz optymalizację EV",
           "ev_soc_sensor": "Sensor SoC EV",
-          "ev_target_soc_sensor": "Sensor docelowego SoC EV",
           "ev_odometer_sensor": "Przebieg EV (km, rosnący)",
-          "ev_charger_connected_sensor": "Ładowarka podłączona (wpięta)",
-          "ev_charging_sensor": "Ładuje teraz",
+          "ev_charging_sensor": "Ładuje teraz (do wykrywania sesji zgodnej z planem i przypomnień)",
           "ev_energy_added_sensor": "Energia dodana w sesji (kWh)",
           "ev_charge_meter_sensor": "Licznik ładowania EV (od strony sieci, kWh) — wykluczony z profilu zużycia",
-          "ev_location_sensor": "Lokalizacja EV (dom/poza domem)",
+          "ev_location_sensor": "Lokalizacja EV — dom/poza domem (do przypomnień i wykrywania ładowania poza domem)",
           "ev_calendar": "Kalendarz ładowania",
           "ev_calendar_keyword": "Słowo kluczowe wydarzenia (np. Kotek)",
           "ev_range_km": "Zasięg na pełnej baterii (km)",
@@ -150,13 +148,11 @@
         "data": {
           "ev_enabled": "Włącz optymalizację EV",
           "ev_soc_sensor": "Sensor SoC EV",
-          "ev_target_soc_sensor": "Sensor docelowego SoC EV",
           "ev_odometer_sensor": "Przebieg EV (km, rosnący)",
-          "ev_charger_connected_sensor": "Ładowarka podłączona (wpięta)",
-          "ev_charging_sensor": "Ładuje teraz",
+          "ev_charging_sensor": "Ładuje teraz (do wykrywania sesji zgodnej z planem i przypomnień)",
           "ev_energy_added_sensor": "Energia dodana w sesji (kWh)",
           "ev_charge_meter_sensor": "Licznik ładowania EV (od strony sieci, kWh) — wykluczony z profilu zużycia",
-          "ev_location_sensor": "Lokalizacja EV (dom/poza domem)",
+          "ev_location_sensor": "Lokalizacja EV — dom/poza domem (do przypomnień i wykrywania ładowania poza domem)",
           "ev_calendar": "Kalendarz ładowania",
           "ev_calendar_keyword": "Słowo kluczowe wydarzenia (np. Kotek)",
           "ev_range_km": "Zasięg na pełnej baterii (km)",
@@ -266,6 +262,11 @@
       },
       "ev_connect_charger": {
         "name": "EV podłącz ładowarkę"
+      }
+    },
+    "number": {
+      "ev_target_soc": {
+        "name": "Docelowy SoC EV"
       }
     }
   }

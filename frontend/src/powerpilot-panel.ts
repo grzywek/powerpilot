@@ -36,10 +36,10 @@ interface Plan {
 interface EVPlan {
   enabled: boolean;
   available: boolean;
+  home: boolean | null;
   soc: number | null;
   target_soc: number | null;
   energy_added_kwh: number | null;
-  connected: boolean | null;
   charging: boolean | null;
   soc_limit: number | null;
   charger_power_kw: number | null;
@@ -2110,7 +2110,7 @@ export class PowerPilotPanel extends LitElement {
             </div>`
           : nothing}
         <div class="check">
-          Podłączony: <b>${this._evBool(ev.connected, "tak", "nie")}</b> ·
+          W domu: <b>${this._evBool(ev.home, "tak", "nie")}</b> ·
           Ładuje: <b>${this._evBool(ev.charging, "tak", "nie")}</b> ·
           Dostępny: <b>${ev.available ? "tak" : "nie"}</b>
         </div>

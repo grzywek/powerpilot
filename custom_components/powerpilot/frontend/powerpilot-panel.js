@@ -1327,7 +1327,7 @@ rect.legend-mouseover-inactive,
               ${e.drain_next24_kwh!=null?B`<span class="muted">prognoza 24 h: ${e.drain_next24_kwh.toFixed(1)} kWh (${e.drain_days} dni nauki)</span>`:U}
             </div>`:U}
         <div class="check">
-          Podłączony: <b>${this._evBool(e.connected,"tak","nie")}</b> ·
+          W domu: <b>${this._evBool(e.home,"tak","nie")}</b> ·
           Ładuje: <b>${this._evBool(e.charging,"tak","nie")}</b> ·
           Dostępny: <b>${e.available?"tak":"nie"}</b>
         </div>

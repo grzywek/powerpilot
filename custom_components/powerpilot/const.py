@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "powerpilot"
-PLATFORMS: Final = ["sensor", "binary_sensor"]
+PLATFORMS: Final = ["sensor", "binary_sensor", "number"]
 
 # ---------------------------------------------------------------------------
 # Config / options keys
@@ -91,6 +91,10 @@ ESTIMATE_WEEKLY_WEIGHTS: Final = (0.5, 0.3, 0.2)
 # --- EV ---
 CONF_EV_ENABLED: Final = "ev_enabled"
 CONF_EV_SOC_SENSOR: Final = "ev_soc_sensor"
+# Live "is the car home" tracker — feeds the plug-in reminder and the
+# plan-vs-reality "charging away from home" note. It no longer gates whether
+# the optimizer is allowed to plan charging (see CONF_EV_CALENDAR: calendar
+# events with a non-home ``location`` are the only source of *unavailability*).
 CONF_EV_LOCATION_SENSOR: Final = "ev_location_sensor"
 CONF_EV_RANGE_KM: Final = "ev_range_km"  # km on a full charge
 CONF_EV_BATTERY_KWH: Final = "ev_battery_kwh"
@@ -99,10 +103,8 @@ CONF_EV_CHARGER_KW: Final = "ev_charger_kw"  # per-phase draw (e.g. 3.5)
 CONF_EV_CHARGER_PHASE: Final = "ev_charger_phase"  # shared phase index 1..3
 CONF_EV_CHARGER_PHASES: Final = "ev_charger_phases"  # number of phases the charger uses (1 or 3)
 # Charger / charging telemetry. All optional; each has a concrete planning use.
-CONF_EV_CHARGER_CONNECTED_SENSOR: Final = "ev_charger_connected_sensor"  # plugged in (bool) → gates availability
 CONF_EV_CHARGING_SENSOR: Final = "ev_charging_sensor"  # actively drawing (bool) → plan-vs-reality reminders
 CONF_EV_ENERGY_ADDED_SENSOR: Final = "ev_energy_added_sensor"  # session kWh (total_increasing) → delivered so far
-CONF_EV_TARGET_SOC_SENSOR: Final = "ev_target_soc_sensor"  # car's configured target SoC % → default charge target
 CONF_EV_ODOMETER_SENSOR: Final = "ev_odometer_sensor"  # total km (increasing) → learn kWh/km + drain profile
 # Grid-side EV charging energy meter — when the charger draws through the house
 # meter, its historical charging is in the learned consumption profile. PowerPilot
@@ -117,6 +119,14 @@ CONF_EV_CHARGE_METER_SENSOR: Final = "ev_charge_meter_sensor"
 # forced window (charge at full power for the event's hours, no SoC limit).
 CONF_EV_CALENDAR: Final = "ev_calendar"
 CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # event-summary trigger word (e.g. "Kotek")
+
+# --- EV target SoC (own writable entity, not a config field) ---
+# PowerPilot exposes its own ``number.*`` entity for the charge target instead
+# of pointing at a car-provided sensor — most cars don't expose one in HA, and
+# a writable helper is easier to adjust from the dashboard than the options
+# flow. Calendar deadline targets / forced windows still override it.
+NUMBER_EV_TARGET_SOC: Final = "ev_target_soc"
+EV_TARGET_SOC_DEFAULT: Final = 80.0
 
 # --- EV battery capacity (learned, not configured) ---
 # Capacity is derived from charging sessions: kWh added ÷ SoC gained × 100. The

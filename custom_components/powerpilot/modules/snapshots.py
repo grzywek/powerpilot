@@ -136,6 +136,19 @@ class SnapshotStore:
             return seq[idx]
         return None
 
+    def origin_at(self, hour: datetime, lead_hours: int = 0) -> str | None:
+        """Run timestamp (vintage key) of the plan that fed ``hour``'s forecast.
+
+        Mirrors the lead-aware vintage selection used to fill the forecast side
+        (:meth:`run0_at` for lead 0, :meth:`nearest_run_at` for lead N), so the
+        UI can label each hour's forecast with *when* the plan behind it was
+        made. Returns ``None`` when no vintage backs the hour.
+        """
+        if lead_hours > 0:
+            return self.nearest_run_at(hour - timedelta(hours=lead_hours))
+        key = self._key(hour)
+        return key if key in self._records else None
+
     def run0_at(self, run_hour: datetime, key: str) -> Any | None:
         """Index-0 value of the vintage *recorded at* ``run_hour`` (the plan made
         that hour, whose first slot is that hour).

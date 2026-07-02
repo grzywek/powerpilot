@@ -143,6 +143,37 @@ class Decision:
             "trace": dict(self.trace),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Decision":
+        """Rebuild a decision from :meth:`as_dict` output.
+
+        Used to restore the *committed* current-hour decision across a restart,
+        so the active hour keeps its already-applied action instead of being
+        re-planned mid-hour.
+        """
+        return cls(
+            start=datetime.fromisoformat(data["start"]),
+            inverter_mode=data.get("inverter_mode", InverterMode.PASSTHROUGH),
+            charge_power=data.get("charge_power", ChargePower.FULL),
+            grid_connected=bool(data.get("grid_connected", True)),
+            ev_charge=bool(data.get("ev_charge", False)),
+            ev_charge_kwh=float(data.get("ev_charge_kwh") or 0.0),
+            ev_soc=data.get("ev_soc"),
+            battery_soc=float(data.get("battery_soc") or 0.0),
+            battery_energy_cost=float(data.get("battery_energy_cost") or 0.0),
+            grid_buy_kwh=float(data.get("grid_buy_kwh") or 0.0),
+            battery_charge_kwh=float(data.get("battery_charge_kwh") or 0.0),
+            battery_discharge_kwh=float(data.get("battery_discharge_kwh") or 0.0),
+            charge_power_kw=float(data.get("charge_power_kw") or 0.0),
+            hour_cost=float(data.get("hour_cost") or 0.0),
+            energy_cost=float(data.get("energy_cost") or 0.0),
+            distribution_cost=float(data.get("distribution_cost") or 0.0),
+            battery_use_cost=float(data.get("battery_use_cost") or 0.0),
+            fixed_cost=float(data.get("fixed_cost") or 0.0),
+            reminders=list(data.get("reminders") or []),
+            trace=dict(data.get("trace") or {}),
+        )
+
 
 @dataclass
 class Forecast:

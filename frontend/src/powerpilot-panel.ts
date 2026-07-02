@@ -145,6 +145,8 @@ interface SeriesHour {
   partial_until?: string;
   realized: TipSide | null;
   forecast: TipSide | null;
+  // When the forecast side was made (ISO), so the tooltip can show the vintage.
+  forecast_origin?: string | null;
   battery_charge_kwh: number | null;
   battery_discharge_kwh: number | null;
   charge_power_kw: number | null;
@@ -1343,8 +1345,24 @@ export class PowerPilotPanel extends LitElement {
           const sides: { label: string; g: TipSide }[] = [];
           if (h.realized)
             sides.push({ label: h.partial ? "realne (do teraz)" : "realne", g: h.realized });
-          if (h.forecast)
-            sides.push({ label: h.partial ? "prognoza (godz.)" : "prognoza", g: h.forecast });
+          if (h.forecast) {
+            // Surface the vintage the forecast came from (date + hour) so the
+            // forecast-lead view shows which plan each prognoza line reflects.
+            const originStr = h.forecast_origin
+              ? new Date(h.forecast_origin).toLocaleString("pl-PL", {
+                  day: "2-digit",
+                  month: "2-digit",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })
+              : null;
+            const fcLabel =
+              (h.partial ? "prognoza (godz.)" : "prognoza") +
+              (originStr
+                ? `<div style="font-weight:400;opacity:0.6;font-size:11px">z ${originStr}</div>`
+                : "");
+            sides.push({ label: fcLabel, g: h.forecast });
+          }
           if (!sides.length) return "";
 
           const sideVal = (g: TipSide, key: string): number | null => {

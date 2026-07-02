@@ -110,6 +110,22 @@ def test_lead_value_at_picks_older_vintage() -> None:
     assert store.lead_value_at(base + timedelta(hours=1), "soc", 2) is None
 
 
+def test_origin_at_reports_vintage_run_time() -> None:
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    old = _rec(base - timedelta(hours=3))
+    fresh = _rec(base)
+    store.add(old)
+    store.add(fresh)
+
+    # lead 0 needs a vintage recorded exactly at the hour.
+    assert store.origin_at(base, 0) == store._key(base)
+    # No vintage at base-1h → lead 0 origin is unknown.
+    assert store.origin_at(base - timedelta(hours=1), 0) is None
+    # lead 3 for `base` picks the plan current at base-3h == `old`.
+    assert store.origin_at(base, 3) == store._key(base - timedelta(hours=3))
+
+
 def test_serialisation_roundtrip() -> None:
     store = SnapshotStore()
     base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)

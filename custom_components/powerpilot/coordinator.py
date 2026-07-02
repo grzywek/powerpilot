@@ -116,6 +116,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.snapshots = SnapshotStore()
         self._snapshot_store: Store | None = None
         self._last_snapshot_hour: datetime | None = None
+        # Frozen decision for the clock hour we are in. Once committed, a mid-hour
+        # re-run (a restart, a refresh) reuses it instead of re-deciding the active
+        # hour — so the applied inverter mode can't flip mid-hour and the hour's
+        # recorded forecast stays intact. Released automatically at the boundary.
+        self._committed_hour: datetime | None = None
+        self._committed_decision: Decision | None = None
 
     @callback
     def async_start_hour_boundary_updates(self) -> None:
@@ -175,11 +181,45 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # already stored — making "Cena w baterii" drop to ~0 until it rebuilds).
         if stored:
             self._battery_energy_cost = float(stored.get("battery_energy_cost") or 0.0)
+            # Restore the once-per-hour snapshot guard and the frozen active-hour
+            # decision so a mid-hour restart keeps the committed action and leaves
+            # the already-recorded vintage untouched.
+            self._last_snapshot_hour = (
+                dt_util.parse_datetime(stored.get("last_snapshot_hour") or "")
+                or None
+            )
+            committed_hour = stored.get("committed_hour")
+            committed_decision = stored.get("committed_decision")
+            if committed_hour and committed_decision:
+                self._committed_hour = dt_util.parse_datetime(committed_hour)
+                try:
+                    self._committed_decision = Decision.from_dict(committed_decision)
+                except (KeyError, ValueError, TypeError):
+                    self._committed_hour = None
+                    self._committed_decision = None
 
     def _snapshots_payload(self) -> dict:
         return {
             **self.snapshots.to_dict(),
             "battery_energy_cost": round(self._battery_energy_cost, 6),
+            # Persisted so a restart within the same hour doesn't re-record the
+            # active hour's vintage (which would overwrite the charging plan with
+            # a restart-time re-plan and corrupt the forecast statistics).
+            "last_snapshot_hour": (
+                self._last_snapshot_hour.isoformat()
+                if self._last_snapshot_hour
+                else None
+            ),
+            # The frozen active-hour decision, so the applied action survives a
+            # mid-hour restart instead of being re-planned.
+            "committed_hour": (
+                self._committed_hour.isoformat() if self._committed_hour else None
+            ),
+            "committed_decision": (
+                self._committed_decision.as_dict()
+                if self._committed_decision
+                else None
+            ),
         }
 
     async def _async_save_snapshots(self) -> None:
@@ -200,6 +240,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             await self._snapshot_store.async_remove()
         self.snapshots = SnapshotStore()
         self._last_snapshot_hour = None
+        self._committed_hour = None
+        self._committed_decision = None
         self._battery_energy_cost = 0.0
         self.events.clear()
         await self.registry.async_clear_all()
@@ -286,6 +328,20 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         battery = self._build_battery(soc)
         optimizer = self._build_optimizer()
         plan = optimizer.optimize(forecast, battery, ev_request, reminders)
+
+        # Freeze the active clock hour. The optimizer always re-plans the whole
+        # horizon from the live SoC; for the *current* hour that means a restart
+        # or refresh can flip the already-applied action (charge → passthrough)
+        # partway through the hour and corrupt that hour's recorded forecast. Pin
+        # the first decision to the one committed when the hour began; future
+        # hours keep re-planning from reality.
+        cur_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        if plan.decisions and plan.decisions[0].start == cur_hour:
+            if self._committed_hour == cur_hour and self._committed_decision is not None:
+                plan.decisions[0] = self._committed_decision
+            else:
+                self._committed_hour = cur_hour
+                self._committed_decision = plan.decisions[0]
 
         current = self.current_decision(plan)
         if current is not None:
@@ -1426,6 +1482,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 return sn.lead_value_at(hour, key, lead)
             return sn.run0_at(hour, key)
 
+        def _fc_origin(hour: datetime) -> str | None:
+            """When the forecast shown for ``hour`` was made (vintage run time)."""
+            return sn.origin_at(hour, lead)
+
         # ----- Past hours -----
         h = past_start
         while h < past_end:
@@ -1525,6 +1585,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "is_past": True,
                     "realized": realized_side,
                     "forecast": forecast_side,
+                    "forecast_origin": _fc_origin(h) if forecast_side else None,
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
@@ -1689,6 +1750,17 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "partial_until": real_now.isoformat(),
                     "realized": realized_side,
                     "forecast": forecast_side,
+                    "forecast_origin": (
+                        sn.nearest_run_at(now)
+                        if time_travel
+                        else (
+                            self.data.created_at.isoformat()
+                            if self.data and self.data.created_at
+                            else sn.origin_at(now, 0)
+                        )
+                    )
+                    if forecast_side
+                    else None,
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
@@ -1823,6 +1895,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                                 ev_soc_start=prev_ev_soc,
                                 ev_soc_end=ev_soc,
                             ),
+                            # Future side comes from the vintage current at teraz.
+                            "forecast_origin": run_key,
                             "buy_price": buy,
                             "distribution_price_kwh": dist,
                             "total_price_kwh": total,
@@ -1885,6 +1959,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                             soc_end=decision.battery_soc,
                             ev_soc_start=prev_ev_soc,
                             ev_soc_end=decision.ev_soc,
+                        ),
+                        # Future side comes from the current live plan.
+                        "forecast_origin": (
+                            plan.created_at.isoformat() if plan.created_at else None
                         ),
                         "buy_price": slot.buy_price,
                         "distribution_price_kwh": slot.distribution_price_kwh,

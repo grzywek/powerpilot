@@ -72,7 +72,6 @@ async def ws_forecasts(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("past_hours", default=24): int,
         vol.Optional("start"): str,
         vol.Optional("end"): str,
-        vol.Optional("as_of"): str,
         vol.Optional("forecast_lead", default=0): int,
     }
 )
@@ -86,7 +85,6 @@ async def ws_series(hass: HomeAssistant, connection, msg) -> None:
         past_hours=int(msg.get("past_hours", 24)),
         start=msg.get("start"),
         end=msg.get("end"),
-        as_of=msg.get("as_of"),
         forecast_lead=int(msg.get("forecast_lead", 0)),
     )
     connection.send_result(msg["id"], result)

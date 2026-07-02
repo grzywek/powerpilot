@@ -23,15 +23,17 @@ magick icon-source.png -filter Lanczos -resize 512x512 -strip icon@2x.png
 
 ## Showing it on the HACS / integrations page
 
-Home Assistant serves integration icons from the
-[`home-assistant/brands`](https://github.com/home-assistant/brands) repository,
-not from this repo. To make the icon appear next to **PowerPilot** in
-*Settings → Devices & Services* and in HACS, open a PR to that repo adding:
+Home Assistant 2026.3 and newer loads custom integration brand images from a
+local `brand/` directory inside the integration:
 
 ```
-custom_integrations/powerpilot/icon.png      (this icon.png)
-custom_integrations/powerpilot/icon@2x.png   (this icon@2x.png)
+custom_components/powerpilot/brand/icon.png      (this icon.png)
+custom_components/powerpilot/brand/icon@2x.png   (this icon@2x.png)
 ```
+
+Those files are packaged with the custom component so the icon appears next to
+**PowerPilot** in *Settings → Devices & Services* without submitting a separate
+brands repository PR.
 
 The sidebar panel keeps using `mdi:home-battery` (set in `panel.py`); the
 built-in custom panel takes an MDI name, not a bitmap.

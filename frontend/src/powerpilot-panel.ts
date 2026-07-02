@@ -403,9 +403,9 @@ export class PowerPilotPanel extends LitElement {
 
   /** Active range preset. */
   @state() private _rangeMode: RangeMode = "3d";
-  /** Anchor instant. Null = live (real now). When set (to a past datetime) it is
-   *  both the virtual "teraz" and, via its local day, the window's start — so the
-   *  chart is rendered as it stood then (time-travel). */
+  /** Selected day. Null = today (live). When set (to a past day) it is the
+   *  window's start; the chart shows that day's realized data plus, on the
+   *  right, the current plan's forecast horizon. */
   @state() private _anchor: Date | null = null;
   /** Selected forecast lead (hours) for the past "prognoza" comparison. */
   @state() private _forecastLead = 0;
@@ -486,9 +486,8 @@ export class PowerPilotPanel extends LitElement {
           past_hours: pastHours,
           start: start.toISOString(),
           end: end.toISOString(),
-          // Time-travel: render the chart as of the anchored instant (omitted
-          // when live). `forecast_lead` picks the past "prognoza" comparison.
-          ...(this._anchor ? { as_of: this._anchor.toISOString() } : {}),
+          // `forecast_lead` picks how far out the past "prognoza" comparison is
+          // read from (0 = the freshest plan made as each hour began).
           forecast_lead: this._forecastLead,
         }),
       ]);
@@ -513,13 +512,12 @@ export class PowerPilotPanel extends LitElement {
     this._refresh();
   }
 
-  /** Move the anchored instant by ±1 day (the « / » buttons), keeping the hour.
-   *  Clamped to the present — the future can't be time-traveled to. */
+  /** Move the selected day by ±1 (the « / » buttons). Picking today or later
+   *  returns to live mode. */
   private _shiftDay(delta: number): void {
-    const base = new Date(this._anchor ?? new Date());
+    const base = this._midnight(this._anchor ?? new Date());
     base.setDate(base.getDate() + delta);
-    const nowMs = Date.now();
-    this._anchor = base.getTime() >= nowMs ? null : base;
+    this._anchor = base.getTime() >= this._midnight(new Date()).getTime() ? null : base;
     this._refresh();
   }
 
@@ -531,11 +529,11 @@ export class PowerPilotPanel extends LitElement {
   private _onDatePick(ev: Event): void {
     const value = (ev.target as HTMLInputElement).value;
     if (!value) return;
-    // datetime-local yields "YYYY-MM-DDTHH:mm" in local time. Anchoring at/after
-    // the present returns to live mode (time-travel is past-only).
-    const picked = new Date(value);
+    // <input type="date"> yields "YYYY-MM-DD"; read it as local midnight.
+    const picked = new Date(value + "T00:00");
     if (isNaN(picked.getTime())) return;
-    this._anchor = picked.getTime() >= Date.now() ? null : picked;
+    this._anchor =
+      picked.getTime() >= this._midnight(new Date()).getTime() ? null : picked;
     this._refresh();
   }
 
@@ -819,33 +817,27 @@ export class PowerPilotPanel extends LitElement {
     const lastDay = new Date(end.getTime() - 24 * 3600 * 1000);
     const fmtDay = (d: Date) =>
       d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit", year: "numeric" });
-    // Picker shows the anchored instant (or "now" when live), formatted in local
-    // time as datetime-local expects: "YYYY-MM-DDTHH:mm".
+    // Picker shows the selected day (or today when live) as <input type="date">
+    // expects: "YYYY-MM-DD" in local time.
     const pad = (n: number) => String(n).padStart(2, "0");
-    const dateTimeValue = (() => {
+    const dayValue = (() => {
       const d = this._anchor ?? new Date();
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
-        d.getHours()
-      )}:${pad(d.getMinutes())}`;
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     })();
-    // Upper bound: the present (time-travel is past-only).
-    const nowMax = (() => {
+    // Upper bound: today (the future has no realized data).
+    const todayMax = (() => {
       const d = new Date();
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
-        d.getHours()
-      )}:${pad(d.getMinutes())}`;
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     })();
-    const fmtTime = (d: Date) =>
-      d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
     return html`
       <div class="card nav-card">
         <div class="nav-row">
           <button class="nav-btn" @click=${() => this._shiftDay(-1)} title="Poprzedni dzień">«</button>
           <input
-            type="datetime-local"
+            type="date"
             class="nav-date"
-            .value=${dateTimeValue}
-            max=${nowMax}
+            .value=${dayValue}
+            max=${todayMax}
             @change=${this._onDatePick}
           />
           <button class="nav-btn" @click=${() => this._shiftDay(1)} title="Następny dzień">»</button>
@@ -881,7 +873,7 @@ export class PowerPilotPanel extends LitElement {
           <strong>${fmtDay(lastDay)}</strong>
           ${isLive
             ? html`<span class="muted"> · tryb live</span>`
-            : html`<span class="muted"> · teraz: ${fmtTime(this._anchor!)}</span>`}
+            : html`<span class="muted"> · wybrany dzień</span>`}
         </div>
       </div>
     `;
@@ -959,9 +951,9 @@ export class PowerPilotPanel extends LitElement {
   private _mountOrUpdateCharts(): void {
     const s = this._series;
     if (!s || !s.hours?.length) {
-      // No data for this window (e.g. a future day beyond the plan horizon, or a
-      // time-traveled instant with no recorded plan): tear down any previously
-      // rendered charts so the last window's data doesn't linger on screen.
+      // No data for this window (e.g. a future day beyond the plan horizon):
+      // tear down any previously rendered charts so the last window's data
+      // doesn't linger on screen.
       if (this._energyChart || this._priceChart) {
         this._energyChart?.destroy();
         this._priceChart?.destroy();
@@ -1234,16 +1226,39 @@ export class PowerPilotPanel extends LitElement {
       color: "#22c55e",
     });
 
+    // Planned (forecast) battery SoC as a dashed line, so the plan can be read
+    // against what really happened. `forecast.soc_end` is the END-of-hour planned
+    // state, plotted on the hour-end boundary (t + 1h). Only drawn when some hour
+    // carries a forecast SoC (blank for vintages predating flow capture).
+    const hasFcSoc = hrs.some((h) => h.forecast?.soc_end != null);
+    if (hasFcSoc) {
+      series.push({
+        name: "SoC prognoza %",
+        type: "line",
+        data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].forecast?.soc_end ?? null })),
+        color: "#22c55e",
+      });
+    }
+
     // EV SoC on the same right axis. `ev_soc` is the END-of-hour state (real for
     // past hours, forecast for future), so plot it on the hour-end boundary
-    // (t + 1h) to line up with the right edge of the EV-charge bar. Only drawn
-    // when the EV module actually reports SoC for some hour.
+    // (t + 1h) to line up with the right edge of the EV-charge bar. Real = solid,
+    // forecast = dashed. Only drawn when EV SoC is reported for some hour.
     const hasEvSoc = hrs.some((h) => h.ev_soc != null);
     if (hasEvSoc) {
       series.push({
         name: "EV SoC %",
         type: "line",
         data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].ev_soc })),
+        color: "#3498db",
+      });
+    }
+    const hasFcEvSoc = hrs.some((h) => h.forecast?.ev_soc_end != null);
+    if (hasFcEvSoc) {
+      series.push({
+        name: "EV SoC prognoza %",
+        type: "line",
+        data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].forecast?.ev_soc_end ?? null })),
         color: "#3498db",
       });
     }
@@ -1268,8 +1283,11 @@ export class PowerPilotPanel extends LitElement {
       theme: { mode: dark ? "dark" : "light" },
       stroke: {
         width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)),
-        // EV SoC dashed so it reads apart from the solid battery SoC line.
-        dashArray: series.map((sx: any) => (sx.name === "EV SoC %" ? 6 : 0)),
+        // Forecast (planned) SoC / EV SoC dashed so they read apart from the
+        // solid realized lines they track.
+        dashArray: series.map((sx: any) =>
+          typeof sx.name === "string" && sx.name.includes("prognoza") ? 6 : 0,
+        ),
         curve: "straight",
       },
       // Near-full width so each midpoint-plotted bar fills its hour [H, H+1]
@@ -1305,7 +1323,7 @@ export class PowerPilotPanel extends LitElement {
           labels: { formatter: (v: number) => (v != null ? Math.abs(v).toFixed(2) : "") },
         },
         {
-          seriesName: ["SoC %", "EV SoC %"],
+          seriesName: ["SoC %", "SoC prognoza %", "EV SoC %", "EV SoC prognoza %"],
           opposite: true,
           min: 0,
           max: 100,

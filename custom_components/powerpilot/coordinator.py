@@ -1805,6 +1805,34 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # current-hour slot is a duplicate → forecast starts at the next hour.
         forecast_cutoff = (now + timedelta(hours=1)) if emitted_current else past_end
 
+        # When a forecast lead is selected, the future "prognoza" line is pinned to
+        # the single plan made ~lead hours ago (one coherent trajectory) instead of
+        # the live plan — so the dashed forecast responds to the selector for future
+        # hours too, and can be read against the current plan (the solid line). At
+        # lead 0 the future side is just the live plan.
+        fc_run_key = sn.nearest_run_at(now - timedelta(hours=lead)) if lead > 0 else None
+        fc_rec = sn.get(fc_run_key) if fc_run_key else None
+        fc_start = (
+            dt_util.parse_datetime(fc_rec.get("start") or "") if fc_rec else None
+        )
+
+        def _vfut(slot_start: datetime, key: str):
+            """Pinned-vintage forecast value for a future hour (or None)."""
+            if fc_rec is None or fc_start is None:
+                return None
+            idx = round((slot_start - fc_start).total_seconds() / 3600.0)
+            seq = fc_rec.get(key) or []
+            return seq[idx] if 0 <= idx < len(seq) else None
+
+        # Seed the pinned forecast SoC from the vintage's own state entering the
+        # first shown future hour, so its dashed trajectory chains coherently.
+        fc_prev_soc = _vfut(forecast_cutoff - timedelta(hours=1), "soc")
+        if fc_prev_soc is None:
+            fc_prev_soc = prev_soc
+        fc_prev_ev_soc = _vfut(forecast_cutoff - timedelta(hours=1), "ev_soc")
+        if fc_prev_ev_soc is None:
+            fc_prev_ev_soc = prev_ev_soc
+
         if plan:
             for slot, decision in zip(plan.forecast.slots, plan.decisions):
                 if window_end and slot.start >= window_end:
@@ -1821,27 +1849,51 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     else None
                     for eid in device_ids
                 }
+                if lead > 0:
+                    # Dashed forecast from the pinned older vintage's trajectory.
+                    fc_soc_end = _vfut(slot.start, "soc")
+                    fc_ev_soc_end = _vfut(slot.start, "ev_soc")
+                    forecast_side = _side(
+                        grid=_vfut(slot.start, "grid"),
+                        discharge=_vfut(slot.start, "dischg"),
+                        base=slot.base_consumption_kwh,
+                        ev=_vfut(slot.start, "ev"),
+                        charge=_vfut(slot.start, "charge"),
+                        devices=dev_forecast,
+                        soc_start=fc_prev_soc if fc_soc_end is not None else None,
+                        soc_end=fc_soc_end,
+                        ev_soc_start=fc_prev_ev_soc if fc_ev_soc_end is not None else None,
+                        ev_soc_end=fc_ev_soc_end,
+                    )
+                    forecast_origin = fc_run_key
+                    if fc_soc_end is not None:
+                        fc_prev_soc = fc_soc_end
+                    if fc_ev_soc_end is not None:
+                        fc_prev_ev_soc = fc_ev_soc_end
+                else:
+                    forecast_side = _side(
+                        grid=decision.grid_buy_kwh,
+                        discharge=decision.battery_discharge_kwh,
+                        base=slot.base_consumption_kwh,
+                        ev=decision.ev_charge_kwh,
+                        charge=decision.battery_charge_kwh,
+                        devices=dev_forecast,
+                        soc_start=prev_soc,
+                        soc_end=decision.battery_soc,
+                        ev_soc_start=prev_ev_soc,
+                        ev_soc_end=decision.ev_soc,
+                    )
+                    # Future side comes from the current live plan.
+                    forecast_origin = (
+                        plan.created_at.isoformat() if plan.created_at else None
+                    )
                 hours.append(
                     {
                         "start": slot.start.isoformat(),
                         "is_past": False,
                         "realized": None,
-                        "forecast": _side(
-                            grid=decision.grid_buy_kwh,
-                            discharge=decision.battery_discharge_kwh,
-                            base=slot.base_consumption_kwh,
-                            ev=decision.ev_charge_kwh,
-                            charge=decision.battery_charge_kwh,
-                            devices=dev_forecast,
-                            soc_start=prev_soc,
-                            soc_end=decision.battery_soc,
-                            ev_soc_start=prev_ev_soc,
-                            ev_soc_end=decision.ev_soc,
-                        ),
-                        # Future side comes from the current live plan.
-                        "forecast_origin": (
-                            plan.created_at.isoformat() if plan.created_at else None
-                        ),
+                        "forecast": forecast_side,
+                        "forecast_origin": forecast_origin,
                         "buy_price": slot.buy_price,
                         "distribution_price_kwh": slot.distribution_price_kwh,
                         "total_price_kwh": slot.total_price_kwh,

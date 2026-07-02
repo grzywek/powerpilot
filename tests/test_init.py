@@ -12,7 +12,11 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.powerpilot.const import (
     CONF_BUY_PRICE_SENSOR,
+    CONF_DEVICE_SENSORS,
+    CONF_EV_SOC_SENSOR,
+    CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
+    CONF_TARIFFS,
     DEFAULTS,
     DOMAIN,
     InverterMode,
@@ -148,10 +152,9 @@ async def test_unready_inputs_flags_unavailable_core_sensor(hass: HomeAssistant)
     assert _unready_inputs(hass, entry) == ["sensor.cons"]
 
 
-async def test_unready_inputs_ignores_ev_and_unset(hass: HomeAssistant) -> None:
-    """EV sensors may flap (car asleep) and must never block setup."""
+async def test_unready_inputs_requires_configured_ev_entity(hass: HomeAssistant) -> None:
+    """A configured EV entity must be available before setup starts."""
     from custom_components.powerpilot import _unready_inputs
-    from custom_components.powerpilot.const import CONF_EV_SOC_SENSOR, CONF_SOC_SENSOR
 
     hass.states.async_set("sensor.soc", "60", {"unit_of_measurement": "%"})
     hass.states.async_set("sensor.ev", "unavailable", {})
@@ -160,10 +163,49 @@ async def test_unready_inputs_ignores_ev_and_unset(hass: HomeAssistant) -> None:
         data={
             **DEFAULTS,
             CONF_SOC_SENSOR: "sensor.soc",
-            CONF_EV_SOC_SENSOR: "sensor.ev",  # unavailable but optional
+            CONF_EV_SOC_SENSOR: "sensor.ev",
         },
     )
-    assert _unready_inputs(hass, entry) == []
+    assert _unready_inputs(hass, entry) == ["sensor.ev"]
+
+
+async def test_unready_inputs_checks_lists_and_nested_entities(
+    hass: HomeAssistant,
+) -> None:
+    """Configured device lists, parent maps and tariff day sensors are required."""
+    from custom_components.powerpilot import _unready_inputs
+
+    hass.states.async_set("sensor.soc", "60", {"unit_of_measurement": "%"})
+    hass.states.async_set("sensor.washer", "1.2", {"unit_of_measurement": "kWh"})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            **DEFAULTS,
+            CONF_SOC_SENSOR: "sensor.soc",
+            CONF_DEVICE_SENSORS: ["sensor.washer", "sensor.dryer"],
+            CONF_SENSOR_PARENTS: {
+                "sensor.washer": "__root__",
+                "sensor.dryer": "sensor.washer",
+            },
+            CONF_TARIFFS: [
+                {
+                    "periods": [
+                        {
+                            "name": "Weekend",
+                            "hour_from": 0,
+                            "hour_to": 24,
+                            "price_kwh": 0.1,
+                            "day_sensor": "binary_sensor.weekend",
+                        }
+                    ]
+                }
+            ],
+        },
+    )
+    assert _unready_inputs(hass, entry) == [
+        "sensor.dryer",
+        "binary_sensor.weekend",
+    ]
 
 
 async def test_hour_boundary_updates_current_mode_without_waiting_for_interval(

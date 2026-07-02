@@ -77,6 +77,58 @@ async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:
     assert "hours" in msg["result"]
 
 
+async def test_series_forecast_lead_shifts_future(hass: HomeAssistant) -> None:
+    """A forecast-lead selection pins the FUTURE prognoza to the older vintage.
+
+    Regression: the lead selector only re-read past hours; future hours always
+    showed the live plan. Now the future "prognoza" side comes from the single
+    plan made ~lead hours ago, so the dashed line responds to the selector too.
+    """
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][
+        next(iter(hass.data[DOMAIN]))
+    ]
+
+    now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    old_start = now - timedelta(hours=6)
+    # An older vintage whose SoC trajectory is a distinct sentinel, so a future
+    # hour drawn from it is unmistakably not the live plan's own SoC.
+    coordinator.snapshots.add(
+        {
+            "run_at": old_start.isoformat(),
+            "start": old_start.isoformat(),
+            "n": 12,
+            "horizon_hours": 12,
+            "total_cost": 1.0,
+            "soc": [42.5] * 12,
+            "grid": [0.0] * 12,
+            "dischg": [0.0] * 12,
+            "ev": [0.0] * 12,
+            "charge": [0.0] * 12,
+        }
+    )
+
+    def _future(result: dict) -> list[dict]:
+        return [
+            h for h in result["hours"] if not h["is_past"] and h.get("forecast")
+        ]
+
+    live = await coordinator.get_series(past_hours=1, forecast_lead=0)
+    fut_live = _future(live)
+    assert fut_live, "expected a future forecast horizon"
+    assert fut_live[0]["forecast"]["soc_end"] != 42.5  # the live plan, not the vintage
+
+    shifted = await coordinator.get_series(past_hours=1, forecast_lead=6)
+    fut_shift = _future(shifted)
+    assert fut_shift, "expected a future forecast horizon at lead 6"
+    assert fut_shift[0]["forecast"]["soc_end"] == 42.5  # pinned to the 6-h-old vintage
+    assert fut_shift[0]["forecast_origin"] == coordinator.snapshots._key(old_start)
+
+
 async def test_ws_prices_archive(hass: HomeAssistant, hass_ws_client) -> None:
     await _setup(hass)
     client = await hass_ws_client(hass)

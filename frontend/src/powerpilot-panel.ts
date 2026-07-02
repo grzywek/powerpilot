@@ -1105,9 +1105,6 @@ export class PowerPilotPanel extends LitElement {
     const winStart = winStartD.getTime();
     const winEnd = winEndD.getTime();
 
-    const pair = (extract: (h: SeriesHour) => number | null) =>
-      ts.map((t, i) => ({ x: t, y: extract(hrs[i]) }));
-
     // ApexCharts centres datetime columns on their x value, so a bar plotted at
     // the hour start would straddle the hour line. Plot bars at the hour
     // *midpoint* so the column spans [H, H+1] and visually starts on the hour
@@ -1210,21 +1207,36 @@ export class PowerPilotPanel extends LitElement {
     // with — so the rise/fall lines up with the bar and inverter-mode band of
     // the hour that caused it, including the very first hour of the window.
     const HOUR = 3600 * 1000;
-    // The SoC line is plotted at hour *starts* (battery_soc_start), so without a
-    // closing point it would stop one hour short of the window's right edge.
-    // Append the last hour's END-of-hour SoC at that hour's end so the line runs
-    // to the edge and the final hour's rise/fall is visible.
-    const socData = pair((h) => h.battery_soc_start);
-    const lastH = hrs[hrs.length - 1];
-    if (lastH && lastH.soc != null && ts.length) {
-      socData.push({ x: ts[ts.length - 1] + HOUR, y: lastH.soc });
-    }
-    series.push({
-      name: "SoC %",
-      type: "line",
-      data: socData,
-      color: "#22c55e",
+    // The real SoC line is plotted only for past/current hours. Completed hours
+    // close at the hour end; the in-progress hour closes at partial_until, so
+    // the dashed forecast line owns everything to the right of "now".
+    const socData: { x: number; y: number | null }[] = [];
+    let lastActualSocIdx = -1;
+    hrs.forEach((h, i) => {
+      if (!h.is_past) return;
+      socData.push({ x: ts[i], y: h.battery_soc_start });
+      if (h.soc != null) {
+        lastActualSocIdx = i;
+      }
     });
+    if (lastActualSocIdx >= 0) {
+      const lastActualSoc = hrs[lastActualSocIdx];
+      const endTs = lastActualSoc.partial_until
+        ? new Date(lastActualSoc.partial_until).getTime()
+        : ts[lastActualSocIdx] + HOUR;
+      socData.push({
+        x: endTs,
+        y: lastActualSoc.soc,
+      });
+    }
+    if (socData.length) {
+      series.push({
+        name: "SoC %",
+        type: "line",
+        data: socData,
+        color: "#22c55e",
+      });
+    }
 
     // Planned (forecast) battery SoC as a dashed line, so the plan can be read
     // against what really happened. `forecast.soc_end` is the END-of-hour planned

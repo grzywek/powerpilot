@@ -13,15 +13,24 @@ from .const import (
     CONF_BATTERY_DISCHARGE_SENSOR,
     CONF_BUY_PRICE_SENSOR,
     CONF_CONSUMPTION_SENSOR,
+    CONF_DEVICE_SENSORS,
+    CONF_EV_CALENDAR,
+    CONF_EV_CHARGE_METER_SENSOR,
+    CONF_EV_CHARGING_SENSOR,
+    CONF_EV_ENERGY_ADDED_SENSOR,
+    CONF_EV_LOCATION_SENSOR,
+    CONF_EV_ODOMETER_SENSOR,
+    CONF_EV_SOC_SENSOR,
     CONF_GRID_IMPORT_SENSOR,
-    CONF_PRICE_SOURCE,
+    CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
     CONF_TARIFFS,
+    CONF_WEATHER_ENTITY,
     DOMAIN,
     PLATFORMS,
-    PRICE_SOURCE_SENSOR,
 )
 from .coordinator import PowerPilotCoordinator
+from .hierarchy import PARENT_ROOT
 from .panel import async_register_panel, async_unregister_panel
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,17 +41,26 @@ _CHECK_DATE_SERVICE = "check_date"
 # Entity states that mean "configured but not usable yet".
 _NOT_READY_STATES = {"unavailable", "unknown"}
 
-# Core household input sensors the optimizer/chart depend on. EV, device
-# sub-meters, location and calendar are deliberately excluded: those are feature
-# inputs that legitimately flap (e.g. the car's SoC sensor goes unavailable while
-# it sleeps), and must never block the whole integration from starting.
-_REQUIRED_SENSOR_KEYS = (
+# Every configured entity is a hard setup dependency. PowerPilot must not start
+# from a partial configuration because missing inputs produce misleading plans
+# and charts.
+_ENTITY_CONFIG_KEYS = (
     CONF_SOC_SENSOR,
     CONF_CONSUMPTION_SENSOR,
     CONF_BATTERY_CHARGE_SENSOR,
     CONF_BATTERY_DISCHARGE_SENSOR,
     CONF_GRID_IMPORT_SENSOR,
+    CONF_BUY_PRICE_SENSOR,
+    CONF_WEATHER_ENTITY,
+    CONF_EV_SOC_SENSOR,
+    CONF_EV_ODOMETER_SENSOR,
+    CONF_EV_CHARGING_SENSOR,
+    CONF_EV_ENERGY_ADDED_SENSOR,
+    CONF_EV_CHARGE_METER_SENSOR,
+    CONF_EV_LOCATION_SENSOR,
+    CONF_EV_CALENDAR,
 )
+_ENTITY_LIST_CONFIG_KEYS = (CONF_DEVICE_SENSORS,)
 
 
 def _uses_day_sensor(entry: ConfigEntry) -> bool:
@@ -55,23 +73,43 @@ def _uses_day_sensor(entry: ConfigEntry) -> bool:
     )
 
 
-def _unready_inputs(hass: HomeAssistant, entry: ConfigEntry) -> list[str]:
-    """Configured core input sensors that are missing or currently unavailable.
+def _append_entity_id(entity_ids: list[str], seen: set[str], value) -> None:
+    if not isinstance(value, str) or not value or value == PARENT_ROOT:
+        return
+    if value in seen:
+        return
+    seen.add(value)
+    entity_ids.append(value)
 
-    Only *configured* entities are checked — an unset optional sensor is not a
-    blocker. The buy-price sensor only counts when the price source is a sensor
-    (not the prądcast API).
-    """
+
+def _configured_entity_ids(entry: ConfigEntry) -> list[str]:
+    """Entity IDs explicitly stored in the config entry, in stable order."""
     cfg = {**entry.data, **entry.options}
-    keys = list(_REQUIRED_SENSOR_KEYS)
-    if cfg.get(CONF_PRICE_SOURCE, PRICE_SOURCE_SENSOR) == PRICE_SOURCE_SENSOR:
-        keys.append(CONF_BUY_PRICE_SENSOR)
+    entity_ids: list[str] = []
+    seen: set[str] = set()
 
+    for key in _ENTITY_CONFIG_KEYS:
+        _append_entity_id(entity_ids, seen, cfg.get(key))
+
+    for key in _ENTITY_LIST_CONFIG_KEYS:
+        for entity_id in cfg.get(key) or []:
+            _append_entity_id(entity_ids, seen, entity_id)
+
+    for child, parent in (cfg.get(CONF_SENSOR_PARENTS) or {}).items():
+        _append_entity_id(entity_ids, seen, child)
+        _append_entity_id(entity_ids, seen, parent)
+
+    for tariff in cfg.get(CONF_TARIFFS) or []:
+        for period in tariff.get("periods") or []:
+            _append_entity_id(entity_ids, seen, period.get("day_sensor"))
+
+    return entity_ids
+
+
+def _unready_inputs(hass: HomeAssistant, entry: ConfigEntry) -> list[str]:
+    """Configured entities that are missing or currently unavailable."""
     unready: list[str] = []
-    for key in keys:
-        entity_id = cfg.get(key)
-        if not entity_id:
-            continue
+    for entity_id in _configured_entity_ids(entry):
         state = hass.states.get(entity_id)
         if state is None or state.state in _NOT_READY_STATES:
             unready.append(entity_id)
@@ -94,10 +132,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "Ponowię konfigurację, gdy serwis się pojawi."
         )
 
-    # Don't start until the core input sensors exist and report a usable value.
+    # Don't start until configured entities exist and report a usable value.
     # Like other integrations, defer setup and let HA retry — this keeps the
     # entry in a clean "waiting for entities" state instead of coming up with a
-    # half-broken plan when the source integrations are still loading.
+    # half-broken plan when source integrations are still loading.
     unready = _unready_inputs(hass, entry)
     if unready:
         raise ConfigEntryNotReady(

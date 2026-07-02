@@ -1455,20 +1455,58 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         prev_soc = soc_real.get(past_start - timedelta(hours=1))
         prev_ev_soc = ev_soc_real.get(past_start - timedelta(hours=1))
 
-        # Per-hour forecast read, honouring the requested lead. lead 0 keeps the
-        # coherent single-vintage read (`run0_at`, blank when no plan was made at
-        # that exact hour); lead N reads the plan current N hours before the hour.
+        # Forecast read, honouring the requested lead.
+        #
+        # lead 0 keeps the freshest per-hour read (`run0_at`, blank when no plan
+        # was made at that exact hour).
+        #
+        # lead N ("−6h" etc.) pins the ENTIRE prognoza — past and future — to the
+        # SINGLE plan made ~N hours ago and reads its own coherent trajectory. SoC
+        # then rises only where THAT plan charges. Sliding a different vintage
+        # under each hour (the old behaviour) stitched re-seeded plans into a
+        # nonsensical SoC line — phantom rises in hours with no planned charging.
+        # Hours the pinned plan never covered (before it was made / past its
+        # horizon) get a blank forecast, which is correct: it said nothing there.
         sn = self.snapshots
         lead = max(int(forecast_lead or 0), 0)
+        pin_key = sn.nearest_run_at(now - timedelta(hours=lead)) if lead > 0 else None
+        pin_rec = sn.get(pin_key) if pin_key else None
+        pin_start = (
+            dt_util.parse_datetime(pin_rec.get("start") or "") if pin_rec else None
+        )
+        pin_n = (
+            int(
+                pin_rec.get("n")
+                or pin_rec.get("horizon_hours")
+                or len(pin_rec.get("soc") or [])
+            )
+            if pin_rec
+            else 0
+        )
+
+        def _pin_idx(hour: datetime) -> int | None:
+            if pin_start is None:
+                return None
+            idx = round((hour - pin_start).total_seconds() / 3600.0)
+            return idx if 0 <= idx < pin_n else None
+
+        def _pin_val(hour: datetime, key: str):
+            idx = _pin_idx(hour)
+            if idx is None:
+                return None
+            seq = pin_rec.get(key) or []
+            return seq[idx] if idx < len(seq) else None
 
         def _fc(hour: datetime, key: str):
             if lead > 0:
-                return sn.lead_value_at(hour, key, lead)
+                return _pin_val(hour, key)
             return sn.run0_at(hour, key)
 
         def _fc_origin(hour: datetime) -> str | None:
             """When the forecast shown for ``hour`` was made (vintage run time)."""
-            return sn.origin_at(hour, lead)
+            if lead > 0:
+                return pin_key if _pin_idx(hour) is not None else None
+            return sn.origin_at(hour, 0)
 
         # ----- Past hours -----
         h = past_start
@@ -1552,36 +1590,52 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # value that plan seeded from — so the forecast SoC delta matches its
             # own charge instead of stitching two re-seeded vintages together.
             # Battery flows are captured only from now on → blank for old vintages.
-            fc_soc_end = _fc(h, "soc")
-            fc_ev_soc_end = _fc(h, "ev_soc")
-            forecast_side = _side(
-                grid=_fc(h, "grid"),
-                discharge=_fc(h, "dischg"),
-                base=base_fc,
-                ev=_fc(h, "ev"),
-                charge=_fc(h, "charge"),
-                devices=dev_forecast,
-                soc_start=prev_soc if fc_soc_end is not None else None,
-                soc_end=fc_soc_end,
-                # Planned EV SoC (end-of-hour) for the dashed forecast line;
-                # blank for vintages predating EV-SoC capture.
-                ev_soc_start=prev_ev_soc if fc_ev_soc_end is not None else None,
-                ev_soc_end=fc_ev_soc_end,
-            )
+            # Only surface a forecast side when a plan/vintage actually backs this
+            # hour: the learned consumption profile is keyed by weekday+hour and is
+            # always available, so without this gate it would masquerade as a
+            # "prognoza" for hours no plan was ever made for (dates predating the
+            # addon, or older than snapshot retention).
+            fc_origin = _fc_origin(h)
+            if fc_origin is not None:
+                fc_soc_end = _fc(h, "soc")
+                fc_ev_soc_end = _fc(h, "ev_soc")
+                forecast_side = _side(
+                    grid=_fc(h, "grid"),
+                    discharge=_fc(h, "dischg"),
+                    base=base_fc,
+                    ev=_fc(h, "ev"),
+                    charge=_fc(h, "charge"),
+                    devices=dev_forecast,
+                    soc_start=prev_soc if fc_soc_end is not None else None,
+                    soc_end=fc_soc_end,
+                    # Planned EV SoC (end-of-hour) for the dashed forecast line;
+                    # blank for vintages predating EV-SoC capture.
+                    ev_soc_start=prev_ev_soc if fc_ev_soc_end is not None else None,
+                    ev_soc_end=fc_ev_soc_end,
+                )
+            else:
+                forecast_side = None
             hours.append(
                 {
                     "start": h.isoformat(),
                     "is_past": True,
                     "realized": realized_side,
                     "forecast": forecast_side,
-                    "forecast_origin": _fc_origin(h) if forecast_side else None,
+                    "forecast_origin": fc_origin if forecast_side else None,
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
                     "price_confirmed": self.prices.is_confirmed(h),
                     "consumption_real": round(main_real[h], 3) if h in main_real else None,
-                    "consumption_forecast": forecast_c,
-                    "base_consumption_forecast": round(base_fc, 3) if base_fc is not None else None,
+                    # Consumption forecast (learned profile) is only meaningful for
+                    # hours a plan actually backs — otherwise it would show a
+                    # "prognoza" for dates no plan was ever made for.
+                    "consumption_forecast": forecast_c if fc_origin is not None else None,
+                    "base_consumption_forecast": (
+                        round(base_fc, 3)
+                        if base_fc is not None and fc_origin is not None
+                        else None
+                    ),
                     "soc": round(soc_real[h], 1) if h in soc_real else None,
                     "ev_soc": round(ev_soc_real[h], 1) if h in ev_soc_real else None,
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
@@ -1612,7 +1666,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "battery_use_cost": real_bat_use_cost,
                     "fixed_cost": self.tariff.fixed_hourly_for(h),
                     "devices_real": dev_real_h,
-                    "devices_forecast": dev_forecast,
+                    "devices_forecast": dev_forecast if fc_origin is not None else None,
                 }
             )
             if h in soc_real:
@@ -1695,12 +1749,33 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # current-hour decision.
             cur_dec = cur_slot = None
             forecast_side = None
+            cur_fc_origin: str | None = None
             if self.data and self.data.decisions:
                 for _sl, _dc in zip(self.data.forecast.slots, self.data.decisions):
                     if _sl.start == now:
                         cur_slot, cur_dec = _sl, _dc
                         break
-            if cur_dec is not None:
+            if lead > 0:
+                # Keep the current hour on the SAME pinned plan as the rest of the
+                # stale-lead prognoza, so the dashed line has no one-hour blip at
+                # "now". Blank when the pinned plan didn't reach this hour.
+                if _fc_origin(now) is not None:
+                    fc_soc_end = _pin_val(now, "soc")
+                    fc_ev_soc_end = _pin_val(now, "ev_soc")
+                    forecast_side = _side(
+                        grid=_pin_val(now, "grid"),
+                        discharge=_pin_val(now, "dischg"),
+                        base=self.consumption.base_value(wd, hr) if learned else None,
+                        ev=_pin_val(now, "ev"),
+                        charge=_pin_val(now, "charge"),
+                        devices=dev_forecast,
+                        soc_start=prev_soc if fc_soc_end is not None else None,
+                        soc_end=fc_soc_end,
+                        ev_soc_start=prev_ev_soc if fc_ev_soc_end is not None else None,
+                        ev_soc_end=fc_ev_soc_end,
+                    )
+                    cur_fc_origin = _fc_origin(now)
+            elif cur_dec is not None:
                 forecast_side = _side(
                     grid=cur_dec.grid_buy_kwh,
                     discharge=cur_dec.battery_discharge_kwh,
@@ -1713,6 +1788,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     ev_soc_start=prev_ev_soc,
                     ev_soc_end=cur_dec.ev_soc,
                 )
+                cur_fc_origin = (
+                    self.data.created_at.isoformat()
+                    if self.data and self.data.created_at
+                    else sn.origin_at(now, 0)
+                )
             hours.append(
                 {
                     "start": now.isoformat(),
@@ -1721,15 +1801,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "partial_until": real_now.isoformat(),
                     "realized": realized_side,
                     "forecast": forecast_side,
-                    "forecast_origin": (
-                        (
-                            self.data.created_at.isoformat()
-                            if self.data and self.data.created_at
-                            else sn.origin_at(now, 0)
-                        )
-                        if forecast_side
-                        else None
-                    ),
+                    "forecast_origin": cur_fc_origin if forecast_side else None,
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
@@ -1805,31 +1877,16 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # current-hour slot is a duplicate → forecast starts at the next hour.
         forecast_cutoff = (now + timedelta(hours=1)) if emitted_current else past_end
 
-        # When a forecast lead is selected, the future "prognoza" line is pinned to
-        # the single plan made ~lead hours ago (one coherent trajectory) instead of
-        # the live plan — so the dashed forecast responds to the selector for future
-        # hours too, and can be read against the current plan (the solid line). At
+        # At lead N the future side continues the SAME pinned plan used for the
+        # past (`_pin_val`), so the dashed prognoza is one coherent line across the
+        # whole horizon and can be read against the live plan (the solid line). At
         # lead 0 the future side is just the live plan.
-        fc_run_key = sn.nearest_run_at(now - timedelta(hours=lead)) if lead > 0 else None
-        fc_rec = sn.get(fc_run_key) if fc_run_key else None
-        fc_start = (
-            dt_util.parse_datetime(fc_rec.get("start") or "") if fc_rec else None
-        )
-
-        def _vfut(slot_start: datetime, key: str):
-            """Pinned-vintage forecast value for a future hour (or None)."""
-            if fc_rec is None or fc_start is None:
-                return None
-            idx = round((slot_start - fc_start).total_seconds() / 3600.0)
-            seq = fc_rec.get(key) or []
-            return seq[idx] if 0 <= idx < len(seq) else None
-
         # Seed the pinned forecast SoC from the vintage's own state entering the
         # first shown future hour, so its dashed trajectory chains coherently.
-        fc_prev_soc = _vfut(forecast_cutoff - timedelta(hours=1), "soc")
+        fc_prev_soc = _pin_val(forecast_cutoff - timedelta(hours=1), "soc")
         if fc_prev_soc is None:
             fc_prev_soc = prev_soc
-        fc_prev_ev_soc = _vfut(forecast_cutoff - timedelta(hours=1), "ev_soc")
+        fc_prev_ev_soc = _pin_val(forecast_cutoff - timedelta(hours=1), "ev_soc")
         if fc_prev_ev_soc is None:
             fc_prev_ev_soc = prev_ev_soc
 
@@ -1850,22 +1907,22 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     for eid in device_ids
                 }
                 if lead > 0:
-                    # Dashed forecast from the pinned older vintage's trajectory.
-                    fc_soc_end = _vfut(slot.start, "soc")
-                    fc_ev_soc_end = _vfut(slot.start, "ev_soc")
+                    # Dashed forecast continues the pinned plan's trajectory.
+                    fc_soc_end = _pin_val(slot.start, "soc")
+                    fc_ev_soc_end = _pin_val(slot.start, "ev_soc")
                     forecast_side = _side(
-                        grid=_vfut(slot.start, "grid"),
-                        discharge=_vfut(slot.start, "dischg"),
+                        grid=_pin_val(slot.start, "grid"),
+                        discharge=_pin_val(slot.start, "dischg"),
                         base=slot.base_consumption_kwh,
-                        ev=_vfut(slot.start, "ev"),
-                        charge=_vfut(slot.start, "charge"),
+                        ev=_pin_val(slot.start, "ev"),
+                        charge=_pin_val(slot.start, "charge"),
                         devices=dev_forecast,
                         soc_start=fc_prev_soc if fc_soc_end is not None else None,
                         soc_end=fc_soc_end,
                         ev_soc_start=fc_prev_ev_soc if fc_ev_soc_end is not None else None,
                         ev_soc_end=fc_ev_soc_end,
                     )
-                    forecast_origin = fc_run_key
+                    forecast_origin = pin_key if _pin_idx(slot.start) is not None else None
                     if fc_soc_end is not None:
                         fc_prev_soc = fc_soc_end
                     if fc_ev_soc_end is not None:

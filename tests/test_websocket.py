@@ -129,6 +129,87 @@ async def test_series_forecast_lead_shifts_future(hass: HomeAssistant) -> None:
     assert fut_shift[0]["forecast_origin"] == coordinator.snapshots._key(old_start)
 
 
+async def test_series_lead_uses_single_pinned_vintage(hass: HomeAssistant) -> None:
+    """At a stale lead, past prognoza SoC comes from ONE plan's trajectory.
+
+    Regression: sliding a different (re-seeded) vintage under each past hour
+    stitched them into a nonsensical SoC line — phantom rises in hours with no
+    planned charging. The lead now pins the whole prognoza to the single plan
+    made ~lead hours ago, so its SoC is one coherent trajectory.
+    """
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+
+    now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    pin_start = now - timedelta(hours=6)
+    soc_traj = [float(10 * (i + 1)) for i in range(12)]  # distinct per index
+    coordinator.snapshots.add(
+        {
+            "run_at": pin_start.isoformat(),
+            "start": pin_start.isoformat(),
+            "n": 12,
+            "horizon_hours": 12,
+            "total_cost": 1.0,
+            "soc": soc_traj,
+            "grid": [0.0] * 12,
+            "dischg": [0.0] * 12,
+            "ev": [0.0] * 12,
+            "charge": [0.0] * 12,
+        }
+    )
+
+    result = await coordinator.get_series(past_hours=8, forecast_lead=6)
+    past = {h["start"]: h for h in result["hours"] if h["is_past"]}
+    pin_origin = coordinator.snapshots._key(pin_start)
+
+    # Every covered past hour reads the pinned plan's own SoC and shares its origin.
+    for k in range(0, 6):
+        h = past.get((pin_start + timedelta(hours=k)).isoformat())
+        assert h is not None and h["forecast"] is not None
+        assert h["forecast"]["soc_end"] == soc_traj[k]
+        assert h["forecast_origin"] == pin_origin
+
+    # An hour before the pinned plan was made is not covered → no prognoza there.
+    before = past.get((pin_start - timedelta(hours=1)).isoformat())
+    assert before is not None and before["forecast"] is None
+
+
+async def test_series_no_vintage_hides_forecast(hass: HomeAssistant) -> None:
+    """A past hour with no backing plan shows no "prognoza" — only real data.
+
+    The learned consumption profile is always available (weekday+hour keyed), so
+    without gating it would masquerade as a forecast for dates no plan ever ran
+    (e.g. before the addon was installed, or older than snapshot retention).
+    """
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+
+    now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    # Force a "learned" profile so the consumption forecast would be non-empty.
+    coordinator.consumption.base.mark_date_observed(now.date())
+    coordinator.consumption.base_value = lambda wd, hr: 0.5
+
+    start = now - timedelta(days=40)  # well before any snapshot vintage
+    result = await coordinator.get_series(
+        start=start.isoformat(), end=(start + timedelta(hours=3)).isoformat()
+    )
+    past = [h for h in result["hours"] if h["is_past"]]
+    assert past, "expected past hours in the window"
+    for h in past:
+        assert h["forecast"] is None  # no plan → no prognoza side at all
+        assert h["forecast_origin"] is None
+        # The learned profile must not leak in as a forecast either.
+        assert h["consumption_forecast"] is None
+
+
 async def test_ws_prices_archive(hass: HomeAssistant, hass_ws_client) -> None:
     await _setup(hass)
     client = await hass_ws_client(hass)

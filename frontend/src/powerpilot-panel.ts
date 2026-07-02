@@ -1207,26 +1207,23 @@ export class PowerPilotPanel extends LitElement {
     // with — so the rise/fall lines up with the bar and inverter-mode band of
     // the hour that caused it, including the very first hour of the window.
     const HOUR = 3600 * 1000;
-    // The real SoC line is plotted only for past/current hours. Completed hours
-    // close at the hour end; the in-progress hour closes at partial_until, so
-    // the dashed forecast line owns everything to the right of "now".
+    // The real SoC line is plotted only for past/current hours and stays on
+    // regular hour boundaries. Do not add a partial_until point here: ApexCharts
+    // uses the closest datetime point when sizing columns, and an in-hour SoC
+    // point would make the hourly bars look thin.
     const socData: { x: number; y: number | null }[] = [];
-    let lastActualSocIdx = -1;
+    let lastCompletedSocIdx = -1;
     hrs.forEach((h, i) => {
       if (!h.is_past) return;
       socData.push({ x: ts[i], y: h.battery_soc_start });
-      if (h.soc != null) {
-        lastActualSocIdx = i;
+      if (!h.partial && h.soc != null) {
+        lastCompletedSocIdx = i;
       }
     });
-    if (lastActualSocIdx >= 0) {
-      const lastActualSoc = hrs[lastActualSocIdx];
-      const endTs = lastActualSoc.partial_until
-        ? new Date(lastActualSoc.partial_until).getTime()
-        : ts[lastActualSocIdx] + HOUR;
+    if (lastCompletedSocIdx >= 0) {
       socData.push({
-        x: endTs,
-        y: lastActualSoc.soc,
+        x: ts[lastCompletedSocIdx] + HOUR,
+        y: hrs[lastCompletedSocIdx].soc,
       });
     }
     if (socData.length) {

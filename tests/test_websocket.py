@@ -159,6 +159,7 @@ async def test_series_lead_uses_single_pinned_vintage(hass: HomeAssistant) -> No
             "dischg": [0.0] * 12,
             "ev": [0.0] * 12,
             "charge": [0.0] * 12,
+            "mode": ["c"] * 12,  # the pinned plan charges every hour
         }
     )
 
@@ -166,16 +167,20 @@ async def test_series_lead_uses_single_pinned_vintage(hass: HomeAssistant) -> No
     past = {h["start"]: h for h in result["hours"] if h["is_past"]}
     pin_origin = coordinator.snapshots._key(pin_start)
 
-    # Every covered past hour reads the pinned plan's own SoC and shares its origin.
+    # Every covered past hour reads the pinned plan's own SoC and shares its origin,
+    # and the inverter-mode band follows that plan's schedule (not realized mode).
     for k in range(0, 6):
         h = past.get((pin_start + timedelta(hours=k)).isoformat())
         assert h is not None and h["forecast"] is not None
         assert h["forecast"]["soc_end"] == soc_traj[k]
         assert h["forecast_origin"] == pin_origin
+        assert h["inverter_mode"] == "charge"
 
-    # An hour before the pinned plan was made is not covered → no prognoza there.
+    # An hour before the pinned plan was made is not covered → no prognoza, and
+    # the mode band is blank there too.
     before = past.get((pin_start - timedelta(hours=1)).isoformat())
     assert before is not None and before["forecast"] is None
+    assert before["inverter_mode"] is None
 
 
 async def test_series_no_vintage_hides_forecast(hass: HomeAssistant) -> None:

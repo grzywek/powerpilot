@@ -1508,6 +1508,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 return pin_key if _pin_idx(hour) is not None else None
             return sn.origin_at(hour, 0)
 
+        def _pin_mode(hour: datetime) -> str | None:
+            """Planned inverter mode from the pinned plan (drives the mode band)."""
+            code = _pin_val(hour, "mode")
+            return MODE_CODE_INV.get(code) if code else None
+
         # ----- Past hours -----
         h = past_start
         while h < past_end:
@@ -1639,8 +1644,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "soc": round(soc_real[h], 1) if h in soc_real else None,
                     "ev_soc": round(ev_soc_real[h], 1) if h in ev_soc_real else None,
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
-                    "inverter_mode": _real_mode(
-                        bat_charge_real.get(h), bat_discharge_real.get(h)
+                    # At a stale lead the mode band follows the pinned plan's
+                    # schedule; otherwise it shows the realized mode.
+                    "inverter_mode": (
+                        _pin_mode(h)
+                        if lead > 0
+                        else _real_mode(bat_charge_real.get(h), bat_discharge_real.get(h))
                     ),
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
                     "battery_discharge_kwh": round(bat_discharge_real[h], 3) if h in bat_discharge_real else None,
@@ -1816,7 +1825,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         else (round(cur_ev_soc, 1) if cur_ev_soc is not None else None)
                     ),
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
-                    "inverter_mode": _real_mode(cur_charge, cur_discharge),
+                    "inverter_mode": (
+                        _pin_mode(now) if lead > 0 else _real_mode(cur_charge, cur_discharge)
+                    ),
                     "battery_charge_kwh": round(cur_charge, 3) if cur_charge is not None else None,
                     "battery_discharge_kwh": round(cur_discharge, 3) if cur_discharge is not None else None,
                     # Plan's grid-side charge setpoint for this hour (forecast side).
@@ -1965,7 +1976,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                             else None
                         ),
                         "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
-                        "inverter_mode": decision.inverter_mode,
+                        "inverter_mode": (
+                            _pin_mode(slot.start) if lead > 0 else decision.inverter_mode
+                        ),
                         "battery_charge_kwh": round(decision.battery_charge_kwh, 3),
                         "battery_discharge_kwh": round(decision.battery_discharge_kwh, 3),
                         "charge_power_kw": round(decision.charge_power_kw, 3),

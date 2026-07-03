@@ -1249,16 +1249,17 @@ export class PowerPilotPanel extends LitElement {
       });
     }
 
-    // EV SoC on the same right axis. `ev_soc` is the END-of-hour state (real for
-    // past hours, forecast for future), so plot it on the hour-end boundary
-    // (t + 1h) to line up with the right edge of the EV-charge bar. Real = solid,
-    // forecast = dashed. Only drawn when EV SoC is reported for some hour.
-    const hasEvSoc = hrs.some((h) => h.ev_soc != null);
+    // EV SoC on the same right axis. `ev_soc` is the END-of-hour state, plotted
+    // on the hour-end boundary (t + 1h) to line up with the right edge of the
+    // EV-charge bar. The solid line is REAL, so — like the battery SoC line — it
+    // is drawn for past/current hours only; the future is owned by the dashed
+    // forecast line (otherwise the solid line duplicates the dashed one).
+    const hasEvSoc = hrs.some((h) => h.is_past && h.ev_soc != null);
     if (hasEvSoc) {
       series.push({
         name: "EV SoC %",
         type: "line",
-        data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].ev_soc })),
+        data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].is_past ? hrs[i].ev_soc : null })),
         color: "#3498db",
       });
     }

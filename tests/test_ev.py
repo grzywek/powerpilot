@@ -21,6 +21,11 @@ from custom_components.powerpilot.const import (
 from custom_components.powerpilot.battery import BatteryModel
 from custom_components.powerpilot.models import Forecast, HourSlot
 from custom_components.powerpilot.profiles import WeeklyAccumulator
+from custom_components.powerpilot.modules.calendar import (
+    CalendarEvent,
+    Trip,
+    trip_window,
+)
 from custom_components.powerpilot.modules.ev import (
     DEFAULT_TARGET_SOC,
     EVChargeTarget,
@@ -28,8 +33,10 @@ from custom_components.powerpilot.modules.ev import (
     EVRequest,
     _capacity_samples,
     _segment_sessions,
+    _spread_energy,
     _value_at,
 )
+from custom_components.powerpilot.travel import TravelInfo, parse_distance_matrix
 from custom_components.powerpilot.optimizer import (
     ChargeCurve,
     Optimizer,
@@ -297,23 +304,35 @@ def test_not_actionable_returns_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _bare_module() -> EVModule:
+def _bare_module(**state) -> EVModule:
     module = object.__new__(EVModule)
     module._targets = []
+    module._trip_targets = []
     module._forced_hours = set()
     module._unavailable_hours = set()
+    module._trip_drain = {}
+    module._capacity = state.get("capacity", 60.0)
+    module._kwh_per_km = state.get("kwh_per_km")
+    module.min_soc_entity = (
+        SimpleNamespace(native_value=state["min_soc"]) if "min_soc" in state else None
+    )
+    module.log_warning = lambda *a, **kw: None
     return module
 
 
-def _iso(hour: int) -> str:
-    return (BASE + timedelta(hours=hour)).isoformat()
+def _event(summary: str, start: int, end: int, location: str = "") -> CalendarEvent:
+    return CalendarEvent(
+        summary=summary,
+        location=location,
+        start=BASE + timedelta(hours=start),
+        end=BASE + timedelta(hours=end),
+        calendar="calendar.test",
+    )
 
 
 def test_parse_percent_event_is_deadline_target() -> None:
     module = _bare_module()
-    module._parse_event(
-        {"summary": "Kotek 100%", "start": _iso(4), "end": _iso(5)}, "Kotek", BASE
-    )
+    module._parse_keyword_event(_event("Kotek 100%", 4, 5), "Kotek", BASE)
     assert len(module._targets) == 1
     assert module._targets[0].target_soc == 100.0
     assert module._targets[0].deadline == BASE + timedelta(hours=4)
@@ -322,9 +341,7 @@ def test_parse_percent_event_is_deadline_target() -> None:
 
 def test_parse_bare_event_is_forced_window() -> None:
     module = _bare_module()
-    module._parse_event(
-        {"summary": "Kotek", "start": _iso(6), "end": _iso(9)}, "Kotek", BASE
-    )
+    module._parse_keyword_event(_event("Kotek", 6, 9), "Kotek", BASE)
     assert module._targets == []
     offsets = sorted(int((h - BASE).total_seconds() // 3600) for h in module._forced_hours)
     assert offsets == [6, 7, 8]
@@ -332,69 +349,136 @@ def test_parse_bare_event_is_forced_window() -> None:
 
 def test_parse_percent_accepts_comma_decimal_and_spaces() -> None:
     module = _bare_module()
-    module._parse_event(
-        {"summary": "Kotek 55,5 %", "start": _iso(3), "end": _iso(4)}, "Kotek", BASE
-    )
+    module._parse_keyword_event(_event("Kotek 55,5 %", 3, 4), "Kotek", BASE)
     assert module._targets[0].target_soc == 55.5
 
 
 def test_parse_skips_past_deadline() -> None:
     module = _bare_module()
     now = BASE + timedelta(hours=5)
-    module._parse_event(
-        {"summary": "Kotek 80%", "start": _iso(2), "end": _iso(3)}, "Kotek", now
-    )
+    module._parse_keyword_event(_event("Kotek 80%", 2, 3), "Kotek", now)
     assert module._targets == []
 
 
 def test_parse_skips_non_matching_summary() -> None:
     module = _bare_module()
-    module._parse_event(
-        {"summary": "Pranie", "start": _iso(2), "end": _iso(3)}, "Kotek", BASE
-    )
+    module._parse_keyword_event(_event("Pranie", 2, 3), "Kotek", BASE)
     assert module._targets == [] and module._forced_hours == set()
 
 
 def test_parse_custom_keyword_case_insensitive() -> None:
     module = _bare_module()
-    module._parse_event(
-        {"summary": "auto 75%", "start": _iso(4), "end": _iso(5)}, "Auto", BASE
-    )
+    module._parse_keyword_event(_event("auto 75%", 4, 5), "Auto", BASE)
     assert module._targets[0].target_soc == 75.0
 
 
 # ---------------------------------------------------------------------------
-# Calendar-location unavailability
+# Trips: unavailability window, drive drain and pre-departure targets
 # ---------------------------------------------------------------------------
 
 
-def test_mark_unavailable_marks_hours_for_non_home_location() -> None:
-    module = _bare_module()
-    module._mark_unavailable(
-        {"summary": "Wyjazd", "location": "Warszawa", "start": _iso(2), "end": _iso(4)},
-        BASE,
+def _trip(
+    start: int,
+    end: int,
+    distance_km: float | None = None,
+    duration_min: float = 0.0,
+    margin_min: float = 0.0,
+    label: str = "Wyjazd",
+) -> Trip:
+    event_start = BASE + timedelta(hours=start)
+    event_end = BASE + timedelta(hours=end)
+    depart, return_end = trip_window(
+        event_start,
+        event_end,
+        TravelInfo(distance_km=distance_km, duration_min=duration_min)
+        if distance_km is not None
+        else None,
+        margin_min,
+        margin_min,
     )
+    return Trip(
+        label=label,
+        location="Warszawa",
+        event_start=event_start,
+        event_end=event_end,
+        depart=depart,
+        return_end=return_end,
+        distance_km=distance_km,
+        duration_min=duration_min if distance_km is not None else None,
+    )
+
+
+def test_trip_window_extends_by_travel_and_margins() -> None:
+    depart, return_end = trip_window(
+        BASE + timedelta(hours=10),
+        BASE + timedelta(hours=12),
+        TravelInfo(distance_km=50.0, duration_min=45.0),
+        30.0,
+        15.0,
+    )
+    assert depart == BASE + timedelta(hours=10) - timedelta(minutes=75)
+    assert return_end == BASE + timedelta(hours=12) + timedelta(minutes=60)
+
+
+def test_trip_window_without_travel_uses_margins_only() -> None:
+    depart, return_end = trip_window(
+        BASE + timedelta(hours=10), BASE + timedelta(hours=12), None, 30.0, 30.0
+    )
+    assert depart == BASE + timedelta(hours=9, minutes=30)
+    assert return_end == BASE + timedelta(hours=12, minutes=30)
+
+
+def test_apply_trip_marks_away_hours_unavailable() -> None:
+    module = _bare_module()
+    # Event 10–12, travel 45 min + margin 30 min → away 8:45 – 13:15.
+    module._apply_trip(_trip(10, 12, 50.0, 45.0, 30.0), BASE)
     offsets = sorted(
         int((h - BASE).total_seconds() // 3600) for h in module._unavailable_hours
     )
-    assert offsets == [2, 3]
+    assert offsets == [8, 9, 10, 11, 12, 13]
 
 
-def test_mark_unavailable_ignores_home_location() -> None:
-    module = _bare_module()
-    module._mark_unavailable(
-        {"summary": "Cokolwiek", "location": "dom", "start": _iso(2), "end": _iso(4)},
-        BASE,
-    )
-    assert module._unavailable_hours == set()
+def test_apply_trip_builds_drain_and_target() -> None:
+    # 50 km one-way, 0.2 kWh/km → 10 kWh per leg, 20 kWh round trip.
+    # 60 kWh pack, min SoC 20 % → target 20 + 20/60*100 = 53.33 %.
+    module = _bare_module(kwh_per_km=0.2, min_soc=20.0)
+    module._apply_trip(_trip(10, 12, 50.0, 60.0, 0.0), BASE)
+    assert round(sum(module._trip_drain.values()), 3) == 20.0
+    assert len(module._trip_targets) == 1
+    target = module._trip_targets[0]
+    assert target.source == "trip"
+    assert target.deadline == BASE + timedelta(hours=9)
+    assert round(target.target_soc, 2) == 53.33
 
 
-def test_mark_unavailable_ignores_events_without_location() -> None:
-    module = _bare_module()
-    module._mark_unavailable(
-        {"summary": "Kotek 100%", "start": _iso(2), "end": _iso(4)}, BASE
-    )
-    assert module._unavailable_hours == set()
+def test_apply_trip_without_distance_is_unavailability_only() -> None:
+    module = _bare_module(kwh_per_km=0.2, min_soc=20.0)
+    module._apply_trip(_trip(10, 12, None, margin_min=30.0), BASE)
+    assert module._unavailable_hours  # away window still applies
+    assert module._trip_drain == {}
+    assert module._trip_targets == []
+
+
+def test_apply_trip_without_kwh_per_km_skips_energy_model() -> None:
+    module = _bare_module(kwh_per_km=None, min_soc=20.0)
+    module._apply_trip(_trip(10, 12, 50.0, 45.0, 0.0), BASE)
+    assert module._trip_drain == {}
+    assert module._trip_targets == []
+
+
+def test_spread_energy_splits_evenly_over_hours() -> None:
+    out = _spread_energy(BASE + timedelta(hours=2), BASE + timedelta(hours=4), 6.0)
+    assert {int((h - BASE).total_seconds() // 3600): kwh for h, kwh in out.items()} == {
+        2: 3.0,
+        3: 3.0,
+    }
+
+
+def test_spread_energy_sub_hour_leg_lands_on_start_hour() -> None:
+    start = BASE + timedelta(hours=2, minutes=10)
+    out = _spread_energy(start, start + timedelta(minutes=20), 4.0)
+    assert list(out.values()) == [4.0]
+    assert list(out.keys())[0] == BASE + timedelta(hours=2)
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +504,14 @@ def _module_with_state(**state) -> EVModule:
     module._home = state.get("home")
     module._charging = state.get("charging")
     module._targets = state.get("targets", [])
+    module._trip_targets = state.get("trip_targets", [])
     module._forced_hours = state.get("forced_hours", set())
     module._unavailable_hours = state.get("unavailable_hours", set())
+    module._trip_drain = state.get("trip_drain", {})
+    min_soc = state.get("min_soc")
+    module.min_soc_entity = (
+        SimpleNamespace(native_value=min_soc) if min_soc is not None else None
+    )
     # Capacity is learned at runtime; tests supply it directly.
     module._capacity = state.get("capacity", 60.0)
     module._kwh_per_km = state.get("kwh_per_km")
@@ -538,6 +628,32 @@ def test_soc_limit_falls_back_to_default() -> None:
     assert module.soc_limit_now() == DEFAULT_TARGET_SOC
 
 
+def test_soc_limit_raised_by_trip_target() -> None:
+    # A trip needing 95% must raise the advisory limit above the routine 80%.
+    module = _module_with_state(
+        target_soc=80.0,
+        trip_targets=[
+            EVChargeTarget(
+                deadline=BASE + timedelta(hours=6), target_soc=95.0, source="trip"
+            )
+        ],
+    )
+    assert module.soc_limit_now() == 95.0
+
+
+def test_soc_limit_not_lowered_by_small_trip_target() -> None:
+    # Trip targets are a floor, not a ceiling — a small trip keeps the 80% cap.
+    module = _module_with_state(
+        target_soc=80.0,
+        trip_targets=[
+            EVChargeTarget(
+                deadline=BASE + timedelta(hours=6), target_soc=35.0, source="trip"
+            )
+        ],
+    )
+    assert module.soc_limit_now() == 80.0
+
+
 # ---------------------------------------------------------------------------
 # Battery capacity learning
 # ---------------------------------------------------------------------------
@@ -631,3 +747,150 @@ def test_get_request_drain_based_topup() -> None:
     )
     req = module.get_request(fc)
     assert round(req.required_kwh, 3) == 6.0
+
+
+def test_get_request_passes_trip_targets_and_drain() -> None:
+    fc = _forecast([0.5] * 6)
+    trip_target = EVChargeTarget(
+        deadline=BASE + timedelta(hours=4), target_soc=50.0, source="trip"
+    )
+    drain = {BASE + timedelta(hours=4): 6.0}
+    module = _module_with_state(
+        soc=70.0, target_soc=80.0, trip_targets=[trip_target], trip_drain=drain,
+        min_soc=25.0,
+    )
+    req = module.get_request(fc)
+    # Trip targets do NOT suppress the routine top-up (only keyword plans do).
+    assert req.required_kwh > 0
+    assert req.targets == [trip_target]
+    assert req.drain_kwh == drain
+    assert req.min_soc == 25.0
+
+
+# ---------------------------------------------------------------------------
+# Allocator + SoC projection with trip drain
+# ---------------------------------------------------------------------------
+
+
+def test_target_after_drain_buys_the_drained_energy_back() -> None:
+    # 60 kWh pack at 50% (30 kWh). A 12 kWh trip drains before the deadline at
+    # h5; target 50% by h5 → without drain nothing to buy, with drain 12 kWh.
+    prices = [0.2, 0.2, 0.9, 0.9, 0.9, 0.9]
+    fc = _forecast(prices)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=7.0,
+        battery_kwh=60.0,
+        current_soc=50.0,
+        available_hours={s.start for s in fc.slots},
+        targets=[EVChargeTarget(deadline=BASE + timedelta(hours=5), target_soc=50.0)],
+        drain_kwh={BASE + timedelta(hours=3): 12.0},
+    )
+    alloc = _hours(_optimizer()._plan_ev(fc, req))
+    assert round(sum(alloc.values()), 3) == 12.0
+    assert all(h < 5 for h in alloc)
+
+
+def test_full_pack_with_upcoming_trip_can_still_top_up() -> None:
+    # Pack already at 100 % but a 10 kWh trip drain is coming — the room-to-100%
+    # cap must credit the drain so the default top-up can buy the energy back.
+    fc = _forecast([0.3] * 8)
+    req = EVRequest(
+        enabled=True,
+        required_kwh=10.0,
+        charger_kw=5.0,
+        battery_kwh=60.0,
+        current_soc=100.0,
+        available_hours={s.start for s in fc.slots},
+        drain_kwh={BASE + timedelta(hours=2): 10.0},
+    )
+    alloc = _optimizer()._plan_ev(fc, req)
+    assert round(sum(alloc.values()), 3) == 10.0
+
+
+def test_plan_ev_soc_line_subtracts_trip_drain() -> None:
+    fc = _forecast([0.5] * 4)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=7.0,
+        battery_kwh=60.0,
+        current_soc=50.0,
+        available_hours=set(),  # away → no charging planned
+        drain_kwh={
+            BASE + timedelta(hours=1): 6.0,
+            BASE + timedelta(hours=2): 6.0,
+        },
+        # Keep the request actionable so it reaches the projection.
+        targets=[EVChargeTarget(deadline=BASE + timedelta(hours=3), target_soc=50.0)],
+    )
+    battery = BatteryModel(capacity_kwh=10.0, soc=50.0)
+    plan = _optimizer().optimize(fc, battery, req)
+    socs = [d.ev_soc for d in plan.decisions]
+    # 50% → 40% → 30% (6 kWh = 10% of 60 kWh per drained hour), then flat.
+    assert socs == [50.0, 40.0, 30.0, 30.0]
+
+
+# ---------------------------------------------------------------------------
+# Google Maps response parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_distance_matrix_ok() -> None:
+    payload = {
+        "status": "OK",
+        "rows": [
+            {
+                "elements": [
+                    {
+                        "status": "OK",
+                        "distance": {"value": 52340},
+                        "duration": {"value": 2712},
+                    }
+                ]
+            }
+        ],
+    }
+    info = parse_distance_matrix(payload)
+    assert info is not None
+    assert round(info.distance_km, 2) == 52.34
+    assert round(info.duration_min, 1) == 45.2
+
+
+def test_parse_distance_matrix_rejects_unresolved() -> None:
+    assert parse_distance_matrix({"status": "REQUEST_DENIED"}) is None
+    assert (
+        parse_distance_matrix(
+            {"status": "OK", "rows": [{"elements": [{"status": "NOT_FOUND"}]}]}
+        )
+        is None
+    )
+    assert parse_distance_matrix({}) is None
+
+
+# ---------------------------------------------------------------------------
+# Deadline feasibility reminders
+# ---------------------------------------------------------------------------
+
+
+def test_reminder_when_target_unreachable_before_departure() -> None:
+    fc = _forecast([0.5] * 3)
+    # 60 kWh pack at 10% (6 kWh); needs 90% (54 kWh) by h2 with only two 7 kW
+    # hours available → 48 kWh short of the 48 kWh deficit... clearly infeasible.
+    module = _module_with_state(soc=10.0, target_soc=80.0)
+    module._targets = [
+        EVChargeTarget(deadline=BASE + timedelta(hours=2), target_soc=90.0)
+    ]
+    module.get_request(fc)
+    reminders = module._deadline_feasibility_reminders()
+    assert len(reminders) == 1
+    assert "nie zdąży" in reminders[0]
+
+
+def test_no_reminder_when_target_reachable() -> None:
+    fc = _forecast([0.5] * 6)
+    module = _module_with_state(soc=60.0, target_soc=80.0)
+    module._targets = [
+        EVChargeTarget(deadline=BASE + timedelta(hours=5), target_soc=70.0)
+    ]
+    module.get_request(fc)
+    assert module._deadline_feasibility_reminders() == []

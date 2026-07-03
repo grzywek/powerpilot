@@ -112,13 +112,37 @@ CONF_EV_ODOMETER_SENSOR: Final = "ev_odometer_sensor"  # total km (increasing) �
 # forecast (no double counting); realized history is unaffected. Set only when the
 # charger sits inside the main consumption meter.
 CONF_EV_CHARGE_METER_SENSOR: Final = "ev_charge_meter_sensor"
-# Calendar-driven charging plan. Reads an HA ``calendar.*`` entity (works with
-# Google, CalDAV/iCloud, Local Calendar, …). Events whose summary starts with
-# the keyword schedule charging — "Kotek 100%" = a deadline target (be at 100 %
-# by the event start, optimizer picks the cheapest hours), bare "Kotek" = a
-# forced window (charge at full power for the event's hours, no SoC limit).
+# Legacy single-calendar key. Superseded by the integration-wide CONF_CALENDARS
+# list (below); kept only so ``async_setup_entry`` can seed the new list once on
+# upgrade — nothing reads it at runtime anymore.
 CONF_EV_CALENDAR: Final = "ev_calendar"
 CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # event-summary trigger word (e.g. "Kotek")
+
+# --- Calendars (integration-wide, not EV-specific) ---
+# HA ``calendar.*`` entities read for planning (works with Google, CalDAV/
+# iCloud, Local Calendar, …). Events feed two consumers:
+# * EV keyword events ("Kotek 100%" = deadline target, bare "Kotek" = forced
+#   window) — parsed by the EV module from *every* configured calendar.
+# * Events with a ``location`` become trips: the car is away for the event plus
+#   travel time (Google Maps) plus the margins below. Those hours are not
+#   chargeable and the round trip drains the EV pack (learned kWh/km).
+CONF_CALENDARS: Final = "calendars"
+# Google Maps API key (Distance Matrix API). Without it trips carry no
+# distance/travel-time model — unavailability covers only the event span (plus
+# margins) and no drive energy is planned; a warning is logged instead of
+# guessing. Resolved distances are cached per location string (see below).
+CONF_GMAPS_API_KEY: Final = "gmaps_api_key"
+# Extra unavailability margin (minutes) before departure and after the return —
+# packing the car, parking, cable staying unplugged etc.
+CONF_TRAVEL_MARGIN_BEFORE_MIN: Final = "travel_margin_before_min"
+CONF_TRAVEL_MARGIN_AFTER_MIN: Final = "travel_margin_after_min"
+
+# Storage version + lifetime of the per-entry travel (distance/duration) cache —
+# one Google Maps call per unique location per TRAVEL_CACHE_DAYS.
+STORAGE_VERSION_TRAVEL: Final = 1
+TRAVEL_CACHE_DAYS: Final = 30
+# Event locations (lower-cased, exact match) treated as "at home" — no trip.
+HOME_LOCATION_MARKERS: Final = ("dom", "home")
 
 # --- EV target SoC (own writable entity, not a config field) ---
 # PowerPilot exposes its own ``number.*`` entity for the charge target instead
@@ -127,6 +151,13 @@ CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # event-summary trigger
 # flow. Calendar deadline targets / forced windows still override it.
 NUMBER_EV_TARGET_SOC: Final = "ev_target_soc"
 EV_TARGET_SOC_DEFAULT: Final = 80.0
+
+# --- EV minimum SoC (own writable entity, not a config field) ---
+# Safety reserve (%) the car should never be planned below: trip targets charge
+# to at least ``min SoC + round-trip energy`` before departure, and routine
+# top-ups keep this floor. Writable from the dashboard like the target SoC.
+NUMBER_EV_MIN_SOC: Final = "ev_min_soc"
+EV_MIN_SOC_DEFAULT: Final = 20.0
 
 # --- EV battery capacity (learned, not configured) ---
 # Capacity is derived from charging sessions: kWh added ÷ SoC gained × 100. The
@@ -144,7 +175,6 @@ MIN_SESSION_SOC: Final = 15.0  # need a meaningful SoC swing for a clean estimat
 # out of the pack per hour) predicts routine driving so charging anticipates it.
 DRAIN_LEARN_DAYS: Final = 30
 MIN_TRIP_KM: Final = 2.0  # ignore sub-2 km noise when learning kWh/km
-EV_RESERVE_SOC: Final = 20.0  # keep this much SoC as a floor when sizing top-ups
 DRAIN_HORIZON_HOURS: Final = 24  # look-ahead window for predicted driving drain
 
 # --- Distribution tariffs ---
@@ -199,6 +229,8 @@ DEFAULTS: Final = {
     CONF_EV_CHARGER_PHASE: 1,
     CONF_EV_CHARGER_PHASES: 1,
     CONF_EV_CALENDAR_KEYWORD: "Kotek",
+    CONF_TRAVEL_MARGIN_BEFORE_MIN: 30,
+    CONF_TRAVEL_MARGIN_AFTER_MIN: 30,
 }
 
 # ---------------------------------------------------------------------------

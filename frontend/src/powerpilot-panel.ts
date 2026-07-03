@@ -33,6 +33,18 @@ interface Plan {
   forecast: ForecastHour[];
 }
 
+interface EVTrip {
+  label: string;
+  location: string;
+  event_start: string;
+  event_end: string;
+  depart: string;
+  return_end: string;
+  distance_km: number | null;
+  duration_min: number | null;
+  energy_kwh: number | null;
+}
+
 interface EVPlan {
   enabled: boolean;
   available: boolean;
@@ -51,8 +63,10 @@ interface EVPlan {
   kwh_per_km: number | null;
   drain_days: number;
   drain_next24_kwh: number | null;
-  targets: { deadline: string; target_soc: number; label: string }[];
+  min_soc: number | null;
+  targets: { deadline: string; target_soc: number; label: string; source?: string }[];
   forced_hours: string[];
+  trips: EVTrip[];
   planned_hours: { start: string; kwh: number }[];
   control: {
     connect_charger: boolean;
@@ -1495,6 +1509,7 @@ export class PowerPilotPanel extends LitElement {
           ...this._inverterModeAnnotations(s),
           ...this._dayBoundaryAnnotations(s),
           ...this._evForcedAnnotations(),
+          ...this._evAwayAnnotations(),
           {
             x: nowTs,
             borderColor: nowColor,
@@ -1511,23 +1526,55 @@ export class PowerPilotPanel extends LitElement {
     };
   }
 
-  /** Calendar deadline targets ("Kotek 100%") as points on the SoC axis, drawn
-   *  at (deadline, target SoC%) so the chart shows where the car must reach a
-   *  given charge level. */
+  /** Calendar deadline targets ("Kotek 100%") and automatic pre-trip minimums
+   *  as points on the SoC axis, drawn at (deadline, target SoC%) so the chart
+   *  shows where the car must reach a given charge level. Trip targets (a
+   *  floor, not a ceiling) are drawn in the away-window red. */
   private _evDeadlineAnnotations(): any[] {
     const targets = this._status?.ev?.targets ?? [];
     return targets
-      .map((t) => ({ ts: new Date(t.deadline).getTime(), soc: t.target_soc }))
-      .filter((t) => !isNaN(t.ts))
       .map((t) => ({
-        x: t.ts,
-        y: t.soc,
-        yAxisIndex: 1,
-        marker: { size: 6, fillColor: "#3498db", strokeColor: "#ffffff", strokeWidth: 2 },
+        ts: new Date(t.deadline).getTime(),
+        soc: t.target_soc,
+        trip: t.source === "trip",
+      }))
+      .filter((t) => !isNaN(t.ts))
+      .map((t) => {
+        const color = t.trip ? "#e74c3c" : "#3498db";
+        return {
+          x: t.ts,
+          y: t.soc,
+          yAxisIndex: 1,
+          marker: { size: 6, fillColor: color, strokeColor: "#ffffff", strokeWidth: 2 },
+          label: {
+            text: t.trip ? `🚗 min ${Math.round(t.soc)}%` : `🚗 ${t.soc}%`,
+            borderColor: color,
+            style: { background: color, color: "#ffffff", fontSize: "11px" },
+          },
+        };
+      });
+  }
+
+  /** Trip away-windows (departure → return, incl. travel time and margins) as
+   *  shaded x-axis regions — the car is not home, charging can't happen. */
+  private _evAwayAnnotations(): any[] {
+    const trips = this._status?.ev?.trips ?? [];
+    return trips
+      .map((t) => ({
+        x: new Date(t.depart).getTime(),
+        x2: new Date(t.return_end).getTime(),
+        label: t.label,
+      }))
+      .filter((r) => !isNaN(r.x) && !isNaN(r.x2) && r.x2 > r.x)
+      .map((r) => ({
+        x: r.x,
+        x2: r.x2,
+        fillColor: "#e74c3c",
+        opacity: 0.12,
         label: {
-          text: `🚗 ${t.soc}%`,
-          borderColor: "#3498db",
-          style: { background: "#3498db", color: "#ffffff", fontSize: "11px" },
+          text: `🚗 ${r.label}`,
+          position: "top",
+          style: { background: "#e74c3c", color: "#ffffff", fontSize: "10px" },
         },
       }));
   }
@@ -2133,6 +2180,7 @@ export class PowerPilotPanel extends LitElement {
         <div class="check">
           Stan: <b>${ev.soc !== null ? `${ev.soc}%` : "—"}</b>
           ${ev.target_soc !== null ? html`<span class="muted">cel ${ev.target_soc}%</span>` : nothing}
+          ${ev.min_soc != null ? html`<span class="muted">· min ${ev.min_soc}%</span>` : nothing}
         </div>
         <div class="check">
           Pojemność baterii:
@@ -2163,11 +2211,28 @@ export class PowerPilotPanel extends LitElement {
         ${ev.energy_added_kwh !== null
           ? html`<div class="check">Dodano w sesji: <b>${ev.energy_added_kwh} kWh</b></div>`
           : nothing}
+        ${ev.trips?.length
+          ? html`<div class="check"><b>Wyjazdy (kalendarz + Google Maps)</b></div>
+              ${ev.trips.map(
+                (t) => html`<div class="check">
+                  <span class="dot bad"></span>
+                  <b>${t.label || t.location}</b>
+                  <span class="muted">
+                    ${this._fmtRun(t.depart)} → ${this._fmtRun(t.return_end)}
+                    ${t.distance_km != null
+                      ? ` · ${t.distance_km.toFixed(0)} km w jedną stronę`
+                      : " · brak dystansu (Google Maps)"}
+                    ${t.duration_min != null ? ` · dojazd ${Math.round(t.duration_min)} min` : ""}
+                    ${t.energy_kwh != null ? ` · ~${t.energy_kwh.toFixed(1)} kWh na podróż` : ""}
+                  </span>
+                </div>`
+              )}`
+          : nothing}
         ${ev.targets.length
           ? html`<div class="check"><b>Terminy z kalendarza</b></div>
               ${ev.targets.map(
                 (t) => html`<div class="check">
-                  <span class="dot ok"></span>${t.target_soc}% do
+                  <span class="dot ok"></span>${t.source === "trip" ? "min " : ""}${t.target_soc.toFixed(0)}% do
                   <b>${this._fmtRun(t.deadline)}</b>
                   ${t.label ? html`<span class="muted">${t.label}</span>` : nothing}
                 </div>`

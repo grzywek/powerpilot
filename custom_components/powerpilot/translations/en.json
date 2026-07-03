@@ -44,6 +44,16 @@
           "price_refresh_hours": "Source refresh interval (h)"
         }
       },
+      "calendars": {
+        "title": "PowerPilot – calendars & trips",
+        "description": "Calendars read by the whole integration (not just the EV). Events with a location become trips: Google Maps resolves the distance and travel time, and the car is unavailable for charging from departure until return (plus margins).",
+        "data": {
+          "calendars": "Calendars (multiple allowed)",
+          "gmaps_api_key": "Google Maps API key (Distance Matrix) — distance & travel time",
+          "travel_margin_before_min": "Unavailability margin before departure (min)",
+          "travel_margin_after_min": "Unavailability margin after return (min)"
+        }
+      },
       "ev": {
         "title": "PowerPilot – EV",
         "description": "Optional electric-vehicle charging optimization.",
@@ -55,7 +65,6 @@
           "ev_energy_added_sensor": "Energy added this session (kWh)",
           "ev_charge_meter_sensor": "EV charging meter (grid-side, kWh) — excluded from the demand profile",
           "ev_location_sensor": "EV location — home/away (used for reminders and detecting away-from-home charging)",
-          "ev_calendar": "Charging calendar",
           "ev_calendar_keyword": "Calendar event keyword (e.g. Kotek)",
           "ev_range_km": "Range on a full charge (km)",
           "ev_battery_kwh": "EV battery capacity (kWh)",
@@ -76,6 +85,7 @@
           "hierarchy": "🌳 Meter hierarchy (consumption levels)",
           "charge_curve": "🔋 Charge curve (power vs SoC)",
           "prices": "💰 Energy prices",
+          "calendars": "📅 Calendars & trips",
           "ev": "🚗 EV",
           "tariff_list": "🧾 Distribution tariffs",
           "reset_data": "🧹 Clear data & cache (keep config)",
@@ -143,6 +153,16 @@
           "price_refresh_hours": "Source refresh interval (h)"
         }
       },
+      "calendars": {
+        "title": "PowerPilot – calendars & trips",
+        "description": "Calendars read by the whole integration (not just the EV). Events with a location become trips: Google Maps resolves the distance and travel time, and the car is unavailable for charging from departure until return (plus margins).",
+        "data": {
+          "calendars": "Calendars (multiple allowed)",
+          "gmaps_api_key": "Google Maps API key (Distance Matrix) — distance & travel time",
+          "travel_margin_before_min": "Unavailability margin before departure (min)",
+          "travel_margin_after_min": "Unavailability margin after return (min)"
+        }
+      },
       "ev": {
         "title": "PowerPilot – EV",
         "data": {
@@ -153,7 +173,6 @@
           "ev_energy_added_sensor": "Energy added this session (kWh)",
           "ev_charge_meter_sensor": "EV charging meter (grid-side, kWh) — excluded from the demand profile",
           "ev_location_sensor": "EV location — home/away (used for reminders and detecting away-from-home charging)",
-          "ev_calendar": "Charging calendar",
           "ev_calendar_keyword": "Calendar event keyword (e.g. Kotek)",
           "ev_range_km": "Range on a full charge (km)",
           "ev_battery_kwh": "EV battery capacity (kWh)",
@@ -267,6 +286,9 @@
     "number": {
       "ev_target_soc": {
         "name": "EV target SoC"
+      },
+      "ev_min_soc": {
+        "name": "EV minimum SoC (reserve)"
       }
     }
   }

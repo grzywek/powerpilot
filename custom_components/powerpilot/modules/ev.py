@@ -4,15 +4,23 @@ Computes how much energy the car needs and when it is available to charge, then
 exposes a structured :class:`EVRequest` the optimizer can schedule into the
 cheapest hours (respecting the phase shared with the inverter).
 
-Two charging modes feed the optimizer:
+Three calendar-driven inputs feed the optimizer (events come from every
+calendar configured in the integration-wide ``CONF_CALENDARS`` list, read by
+the calendar module — which the registry updates *before* this one):
 
 * **Deadline targets** — a calendar event ``"<keyword> 100%"`` spanning e.g.
   12:00–13:00 means *"the EV must be at 100 % SoC by 12:00"*. The optimizer is
   free to pick the cheapest available hours before that deadline.
 * **Forced windows** — a bare calendar event ``"<keyword>"`` means *"charge at
   full power for the event's hours"* (manual choice, no SoC limit).
+* **Trips** — events with a non-home ``location``. The calendar module turns
+  them into away windows (event span extended by Google-Maps travel time plus
+  the configured margins): those hours are *unavailable* for charging, the
+  round trip drains the pack (learned kWh/km), and each trip adds an automatic
+  deadline target — be at ``min SoC + round-trip energy`` before departure so
+  the car always makes the trip with the safety reserve intact.
 
-With no calendar events the module falls back to topping the car up to the
+With no keyword events the module falls back to topping the car up to the
 target SoC (from the target-SoC sensor, or :data:`DEFAULT_TARGET_SOC`) in the
 cheapest available hours — the original Stage-0 behaviour.
 """
@@ -31,7 +39,6 @@ from homeassistant.util import dt as dt_util
 from ..const import (
     CAPACITY_LEARN_DAYS,
     CONF_EV_BATTERY_KWH,
-    CONF_EV_CALENDAR,
     CONF_EV_CALENDAR_KEYWORD,
     CONF_EV_CHARGER_KW,
     CONF_EV_CHARGER_PHASE,
@@ -46,7 +53,7 @@ from ..const import (
     DOMAIN,
     DRAIN_HORIZON_HOURS,
     DRAIN_LEARN_DAYS,
-    EV_RESERVE_SOC,
+    EV_MIN_SOC_DEFAULT,
     EV_TARGET_SOC_DEFAULT,
     MAX_CAPACITY_SAMPLES,
     MIN_CAPACITY_SAMPLES,
@@ -58,19 +65,43 @@ from ..const import (
 from ..models import Forecast
 from ..profiles import WeeklyAccumulator
 from .base import PowerPilotModule
+from .calendar import CalendarEvent, Trip
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TARGET_SOC = EV_TARGET_SOC_DEFAULT
+DEFAULT_MIN_SOC = EV_MIN_SOC_DEFAULT
 HOME_STATES = {"home", "on", "true", "connected"}
 CHARGING_STATES = {"on", "true", "charging"}
-
-# How far ahead calendar events are read (matches the optimizer horizon cap).
-CALENDAR_LOOKAHEAD_HOURS = 96
 
 # Matches a percentage anywhere in the event-summary remainder, e.g. "100%",
 # "80 %", "55,5%".
 _PERCENT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+
+
+def _hour_floor(moment: datetime) -> datetime:
+    return moment.replace(minute=0, second=0, microsecond=0)
+
+
+def _hours_between(start: datetime, end: datetime) -> list[datetime]:
+    """Hour-bucket starts overlapping ``[start, end)`` (at least the start hour)."""
+    if end <= start:
+        return [_hour_floor(start)]
+    out: list[datetime] = []
+    hour = _hour_floor(start)
+    while hour < end:
+        out.append(hour)
+        hour += timedelta(hours=1)
+    return out
+
+
+def _spread_energy(start: datetime, end: datetime, kwh: float) -> dict[datetime, float]:
+    """Spread ``kwh`` evenly across the hour buckets of ``[start, end)``."""
+    if kwh <= 0:
+        return {}
+    hours = _hours_between(start, end)
+    per_hour = kwh / len(hours)
+    return {hour: per_hour for hour in hours}
 
 
 def _value_at(history: list[tuple[datetime, float]], when: datetime) -> float | None:
@@ -174,11 +205,17 @@ def _kwh_per_km(
 
 @dataclass
 class EVChargeTarget:
-    """A deadline by which the EV must reach ``target_soc`` (%)."""
+    """A deadline by which the EV must reach ``target_soc`` (%).
+
+    ``source`` distinguishes explicit keyword events (``"calendar"``) from
+    automatic pre-trip requirements (``"trip"``) — trip targets are a *floor*
+    (make the trip with the reserve intact), not a charge ceiling.
+    """
 
     deadline: datetime
     target_soc: float
     label: str = ""
+    source: str = "calendar"
 
 
 @dataclass
@@ -196,6 +233,12 @@ class EVRequest:
     # Calendar-driven plans.
     forced_hours: set[datetime] = field(default_factory=set)
     targets: list[EVChargeTarget] = field(default_factory=list)
+    # Predicted energy out of the pack per hour (kWh) — trip driving. The
+    # optimizer subtracts this from the projected EV SoC line and the allocator
+    # compensates for it when sizing deadline targets.
+    drain_kwh: dict[datetime, float] = field(default_factory=dict)
+    # Safety reserve (%) the plan should never dip the car below.
+    min_soc: float = 0.0
 
     @property
     def charger_power_kw(self) -> float:
@@ -224,15 +267,19 @@ class EVModule(PowerPilotModule):
         self._home: bool | None = None
         self._charging: bool | None = None
         self._targets: list[EVChargeTarget] = []
+        self._trip_targets: list[EVChargeTarget] = []
         self._forced_hours: set[datetime] = set()
-        # Hours the car is known to be away from home (calendar events with a
-        # non-home ``location``) — the only source of *unavailability*; absent
-        # that, every forecast hour is assumed chargeable.
+        # Hours the car is away from home (calendar trips: located events
+        # extended by travel time + margins) — the only source of
+        # *unavailability*; absent that, every forecast hour is chargeable.
         self._unavailable_hours: set[datetime] = set()
+        # Predicted per-hour drive drain (kWh) from calendar trips.
+        self._trip_drain: dict[datetime, float] = {}
         self._request = EVRequest()
-        # The integration's own writable target-SoC entity (see number.py).
-        # Set by NumberEntity.async_added_to_hass; read-only from here.
+        # The integration's own writable target-SoC / min-SoC entities (see
+        # number.py). Set by NumberEntity.async_added_to_hass; read-only here.
         self.target_soc_entity = None
+        self.min_soc_entity = None
         # Learned battery capacity (kWh) — see _maybe_learn_capacity.
         self._capacity: float | None = None
         self._capacity_samples: list[float] = []
@@ -254,6 +301,13 @@ class EVModule(PowerPilotModule):
         """Charge target (%) from the integration's own number entity."""
         entity = self.target_soc_entity
         return entity.native_value if entity is not None else None
+
+    @property
+    def min_soc(self) -> float:
+        """Safety reserve (%) from the integration's own number entity."""
+        entity = self.min_soc_entity
+        value = entity.native_value if entity is not None else None
+        return float(value) if value is not None else DEFAULT_MIN_SOC
 
     async def async_setup(self) -> None:
         """Load the learned capacity, seed it from legacy config, refine it."""
@@ -287,7 +341,9 @@ class EVModule(PowerPilotModule):
         if not self.enabled:
             self._request = EVRequest(enabled=False)
             self._targets = []
+            self._trip_targets = []
             self._forced_hours = set()
+            self._trip_drain = {}
             self.log_info("EV wyłączony w konfiguracji.")
             return
 
@@ -303,8 +359,10 @@ class EVModule(PowerPilotModule):
             self.config.get(CONF_EV_CHARGING_SENSOR), CHARGING_STATES
         )
 
-        await self._async_load_calendar()
+        # Learn first: trip drain/targets below depend on the freshest capacity
+        # and kWh/km estimates.
         await self._maybe_learn()
+        self._load_calendar_plans()
 
         self.log_info(
             f"EV: SoC={self._soc if self._soc is not None else '–'}%, "
@@ -315,17 +373,20 @@ class EVModule(PowerPilotModule):
             f"cel={self.target_soc if self.target_soc is not None else '–'}%, "
             f"w domu={self._home}, ładuje={self._charging}, "
             f"godziny niedostępne={len(self._unavailable_hours)}, "
-            f"deadline'y={len(self._targets)}, "
+            f"deadline'y={len(self._targets)}, wyjazdy={len(self._trip_targets)}, "
             f"godziny ręczne={len(self._forced_hours)}.",
             extra={
                 "soc": self._soc,
                 "target_soc": self.target_soc,
+                "min_soc": self.min_soc,
                 "energy_added_kwh": self._energy_added,
                 "home": self._home,
                 "charging": self._charging,
                 "unavailable_hours": len(self._unavailable_hours),
                 "targets": len(self._targets),
+                "trip_targets": len(self._trip_targets),
                 "forced_hours": len(self._forced_hours),
+                "trip_drain_kwh": round(sum(self._trip_drain.values()), 2),
             },
         )
 
@@ -483,94 +544,43 @@ class EVModule(PowerPilotModule):
         return str(state.state).lower() in HOME_STATES
 
     # ------------------------------------------------------------------
-    # Calendar
+    # Calendar (events + trips come from the calendar module, updated first)
     # ------------------------------------------------------------------
-    async def _async_load_calendar(self) -> None:
-        """Parse the configured calendar into deadline targets + forced windows."""
+    def _load_calendar_plans(self) -> None:
+        """Turn the calendar module's events/trips into charging inputs."""
         self._targets = []
+        self._trip_targets = []
         self._forced_hours = set()
         self._unavailable_hours = set()
+        self._trip_drain = {}
 
-        cal_entity = self.config.get(CONF_EV_CALENDAR)
-        if not cal_entity:
-            return
-
+        calendar = self.coordinator.calendar
         now = dt_util.now()
-        end = now + timedelta(hours=CALENDAR_LOOKAHEAD_HOURS)
-        events = await self._async_fetch_events(cal_entity, now, end)
         keyword = str(
             self.config.get(CONF_EV_CALENDAR_KEYWORD)
             or DEFAULTS[CONF_EV_CALENDAR_KEYWORD]
         ).strip()
 
-        for event in events:
-            self._parse_event(event, keyword, now)
-            # Any event with a non-home location — regardless of the charging
-            # keyword — means the car is away for its span, so those hours
-            # can't be planned into (overrides forced/deadline windows too:
-            # a self-contradictory calendar just means no charging happens).
-            self._mark_unavailable(event, now)
+        for event in calendar.events:
+            self._parse_keyword_event(event, keyword, now)
 
-    def _mark_unavailable(self, event: dict, now: datetime) -> None:
-        location = str(event.get("location") or "").strip()
-        if not location or location.lower() == "dom":
-            return
-        bounds = self._event_bounds(event)
-        if bounds is None:
-            return
-        start, end = bounds
-        hour = max(start, now).replace(minute=0, second=0, microsecond=0)
-        while hour < end:
-            self._unavailable_hours.add(hour)
-            hour += timedelta(hours=1)
+        for trip in calendar.trips:
+            self._apply_trip(trip, now)
 
-    async def _async_fetch_events(
-        self, cal_entity: str, start: datetime, end: datetime
-    ) -> list[dict]:
-        """Read events via the public ``calendar.get_events`` service.
-
-        Returns ``[]`` (and logs) when the calendar entity is unavailable — there
-        is no alternative source, so the plan simply runs without calendar input.
-        """
-        try:
-            response = await self.hass.services.async_call(
-                "calendar",
-                "get_events",
-                {
-                    "entity_id": cal_entity,
-                    "start_date_time": start.isoformat(),
-                    "end_date_time": end.isoformat(),
-                },
-                blocking=True,
-                return_response=True,
-            )
-        except Exception as err:  # noqa: BLE001 - entity/service may be missing
-            self.log_warning(
-                f"Nie udało się odczytać kalendarza {cal_entity}: {err}.",
-                extra={"calendar": cal_entity},
-            )
-            return []
-
-        data = (response or {}).get(cal_entity) or {}
-        return list(data.get("events") or [])
-
-    def _parse_event(self, event: dict, keyword: str, now: datetime) -> None:
-        summary = str(event.get("summary") or "").strip()
+    def _parse_keyword_event(
+        self, event: CalendarEvent, keyword: str, now: datetime
+    ) -> None:
+        summary = event.summary
         if not summary or not keyword:
             return
         if not summary.lower().startswith(keyword.lower()):
             return
 
         remainder = summary[len(keyword) :].strip()
-        bounds = self._event_bounds(event)
-        if bounds is None:
-            return
-        start, end = bounds
-
         match = _PERCENT_RE.search(remainder)
         if match:
             # Deadline target: be at <percent> by the event start.
-            if start <= now:
+            if event.start <= now:
                 return  # deadline already passed — nothing to schedule
             try:
                 percent = float(match.group(1).replace(",", "."))
@@ -578,39 +588,59 @@ class EVModule(PowerPilotModule):
                 return
             percent = max(0.0, min(100.0, percent))
             self._targets.append(
-                EVChargeTarget(deadline=start, target_soc=percent, label=summary)
+                EVChargeTarget(deadline=event.start, target_soc=percent, label=summary)
             )
             return
 
         # Forced window: charge at full power for every hour the event covers.
-        hour = max(start, now).replace(minute=0, second=0, microsecond=0)
-        while hour < end:
+        hour = max(event.start, now).replace(minute=0, second=0, microsecond=0)
+        while hour < event.end:
             self._forced_hours.add(hour)
             hour += timedelta(hours=1)
 
-    def _event_bounds(self, event: dict) -> tuple[datetime, datetime] | None:
-        """Localised (start, end) for an event; ``None`` if unparseable."""
-        start = self._parse_dt(event.get("start"))
-        end = self._parse_dt(event.get("end"))
-        if start is None or end is None or end <= start:
-            return None
-        return start, end
+    def _apply_trip(self, trip: Trip, now: datetime) -> None:
+        """One trip → unavailable hours, drive drain and a pre-departure target.
 
-    @staticmethod
-    def _parse_dt(value) -> datetime | None:
-        """Parse a calendar ``start``/``end`` (datetime or all-day date)."""
-        if not value:
-            return None
-        text = str(value)
-        parsed = dt_util.parse_datetime(text)
-        if parsed is None:
-            day = dt_util.parse_date(text)
-            if day is None:
-                return None
-            parsed = datetime(day.year, day.month, day.day)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
-        return dt_util.as_local(parsed)
+        The away window (depart → return) can't be planned into (overrides
+        forced/deadline windows too: a self-contradictory calendar just means
+        no charging happens). The round trip drains the pack via the learned
+        kWh/km; without that model (or without Google-Maps distance) the trip
+        stays unavailability-only and a warning is logged instead of guessing.
+        """
+        # 1. Unavailability — every hour the away window touches.
+        hour = max(trip.depart, now).replace(minute=0, second=0, microsecond=0)
+        while hour < trip.return_end:
+            self._unavailable_hours.add(hour)
+            hour += timedelta(hours=1)
+
+        # 2. Drive energy: one-way legs spread over the departure/return spans.
+        if trip.distance_km is None:
+            return  # calendar module already logged the missing travel model
+        if not self._kwh_per_km:
+            self.log_warning(
+                f"Wyjazd „{trip.label}”: brak nauczonego zużycia kWh/km — "
+                "energia dojazdu nieuwzględniona w prognozie SoC.",
+                extra={"trip": trip.label, "distance_km": trip.distance_km},
+            )
+            return
+        leg_kwh = trip.distance_km * self._kwh_per_km
+        for bucket, kwh in _spread_energy(trip.depart, trip.event_start, leg_kwh).items():
+            self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + kwh
+        for bucket, kwh in _spread_energy(trip.event_end, trip.return_end, leg_kwh).items():
+            self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + kwh
+
+        # 3. Pre-departure target: reserve + round trip must be in the pack.
+        if trip.depart <= now or not self._capacity:
+            return
+        needed_soc = self.min_soc + (2.0 * leg_kwh) / self._capacity * 100.0
+        self._trip_targets.append(
+            EVChargeTarget(
+                deadline=trip.depart,
+                target_soc=min(100.0, needed_soc),
+                label=f"Wyjazd: {trip.label}",
+                source="trip",
+            )
+        )
 
     # ------------------------------------------------------------------
     # Request building
@@ -628,7 +658,9 @@ class EVModule(PowerPilotModule):
             for slot in forecast.slots
         } - self._unavailable_hours
 
-        # Calendar plans take over when present; otherwise size routine charging.
+        # Explicit keyword plans take over routine sizing; automatic trip
+        # targets do NOT — they are a floor on top of normal behaviour, so the
+        # routine top-up keeps running alongside them.
         if self._targets or self._forced_hours:
             required_kwh = 0.0
         else:
@@ -639,11 +671,11 @@ class EVModule(PowerPilotModule):
             current_energy = current_soc / 100.0 * battery_kwh
             predicted = self.predicted_drain_kwh()
             if predicted is not None and battery_kwh > 0:
-                # Charge to cover the next look-ahead of predicted driving plus a
-                # SoC reserve floor — never above the car's own target SoC. This
-                # is the learned consumption profile driving routine charging.
+                # Charge to cover the next look-ahead of predicted driving plus
+                # the safety-reserve floor — never above the car's own target
+                # SoC. Learned consumption drives routine charging.
                 target_energy = min(
-                    predicted + EV_RESERVE_SOC / 100.0 * battery_kwh,
+                    predicted + self.min_soc / 100.0 * battery_kwh,
                     target_soc / 100.0 * battery_kwh,
                 )
                 required_kwh = max(0.0, target_energy - current_energy)
@@ -661,7 +693,9 @@ class EVModule(PowerPilotModule):
             current_soc=self._soc,
             available_hours=available_hours,
             forced_hours=set(self._forced_hours),
-            targets=list(self._targets),
+            targets=[*self._targets, *self._trip_targets],
+            drain_kwh=dict(self._trip_drain),
+            min_soc=self.min_soc,
         )
         return self._request
 
@@ -695,7 +729,51 @@ class EVModule(PowerPilotModule):
             reminders.append(
                 "EV ładuje się poza domem — to nie jest zaplanowana sesja z prognozy."
             )
+        reminders.extend(self._deadline_feasibility_reminders())
         return reminders
+
+    def _deadline_feasibility_reminders(self) -> list[str]:
+        """Warn when a deadline target physically can't be reached in time.
+
+        Compares the energy still missing to the target against what the
+        charger can deliver in the available hours before the deadline. Needs
+        the live SoC and a known capacity — without them there is nothing to
+        compare against.
+        """
+        request = self._request
+        if (
+            not request.enabled
+            or request.current_soc is None
+            or request.battery_kwh <= 0
+        ):
+            return []
+        power = request.charger_power_kw
+        if power <= 0:
+            return []
+        out: list[str] = []
+        current_kwh = request.current_soc / 100.0 * request.battery_kwh
+        for target in sorted(request.targets, key=lambda t: t.deadline):
+            hours_before = [
+                h for h in request.available_hours if h < target.deadline
+            ]
+            achievable_kwh = len(hours_before) * power
+            drain_before = sum(
+                kwh for hour, kwh in request.drain_kwh.items()
+                if hour < target.deadline
+            )
+            need_kwh = (
+                target.target_soc / 100.0 * request.battery_kwh
+                - (current_kwh - drain_before)
+            )
+            if need_kwh > achievable_kwh + 0.05:
+                label = target.label or target.deadline.isoformat()
+                out.append(
+                    f"EV nie zdąży osiągnąć {target.target_soc:.0f}% przed "
+                    f"„{label}” — brakuje "
+                    f"{need_kwh - achievable_kwh:.1f} kWh mocy ładowania w "
+                    f"dostępnych godzinach."
+                )
+        return out
 
     def plan_summary(self) -> dict:
         """Serialisable EV plan/telemetry snapshot for the panel."""
@@ -718,15 +796,39 @@ class EVModule(PowerPilotModule):
             "kwh_per_km": self._kwh_per_km,
             "drain_days": self._drain_profile.observed_days,
             "drain_next24_kwh": self.predicted_drain_kwh(24),
+            "min_soc": self.min_soc,
             "targets": [
                 {
                     "deadline": target.deadline.isoformat(),
                     "target_soc": target.target_soc,
                     "label": target.label,
+                    "source": target.source,
                 }
-                for target in sorted(self._targets, key=lambda t: t.deadline)
+                for target in sorted(
+                    [*self._targets, *self._trip_targets], key=lambda t: t.deadline
+                )
             ],
             "forced_hours": [hour.isoformat() for hour in sorted(self._forced_hours)],
+            # Away windows (trips) for the chart shading + the EV card. Energy
+            # is the round trip out of the pack (``None`` without a model).
+            "trips": [
+                {
+                    "label": trip.label,
+                    "location": trip.location,
+                    "event_start": trip.event_start.isoformat(),
+                    "event_end": trip.event_end.isoformat(),
+                    "depart": trip.depart.isoformat(),
+                    "return_end": trip.return_end.isoformat(),
+                    "distance_km": trip.distance_km,
+                    "duration_min": trip.duration_min,
+                    "energy_kwh": (
+                        round(2.0 * trip.distance_km * self._kwh_per_km, 2)
+                        if trip.distance_km is not None and self._kwh_per_km
+                        else None
+                    ),
+                }
+                for trip in self.coordinator.calendar.trips
+            ],
         }
 
     def request_debug(self) -> dict:
@@ -752,11 +854,17 @@ class EVModule(PowerPilotModule):
             "available_from": avail[0].isoformat() if avail else None,
             "available_to": avail[-1].isoformat() if avail else None,
             "forced_hours": [h.isoformat() for h in sorted(r.forced_hours)],
+            "min_soc": r.min_soc,
+            "drain_total_kwh": round(sum(r.drain_kwh.values()), 3),
+            "drain_hours": {
+                h.isoformat(): round(kwh, 3) for h, kwh in sorted(r.drain_kwh.items())
+            },
             "targets": [
                 {
                     "deadline": t.deadline.isoformat(),
                     "target_soc": t.target_soc,
                     "label": t.label,
+                    "source": t.source,
                 }
                 for t in sorted(r.targets, key=lambda t: t.deadline)
             ],
@@ -766,8 +874,10 @@ class EVModule(PowerPilotModule):
         """The SoC (%) the car should be allowed to charge to right now.
 
         A bare calendar window means "charge with no limit" → 100 %. With
-        deadline targets the soonest upcoming one sets the ceiling. Otherwise the
-        integration's own target-SoC entity (or the built-in default) applies.
+        keyword deadline targets the soonest upcoming one sets the ceiling.
+        Otherwise the integration's own target-SoC entity (or the built-in
+        default) applies — raised when an upcoming trip needs more than that
+        (trip targets are a floor, never a cap).
         """
         if not self.enabled:
             return None
@@ -779,7 +889,10 @@ class EVModule(PowerPilotModule):
             return upcoming[0].target_soc
         if self._forced_hours:
             return 100.0
-        return self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
+        base = self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
+        if self._trip_targets:
+            base = max(base, max(t.target_soc for t in self._trip_targets))
+        return base
 
     @property
     def charger_power_kw(self) -> float:

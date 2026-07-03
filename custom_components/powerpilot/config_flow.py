@@ -21,13 +21,13 @@ from .const import (
     CONF_BATTERY_DISCHARGE_SENSOR,
     CONF_BATTERY_WEAR_COST,
     CONF_BUY_PRICE_SENSOR,
+    CONF_CALENDARS,
     CONF_CHARGE_CURVE,
     CONF_CHARGE_EFFICIENCY,
     CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
     CONF_DISCHARGE_EFFICIENCY,
-    CONF_EV_CALENDAR,
     CONF_EV_CALENDAR_KEYWORD,
     CONF_EV_CHARGER_KW,
     CONF_EV_CHARGER_PHASES,
@@ -38,6 +38,7 @@ from .const import (
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_ODOMETER_SENSOR,
     CONF_EV_SOC_SENSOR,
+    CONF_GMAPS_API_KEY,
     CONF_GRID_DISCONNECT_SOC,
     CONF_GRID_IMPORT_SENSOR,
     CONF_INVERTER_MAX_CHARGE_KW,
@@ -57,6 +58,8 @@ from .const import (
     CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
     CONF_TARIFFS,
+    CONF_TRAVEL_MARGIN_AFTER_MIN,
+    CONF_TRAVEL_MARGIN_BEFORE_MIN,
     CONF_WEATHER_ENTITY,
     CHARGE_CURVE_BANDS,
     DEFAULTS,
@@ -226,6 +229,34 @@ def _price_schema(data: dict[str, Any]) -> vol.Schema:
     )
 
 
+def _calendars_schema(data: dict[str, Any]) -> vol.Schema:
+    """Integration-wide calendar settings (shared, not EV-specific)."""
+
+    def d(key):
+        return data.get(key, DEFAULTS.get(key))
+
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_CALENDARS, default=list(d(CONF_CALENDARS) or [])
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="calendar", multiple=True)
+            ),
+            vol.Optional(
+                CONF_GMAPS_API_KEY, default=d(CONF_GMAPS_API_KEY) or vol.UNDEFINED
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+            ),
+            vol.Optional(
+                CONF_TRAVEL_MARGIN_BEFORE_MIN, default=d(CONF_TRAVEL_MARGIN_BEFORE_MIN)
+            ): _NUMBER(_NUM(min=0, max=240, step=5, unit_of_measurement="min", mode="box")),
+            vol.Optional(
+                CONF_TRAVEL_MARGIN_AFTER_MIN, default=d(CONF_TRAVEL_MARGIN_AFTER_MIN)
+            ): _NUMBER(_NUM(min=0, max=240, step=5, unit_of_measurement="min", mode="box")),
+        }
+    )
+
+
 def _ev_schema(data: dict[str, Any]) -> vol.Schema:
     def d(key):
         return data.get(key, DEFAULTS.get(key))
@@ -249,9 +280,6 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_EV_LOCATION_SENSOR, default=d(CONF_EV_LOCATION_SENSOR) or vol.UNDEFINED
             ): _entity(["device_tracker", "binary_sensor", "person"]),
-            vol.Optional(
-                CONF_EV_CALENDAR, default=d(CONF_EV_CALENDAR) or vol.UNDEFINED
-            ): _entity("calendar"),
             vol.Optional(
                 CONF_EV_CALENDAR_KEYWORD, default=d(CONF_EV_CALENDAR_KEYWORD)
             ): selector.TextSelector(),
@@ -324,8 +352,14 @@ class PowerPilotConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_prices(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_ev()
+            return await self.async_step_calendars()
         return self.async_show_form(step_id="prices", data_schema=_price_schema({}))
+
+    async def async_step_calendars(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_ev()
+        return self.async_show_form(step_id="calendars", data_schema=_calendars_schema({}))
 
     async def async_step_ev(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
@@ -396,6 +430,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 "hierarchy",
                 "charge_curve",
                 "prices",
+                "calendars",
                 "ev",
                 "tariff_list",
                 "reset_data",
@@ -533,6 +568,15 @@ class PowerPilotOptionsFlow(OptionsFlow):
             self._data.update(user_input)
             return await self.async_step_init()
         return self.async_show_form(step_id="prices", data_schema=_price_schema(self._data))
+
+    async def async_step_calendars(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="calendars", data_schema=_calendars_schema(self._data)
+        )
 
     async def async_step_ev(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._ensure_loaded()

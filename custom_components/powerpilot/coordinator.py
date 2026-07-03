@@ -97,7 +97,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.ev = EVModule(hass, self)
         self.calendar = CalendarModule(hass, self)
 
-        # Order matters: prices/weather first, then derived loads, then EV.
+        # Order matters: prices/weather first, then derived loads, then the
+        # calendar (events + trips), then EV — which consumes the calendar's
+        # trips for unavailability, drive drain and pre-departure targets.
         for module in (
             self.prices,
             self.tariff,
@@ -105,8 +107,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             self.weather,
             self.climate,
             self.loads,
-            self.ev,
             self.calendar,
+            self.ev,
         ):
             self.registry.register(module)
 

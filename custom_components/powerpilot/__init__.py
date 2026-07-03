@@ -12,6 +12,7 @@ from .const import (
     CONF_BATTERY_CHARGE_SENSOR,
     CONF_BATTERY_DISCHARGE_SENSOR,
     CONF_BUY_PRICE_SENSOR,
+    CONF_CALENDARS,
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
     CONF_EV_CALENDAR,
@@ -58,9 +59,8 @@ _ENTITY_CONFIG_KEYS = (
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_CHARGE_METER_SENSOR,
     CONF_EV_LOCATION_SENSOR,
-    CONF_EV_CALENDAR,
 )
-_ENTITY_LIST_CONFIG_KEYS = (CONF_DEVICE_SENSORS,)
+_ENTITY_LIST_CONFIG_KEYS = (CONF_DEVICE_SENSORS, CONF_CALENDARS)
 
 
 def _uses_day_sensor(entry: ConfigEntry) -> bool:
@@ -116,8 +116,27 @@ def _unready_inputs(hass: HomeAssistant, entry: ConfigEntry) -> list[str]:
     return unready
 
 
+def _migrate_calendar_option(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """One-time upgrade: seed CONF_CALENDARS from the legacy single EV calendar.
+
+    The calendar picker moved from the EV section to the integration-wide
+    calendar settings and became a list. Runs before the update listener is
+    registered, so it never triggers a reload loop.
+    """
+    cfg = {**entry.data, **entry.options}
+    legacy = cfg.get(CONF_EV_CALENDAR)
+    if legacy and not cfg.get(CONF_CALENDARS):
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_CALENDARS: [legacy]}
+        )
+        _LOGGER.info(
+            "Zmigrowano kalendarz EV %s do listy kalendarzy integracji.", legacy
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerPilot from a config entry."""
+    _migrate_calendar_option(hass, entry)
     # Day-of-week tariff periods classify future days (weekends/holidays) via
     # ``workday.check_date``. That service is a hard requirement — we never
     # second-guess it. If it isn't registered yet (workday still loading, or the

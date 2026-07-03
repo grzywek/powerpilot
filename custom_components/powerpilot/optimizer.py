@@ -83,7 +83,7 @@ _EPS = 1e-6
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # full-power-block allocator or a stale import.
-EV_ALLOCATOR_VERSION = "cost-optimal-blocks-2026-06"
+EV_ALLOCATOR_VERSION = "trip-drain-aware-2026-07"
 
 
 @dataclass
@@ -410,9 +410,11 @@ class Optimizer:
         wear = battery.wear_cost
         n = len(total_price)
         # EV SoC forecast: project the car's charge forward from its live SoC as
-        # planned charging is delivered. Only possible when the SoC sensor and a
-        # battery size are known; otherwise the line stays blank.
+        # planned charging is delivered and predicted trip driving drains it.
+        # Only possible when the SoC sensor and a battery size are known;
+        # otherwise the line stays blank.
         ev_battery_kwh = ev_request.battery_kwh if ev_request else 0.0
+        ev_drain = ev_request.drain_kwh if ev_request else {}
         ev_soc_kwh: float | None = (
             ev_request.current_soc / 100.0 * ev_battery_kwh
             if ev_request is not None
@@ -462,7 +464,8 @@ class Optimizer:
             decision.ev_charge = ev > 0
             decision.ev_charge_kwh = ev
             if ev_soc_kwh is not None:
-                ev_soc_kwh = min(ev_battery_kwh, ev_soc_kwh + ev)
+                drain = ev_drain.get(slot.start, 0.0)
+                ev_soc_kwh = min(ev_battery_kwh, max(0.0, ev_soc_kwh + ev - drain))
                 decision.ev_soc = round(ev_soc_kwh / ev_battery_kwh * 100.0, 1)
             decision.charge_power = (
                 ChargePower.LIMITED if ev > 0 else ChargePower.FULL
@@ -581,6 +584,11 @@ class Optimizer:
            among available hours before the deadline (earliest deadline first).
         3. **Default top-up** — no calendar: cost-optimal blocks for the deficit
            to the target SoC.
+
+        Predicted trip drain (``EVRequest.drain_kwh``) is folded in on both
+        sides: deadline targets buy extra to cover driving that happens before
+        the deadline, and the room-to-100 % cap credits energy the trips take
+        back out of the pack.
         """
         if ev_request is None or not ev_request.is_actionable:
             return {}
@@ -599,19 +607,33 @@ class Optimizer:
         allocation: dict[datetime, float] = {}
 
         def capacity_left() -> float:
+            """Room to 100 % including predicted trip drain over the horizon.
+
+            Drain frees room in the pack (the car returns from a trip lower
+            than it left), so the routine top-up after a trip may buy the trip
+            energy back — without this credit the allocator would treat the
+            pack as still full and skip the recharge.
+            """
             if battery_kwh <= 0:
                 return float("inf")
-            return max(0.0, battery_kwh - soc0_kwh - sum(allocation.values()))
+            drained = sum(ev_request.drain_kwh.values())
+            return max(
+                0.0, battery_kwh - soc0_kwh + drained - sum(allocation.values())
+            )
 
-        def select(deficit: float, candidates: list) -> dict[datetime, float]:
+        def select(
+            deficit: float, candidates: list, room: float | None = None
+        ) -> dict[datetime, float]:
             """Cost-optimal on/off full-power hours for ``deficit`` kWh.
 
             ``candidates`` = eligible, not-yet-allocated slots. Returns full power
             on the cheapest blocks plus the unavoidable remainder on the cheapest
             valid top-off hour. The car fills the chosen hours chronologically, so
             the remainder must sit on the chronologically last chosen hour.
+            ``room`` overrides the pack-room cap (deadline targets compute the
+            room *at their deadline*, which the global estimate can't see).
             """
-            deficit = min(deficit, capacity_left())
+            deficit = min(deficit, capacity_left() if room is None else room)
             if deficit <= _EPS:
                 return {}
             slots = sorted(
@@ -658,20 +680,34 @@ class Optimizer:
                 break
             allocation[start] = take
 
-        # 2. Deadline targets, earliest deadline first.
+        # 2. Deadline targets, earliest deadline first. Predicted trip drain
+        #    before a deadline lowers what's in the pack when it arrives, so the
+        #    allocator has to buy that much more to still hit the target.
+        def drain_before(moment: datetime) -> float:
+            return sum(
+                kwh
+                for start, kwh in ev_request.drain_kwh.items()
+                if start < moment
+            )
+
         for target in sorted(ev_request.targets, key=lambda t: t.deadline):
             target_kwh = (
                 target.target_soc / 100.0 * battery_kwh if battery_kwh else 0.0
             )
-            before = soc0_kwh + sum(
-                kwh for start, kwh in allocation.items() if start < target.deadline
+            before = (
+                soc0_kwh
+                - drain_before(target.deadline)
+                + sum(
+                    kwh for start, kwh in allocation.items() if start < target.deadline
+                )
             )
             candidates = [
                 slot
                 for start, slot in slots_by_start.items()
                 if start < target.deadline and start in ev_request.available_hours
             ]
-            commit(select(target_kwh - before, candidates))
+            room_at_deadline = max(0.0, battery_kwh - before) if battery_kwh else None
+            commit(select(target_kwh - before, candidates, room=room_at_deadline))
 
         # 3. Default top-up (no calendar plan).
         if ev_request.required_kwh > _EPS:

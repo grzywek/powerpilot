@@ -44,6 +44,16 @@
           "price_refresh_hours": "Częstotliwość pobierania źródła (h)"
         }
       },
+      "calendars": {
+        "title": "PowerPilot – kalendarze i wyjazdy",
+        "description": "Kalendarze czytane przez całą integrację (nie tylko EV). Wydarzenia z lokalizacją stają się wyjazdami: Google Maps wyznacza km i czas dojazdu, a samochód jest niedostępny do ładowania od wyjazdu do powrotu (plus marginesy).",
+        "data": {
+          "calendars": "Kalendarze (można wskazać kilka)",
+          "gmaps_api_key": "Klucz API Google Maps (Distance Matrix) — km i czas dojazdu",
+          "travel_margin_before_min": "Margines niedostępności przed wyjazdem (min)",
+          "travel_margin_after_min": "Margines niedostępności po powrocie (min)"
+        }
+      },
       "ev": {
         "title": "PowerPilot – samochód elektryczny",
         "description": "Opcjonalna optymalizacja ładowania EV.",
@@ -55,7 +65,6 @@
           "ev_energy_added_sensor": "Energia dodana w sesji (kWh)",
           "ev_charge_meter_sensor": "Licznik ładowania EV (od strony sieci, kWh) — wykluczony z profilu zużycia",
           "ev_location_sensor": "Lokalizacja EV — dom/poza domem (do przypomnień i wykrywania ładowania poza domem)",
-          "ev_calendar": "Kalendarz ładowania",
           "ev_calendar_keyword": "Słowo kluczowe wydarzenia (np. Kotek)",
           "ev_range_km": "Zasięg na pełnej baterii (km)",
           "ev_battery_kwh": "Pojemność baterii EV (kWh)",
@@ -76,6 +85,7 @@
           "hierarchy": "🌳 Hierarchia liczników (poziomy zużycia)",
           "charge_curve": "🔋 Krzywa ładowania (moc vs SoC)",
           "prices": "💰 Ceny energii",
+          "calendars": "📅 Kalendarze i wyjazdy",
           "ev": "🚗 Samochód elektryczny",
           "tariff_list": "🧾 Taryfy dystrybucyjne",
           "reset_data": "🧹 Wyczyść dane i cache (zachowaj konfigurację)",
@@ -143,6 +153,16 @@
           "price_refresh_hours": "Częstotliwość pobierania źródła (h)"
         }
       },
+      "calendars": {
+        "title": "PowerPilot – kalendarze i wyjazdy",
+        "description": "Kalendarze czytane przez całą integrację (nie tylko EV). Wydarzenia z lokalizacją stają się wyjazdami: Google Maps wyznacza km i czas dojazdu, a samochód jest niedostępny do ładowania od wyjazdu do powrotu (plus marginesy).",
+        "data": {
+          "calendars": "Kalendarze (można wskazać kilka)",
+          "gmaps_api_key": "Klucz API Google Maps (Distance Matrix) — km i czas dojazdu",
+          "travel_margin_before_min": "Margines niedostępności przed wyjazdem (min)",
+          "travel_margin_after_min": "Margines niedostępności po powrocie (min)"
+        }
+      },
       "ev": {
         "title": "PowerPilot – samochód elektryczny",
         "data": {
@@ -153,7 +173,6 @@
           "ev_energy_added_sensor": "Energia dodana w sesji (kWh)",
           "ev_charge_meter_sensor": "Licznik ładowania EV (od strony sieci, kWh) — wykluczony z profilu zużycia",
           "ev_location_sensor": "Lokalizacja EV — dom/poza domem (do przypomnień i wykrywania ładowania poza domem)",
-          "ev_calendar": "Kalendarz ładowania",
           "ev_calendar_keyword": "Słowo kluczowe wydarzenia (np. Kotek)",
           "ev_range_km": "Zasięg na pełnej baterii (km)",
           "ev_battery_kwh": "Pojemność baterii EV (kWh)",
@@ -267,6 +286,9 @@
     "number": {
       "ev_target_soc": {
         "name": "Docelowy SoC EV"
+      },
+      "ev_min_soc": {
+        "name": "Minimalny SoC EV (rezerwa)"
       }
     }
   }

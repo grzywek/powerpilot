@@ -1,6 +1,33 @@
 # EV Dynamic Planning — Implementation Plan
 
-Status: **proposed** (awaiting go-ahead). Confirmed decisions:
+Status: **mostly implemented**. Sections 1–3 landed earlier (capacity learning,
+drain profile, charge-meter exclusion); sections 4–5 and the EV-card part of 6
+landed in `feat(ev): multi-calendar trips with Google Maps travel + min-SoC
+planning` (2026-07-03). Deviations from the original proposal:
+
+- **No keyword→target routing rules.** §4 proposed per-calendar
+  `{keyword, target}` rules (incl. `device:<entity>` scheduled loads like
+  `prasowanie`). Implemented instead: a flat `CONF_CALENDARS` entity list, the
+  single EV keyword stays in the EV step, and *any* located event becomes a
+  trip (no `ev_trip` keyword needed). Device scheduled loads remain **open**.
+- **No straight-line fallback.** §5 suggested straight-line × road-factor on
+  Maps errors; per the no-fallback rule the trip stays unavailability-only
+  (event span + margins) and a warning is logged. Cache is 30 days per
+  location, not daily.
+- **Trip target = `min SoC + round trip`,** not `current + needed` — sized off
+  the new writable `number.ev_min_soc` reserve entity, so the car always comes
+  home at/above the reserve. Trip targets are a floor (never lower the
+  routine ceiling); trip drain also feeds the projected EV SoC line and the
+  allocator (buy-back before later deadlines, pack-room credit after trips).
+- **Margins are new:** configurable unavailability margin before departure /
+  after return (default 30 min each) around the travel-time window.
+- **§6 partially done:** trips (km, travel minutes, energy), min SoC and red
+  away-window/trip-minimum chart annotations live on the existing EV card; a
+  dedicated EV tab is **open**.
+
+Original proposal below, kept for the confirmed decisions and open items.
+
+Confirmed decisions:
 
 - **Trip distance:** Google Maps now (API key, geocode event location, home→event km).
 - **Odometer:** available → learn kWh/km from odometer + SoC/energy.

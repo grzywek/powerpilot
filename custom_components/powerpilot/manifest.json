@@ -1,7 +1,7 @@
 {
   "domain": "powerpilot",
   "name": "PowerPilot",
-  "version": "1.24.2",
+  "version": "1.24.3",
   "documentation": "https://github.com/grzywek/powerpilot",
   "issue_tracker": "https://github.com/grzywek/powerpilot/issues",
   "dependencies": [

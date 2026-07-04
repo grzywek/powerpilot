@@ -44,10 +44,14 @@ from ..const import (
     CONF_EV_CHARGER_PHASE,
     CONF_EV_CHARGER_PHASES,
     CONF_EV_CHARGING_SENSOR,
+    CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT,
+    CONF_EV_EARLY_MAX_EXTRA_PCT,
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_ODOMETER_SENSOR,
+    CONF_EV_PREFER_CONTIGUOUS,
+    CONF_EV_PREFER_EARLY,
     CONF_EV_PRESENCE_ENTITIES,
     CONF_EV_SOC_SENSOR,
     DEFAULTS,
@@ -240,6 +244,12 @@ class EVRequest:
     drain_kwh: dict[datetime, float] = field(default_factory=dict)
     # Safety reserve (%) the plan should never dip the car below.
     min_soc: float = 0.0
+    # Placement preferences (see const.py CONF_EV_PREFER_*): trade a bounded
+    # % of extra cost for an unbroken charging block / an earlier finish.
+    prefer_contiguous: bool = False
+    contiguous_max_extra_pct: float = 15.0
+    prefer_early: bool = False
+    early_max_extra_pct: float = 10.0
 
     @property
     def charger_power_kw(self) -> float:
@@ -740,6 +750,14 @@ class EVModule(PowerPilotModule):
             targets=[*self._targets, *self._trip_targets],
             drain_kwh=dict(self._trip_drain),
             min_soc=self.min_soc,
+            prefer_contiguous=bool(self.config.get(CONF_EV_PREFER_CONTIGUOUS)),
+            contiguous_max_extra_pct=float(
+                self.config.get(CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT, 15.0) or 0.0
+            ),
+            prefer_early=bool(self.config.get(CONF_EV_PREFER_EARLY)),
+            early_max_extra_pct=float(
+                self.config.get(CONF_EV_EARLY_MAX_EXTRA_PCT, 10.0) or 0.0
+            ),
         )
         return self._request
 
@@ -853,27 +871,32 @@ class EVModule(PowerPilotModule):
                 )
             ],
             "forced_hours": [hour.isoformat() for hour in sorted(self._forced_hours)],
-            # Away windows (trips) for the chart shading + the EV card. Energy
-            # is the round trip out of the pack (``None`` without a model).
-            "trips": [
-                {
-                    "label": trip.label,
-                    "location": trip.location,
-                    "event_start": trip.event_start.isoformat(),
-                    "event_end": trip.event_end.isoformat(),
-                    "depart": trip.depart.isoformat(),
-                    "return_end": trip.return_end.isoformat(),
-                    "distance_km": trip.distance_km,
-                    "duration_min": trip.duration_min,
-                    "energy_kwh": (
-                        round(2.0 * trip.distance_km * self._kwh_per_km, 2)
-                        if trip.distance_km is not None and self._kwh_per_km
-                        else None
-                    ),
-                }
-                for trip in self.coordinator.calendar.trips
-            ],
+            # Away windows (trips) for the chart shading + the EV card.
+            "trips": self.trips_payload(),
         }
+
+    def trips_payload(self) -> list[dict]:
+        """Current calendar trips, serialised for the panel and for snapshot
+        records (so past events stay visible after leaving the calendar).
+        Energy is the round trip out of the pack (``None`` without a model)."""
+        return [
+            {
+                "label": trip.label,
+                "location": trip.location,
+                "event_start": trip.event_start.isoformat(),
+                "event_end": trip.event_end.isoformat(),
+                "depart": trip.depart.isoformat(),
+                "return_end": trip.return_end.isoformat(),
+                "distance_km": trip.distance_km,
+                "duration_min": trip.duration_min,
+                "energy_kwh": (
+                    round(2.0 * trip.distance_km * self._kwh_per_km, 2)
+                    if trip.distance_km is not None and self._kwh_per_km
+                    else None
+                ),
+            }
+            for trip in self.coordinator.calendar.trips
+        ]
 
     def request_debug(self) -> dict:
         """The exact EVRequest last fed to the optimizer — the allocator inputs.

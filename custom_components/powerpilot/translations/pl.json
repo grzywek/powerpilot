@@ -71,7 +71,11 @@
           "ev_battery_kwh": "Pojemność baterii EV (kWh)",
           "ev_weekly_km": "Tygodniowe km poza kalendarzem",
           "ev_charger_kw": "Moc ładowarki na fazę (kW)",
-          "ev_charger_phases": "Liczba faz ładowarki (1 lub 3)"
+          "ev_charger_phases": "Liczba faz ładowarki (1 lub 3)",
+          "ev_prefer_contiguous": "Preferuj ładowanie łączone (godziny w jednym bloku)",
+          "ev_contiguous_max_extra_pct": "Tolerancja kosztu bloku łączonego (% ponad najtańszy wariant)",
+          "ev_prefer_early": "Preferuj ładowanie wczesne (zakończ jak najszybciej)",
+          "ev_early_max_extra_pct": "Tolerancja kosztu ładowania wczesnego (% ponad najtańszy)"
         }
       }
     }
@@ -180,7 +184,11 @@
           "ev_battery_kwh": "Pojemność baterii EV (kWh)",
           "ev_weekly_km": "Tygodniowe km poza kalendarzem",
           "ev_charger_kw": "Moc ładowarki na fazę (kW)",
-          "ev_charger_phases": "Liczba faz ładowarki (1 lub 3)"
+          "ev_charger_phases": "Liczba faz ładowarki (1 lub 3)",
+          "ev_prefer_contiguous": "Preferuj ładowanie łączone (godziny w jednym bloku)",
+          "ev_contiguous_max_extra_pct": "Tolerancja kosztu bloku łączonego (% ponad najtańszy wariant)",
+          "ev_prefer_early": "Preferuj ładowanie wczesne (zakończ jak najszybciej)",
+          "ev_early_max_extra_pct": "Tolerancja kosztu ładowania wczesnego (% ponad najtańszy)"
         }
       },
       "tariff_list": {

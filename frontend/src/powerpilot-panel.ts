@@ -197,6 +197,10 @@ interface Series {
   end: string;
   device_ids: string[];
   hours: SeriesHour[];
+  /** Trips for the window: live calendar trips + history harvested from
+   *  snapshot vintages (past events stay visible after leaving the calendar);
+   *  at a stale forecast lead, only the pinned vintage's trips. */
+  trips?: EVTrip[];
 }
 
 type PriceType = "certain" | "forecast" | "estimated";
@@ -301,11 +305,87 @@ type Tab =
   | "overview"
   | "prices"
   | "simulations"
+  | "flow"
   | "status"
   | "diagnostics"
   | "profiles"
   | "logs"
   | "debug";
+
+/** One live-read input entity on the "Przepływ" tab. */
+interface FlowEntity {
+  entity_id: string;
+  value: string | null;
+  unit: string | null;
+  available: boolean;
+}
+
+/** Payload of powerpilot/flow — a live snapshot of the computation pipeline. */
+interface FlowData {
+  now: string;
+  inputs: {
+    consumption: FlowEntity | null;
+    device_sensors: { entity_id: string }[];
+    battery_soc: FlowEntity | null;
+    battery_charge: FlowEntity | null;
+    battery_discharge: FlowEntity | null;
+    grid_import: FlowEntity | null;
+    buy_price_sensor: FlowEntity | null;
+    weather: FlowEntity | null;
+    ev_soc: FlowEntity | null;
+    ev_energy_added: FlowEntity | null;
+    calendars: string[];
+    price_source: string | null;
+  };
+  pricing: {
+    markup: number;
+    vat: number;
+    excise_kwh: number;
+    buy_price_now: number | null;
+    distribution_now: number | null;
+    fixed_hourly: number | null;
+    total_now: number | null;
+    confirmed: boolean;
+  };
+  consumption_model: {
+    observed_days: number;
+    base_now_kwh: number | null;
+    device_profiles: number;
+  };
+  battery: {
+    capacity_kwh: number;
+    soc: number | null;
+    charge_efficiency: number;
+    discharge_efficiency: number;
+    wear_cost: number;
+    reservoir_cost: number;
+    delivered_cost: number | null;
+    store_cost_now: number | null;
+  };
+  ev: {
+    enabled: boolean;
+    soc: number | null;
+    capacity_kwh: number | null;
+    charger_power_kw: number | null;
+    targets: number;
+    trips: number;
+  };
+  optimizer: {
+    created_at: string | null;
+    horizon_hours: number;
+    total_cost: number | null;
+    current: {
+      inverter_mode: string;
+      battery_charge_kwh: number;
+      battery_discharge_kwh: number;
+      grid_buy_kwh: number;
+      ev_charge_kwh: number;
+      battery_soc_end: number;
+      hour_cost: number;
+      battery_use_cost: number;
+    } | null;
+  };
+}
 
 interface DiagSensorDetail {
   entity_id: string;
@@ -417,6 +497,10 @@ export class PowerPilotPanel extends LitElement {
   @state() private _diagnostics: Diagnostics | null = null;
   @state() private _diagnosticsLoading = false;
 
+  /** "Przepływ" tab: live pipeline snapshot. */
+  @state() private _flow: FlowData | null = null;
+  @state() private _flowLoading = false;
+
   @state() private _debug: unknown = null;
   @state() private _debugLoading = false;
   @state() private _debugError: string | null = null;
@@ -523,6 +607,8 @@ export class PowerPilotPanel extends LitElement {
       if (this._tab === "prices") this._loadPrices();
       // Pick up newly recorded vintages + fresh actuals; A/B selection is kept.
       if (this._tab === "simulations") this._loadSimulations();
+      // Keep the pipeline snapshot live while it's on screen.
+      if (this._tab === "flow") this._loadFlow();
     } catch (err: any) {
       this._error = err?.message ?? String(err);
     }
@@ -598,6 +684,20 @@ export class PowerPilotPanel extends LitElement {
     if (tab === "prices") this._loadPrices();
     if (tab === "simulations") this._loadSimulations();
     if (tab === "diagnostics") this._loadDiagnostics();
+    if (tab === "flow") this._loadFlow();
+  }
+
+  private async _loadFlow(): Promise<void> {
+    if (!this.hass) return;
+    this._flowLoading = true;
+    try {
+      this._flow = await this.hass.callWS({ type: "powerpilot/flow" });
+      this._error = null;
+    } catch (err: any) {
+      this._error = err?.message ?? String(err);
+    } finally {
+      this._flowLoading = false;
+    }
   }
 
   private async _loadDiagnostics(): Promise<void> {
@@ -749,6 +849,7 @@ export class PowerPilotPanel extends LitElement {
         ${this._tabButton("overview", "Przegląd")}
         ${this._tabButton("prices", "Ceny")}
         ${this._tabButton("simulations", "Symulacje")}
+        ${this._tabButton("flow", "Przepływ")}
         ${this._tabButton("status", "Status")}
         ${this._tabButton("diagnostics", "Diagnostyka")}
         ${this._tabButton("profiles", "Profile")}
@@ -760,6 +861,7 @@ export class PowerPilotPanel extends LitElement {
         ${this._tab === "overview" ? this._renderOverview() : nothing}
         ${this._tab === "prices" ? this._renderPrices() : nothing}
         ${this._tab === "simulations" ? this._renderSimulations() : nothing}
+        ${this._tab === "flow" ? this._renderFlow() : nothing}
         ${this._tab === "status" ? this._renderStatus() : nothing}
         ${this._tab === "diagnostics" ? this._renderDiagnostics() : nothing}
         ${this._tab === "profiles" ? this._renderProfiles() : nothing}
@@ -1106,8 +1208,10 @@ export class PowerPilotPanel extends LitElement {
     // Base household load = total consumption minus the sub-metered devices,
     // so stacking base + devices does not double-count.
     const baseConsumption = (h: SeriesHour): number | null => {
-      if (h.is_past) {
-        if (h.consumption_real == null) return null;
+      // Realized when present; otherwise the (possibly vintage-pinned)
+      // forecast — a stale forecast lead blanks realized fields so the bars
+      // draw the pinned plan instead of reality.
+      if (h.is_past && h.consumption_real != null) {
         return Math.max(0, h.consumption_real - deviceSum(h));
       }
       if (h.consumption_forecast == null) return h.base_consumption_forecast;
@@ -1427,7 +1531,7 @@ export class PowerPilotPanel extends LitElement {
               : d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
           };
           const hourTs = new Date(h.start).getTime();
-          const tripRows = (this._status?.ev?.trips ?? [])
+          const tripRows = this._chartTrips()
             .filter((t) => {
               const a = new Date(t.depart).getTime();
               const b = new Date(t.return_end).getTime();
@@ -1490,6 +1594,22 @@ export class PowerPilotPanel extends LitElement {
           };
           const dot = (c: string) =>
             `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${c};margin-right:5px;vertical-align:middle"></span>`;
+          // Δ between the realized and forecast columns (only when both are
+          // shown). Arrow points at the bigger side: ← forecast was higher,
+          // → realized was higher. Neutral hues (blue/amber) on purpose —
+          // higher-than-planned isn't inherently "bad" like red would imply.
+          const hasDelta = sides.length === 2;
+          const diffCell = (real: number | null, fc: number | null): string => {
+            if (!hasDelta) return "";
+            if (real == null || fc == null)
+              return `<td style="padding-left:10px"></td>`;
+            const d = real - fc;
+            if (Math.abs(d) < 0.005)
+              return `<td style="text-align:right;padding-left:10px;opacity:0.45">=</td>`;
+            const arrow = d > 0 ? "→" : "←";
+            const color = d > 0 ? "#f59e0b" : "#3b82f6";
+            return `<td style="text-align:right;padding-left:10px;font-variant-numeric:tabular-nums;color:${color}">${arrow}${fmt(Math.abs(d))}</td>`;
+          };
           const valCells = (fn: (g: TipSide) => string) =>
             sides
               .map(
@@ -1511,20 +1631,26 @@ export class PowerPilotPanel extends LitElement {
                     }</td>`,
                 )
                 .join("") +
+              diffCell(vals[0] ?? null, vals[1] ?? null) +
               `</tr>`
             );
           };
-          const totalRow = (label: string, rows: Row[]) =>
-            `<tr><td style="padding:1px 0;font-weight:600">${label}</td>` +
-            sides
-              .map(
-                (s) =>
-                  `<td style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px;font-weight:600">${
-                    fmt(rows.reduce((a, r) => a + Math.abs(sideVal(s.g, r.key) ?? 0), 0))
-                  } kWh</td>`,
-              )
-              .join("") +
-            `</tr>`;
+          const totalRow = (label: string, rows: Row[]) => {
+            const totals = sides.map((s) =>
+              rows.reduce((a, r) => a + Math.abs(sideVal(s.g, r.key) ?? 0), 0),
+            );
+            return (
+              `<tr><td style="padding:1px 0;font-weight:600">${label}</td>` +
+              totals
+                .map(
+                  (v) =>
+                    `<td style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px;font-weight:600">${fmt(v)} kWh</td>`,
+                )
+                .join("") +
+              diffCell(totals[0] ?? null, totals[1] ?? null) +
+              `</tr>`
+            );
+          };
           // Colored delta arrow so the direction reads at a glance:
           // "31 → 38% ↑7" (green up / red down / dimmed "=" for no change).
           // The delta sits in a fixed-width box so the "%" values line up
@@ -1544,7 +1670,7 @@ export class PowerPilotPanel extends LitElement {
           const socFn = (g: TipSide) => socPair(g.soc_start, g.soc_end);
           const evSocFn = (g: TipSide) => socPair(g.ev_soc_start, g.ev_soc_end);
           const hasEvSoc = sides.some((s) => s.g.ev_soc_start != null || s.g.ev_soc_end != null);
-          const sep = `<tr><td colspan="${sides.length + 1}" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>`;
+          const sep = `<tr><td colspan="${sides.length + 1 + (hasDelta ? 1 : 0)}" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>`;
           const header =
             sides.length > 1
               ? `<tr><td></td>${sides
@@ -1552,7 +1678,7 @@ export class PowerPilotPanel extends LitElement {
                     (s) =>
                       `<td style="text-align:right;opacity:0.7;padding-left:14px">${s.label}</td>`,
                   )
-                  .join("")}</tr>`
+                  .join("")}${hasDelta ? `<td style="text-align:right;opacity:0.7;padding-left:10px">Δ</td>` : ""}</tr>`
               : `<tr><td></td><td style="text-align:right;opacity:0.7">${sides[0].label}</td></tr>`;
 
           return `
@@ -1646,9 +1772,16 @@ export class PowerPilotPanel extends LitElement {
    *  out (depart→event start, incl. margin), the event itself, and travel
    *  back (event end→return, incl. margin), so the calendar slot reads apart
    *  from the drive-time padding around it. */
+  /** Trips backing the chart: the series payload carries live + snapshot
+   *  history (and, at a stale lead, the pinned vintage's view); the status
+   *  list is only a fallback while the series is still loading. */
+  private _chartTrips(): EVTrip[] {
+    return this._series?.trips ?? this._status?.ev?.trips ?? [];
+  }
+
   private _evAwayAnnotations(): any[] {
     const regions: any[] = [];
-    for (const t of this._status?.ev?.trips ?? []) {
+    for (const t of this._chartTrips()) {
       const depart = new Date(t.depart).getTime();
       const ret = new Date(t.return_end).getTime();
       if (isNaN(depart) || isNaN(ret) || ret <= depart) continue;
@@ -2399,6 +2532,168 @@ export class PowerPilotPanel extends LitElement {
               Ładowanie zawsze pełną mocą ładowarki: ${ev.charger_power_kw.toFixed(1)} kW
             </div>`
           : nothing}
+      </div>
+    `;
+  }
+
+  // ------------------------------------------------------------------
+  // "Przepływ" tab — the computation pipeline, live
+  // ------------------------------------------------------------------
+  /** One input entity row: label, live value and the entity id it comes from. */
+  private _flowInput(label: string, e: FlowEntity | null): TemplateResult | typeof nothing {
+    if (!e) return nothing;
+    return html`<div class="flow-input ${e.available ? "" : "flow-missing"}">
+      <span class="flow-input-label">${label}</span>
+      <b>${e.value ?? "—"}${e.unit ? ` ${e.unit}` : ""}</b>
+      <span class="flow-eid">${e.entity_id}</span>
+    </div>`;
+  }
+
+  private _renderFlow(): TemplateResult {
+    const f = this._flow;
+    if (!f) {
+      return html`<div class="card empty">
+        ${this._flowLoading ? "Ładowanie…" : "Brak danych przepływu."}
+      </div>`;
+    }
+    const n2 = (v: number | null | undefined, digits = 2) =>
+      v == null ? "—" : v.toFixed(digits);
+    const inp = f.inputs;
+    const pr = f.pricing;
+    const bat = f.battery;
+    const opt = f.optimizer;
+    const cur = opt.current;
+    const arrow = (label: string) =>
+      html`<div class="flow-arrow"><span>↓</span><span class="muted">${label}</span></div>`;
+
+    return html`
+      <div class="flow-col">
+        <div class="card flow-stage">
+          <div class="card-title">1 · Wejścia — sensory i źródła danych</div>
+          <div class="flow-inputs">
+            ${this._flowInput("Zużycie domu", inp.consumption)}
+            ${this._flowInput("SoC baterii", inp.battery_soc)}
+            ${this._flowInput("Ładowanie baterii", inp.battery_charge)}
+            ${this._flowInput("Rozładowanie baterii", inp.battery_discharge)}
+            ${this._flowInput("Import z sieci", inp.grid_import)}
+            ${this._flowInput("Cena energii (RDN)", inp.buy_price_sensor)}
+            ${this._flowInput("Pogoda", inp.weather)}
+            ${this._flowInput("EV SoC", inp.ev_soc)}
+            ${this._flowInput("EV energia sesji", inp.ev_energy_added)}
+          </div>
+          <div class="check muted">
+            Źródło cen: <b>${inp.price_source === "pradcast" ? "Prądcast API" : "sensor HA"}</b>
+            ${inp.device_sensors.length
+              ? html` · podliczniki: <b>${inp.device_sensors.length}</b>`
+              : nothing}
+            ${inp.calendars.length
+              ? html` · kalendarze: <b>${inp.calendars.join(", ")}</b>`
+              : nothing}
+          </div>
+        </div>
+
+        ${arrow("surowe odczyty → składanie ceny brutto")}
+
+        <div class="card flow-stage">
+          <div class="card-title">2 · Cena energii (PLN/kWh)</div>
+          <div class="flow-formula">
+            cena pełna = (RDN + marża ${n2(pr.markup)}) × VAT ${n2(pr.vat)}
+            + akcyza ${n2(pr.excise_kwh)} + dystrybucja
+          </div>
+          <div class="check">
+            Teraz: energia <b>${n2(pr.buy_price_now)}</b> + dystrybucja
+            <b>${n2(pr.distribution_now)}</b> =
+            <b>${n2(pr.total_now)} PLN/kWh</b>
+            <span class="muted">(${pr.confirmed ? "cena pewna" : "prognoza"})</span>
+          </div>
+          <div class="check muted">
+            Koszt stały (rozłożony na godziny): ${n2(pr.fixed_hourly)} PLN/h — nie wchodzi w PLN/kWh.
+          </div>
+        </div>
+
+        ${arrow("cena godzinowa → koszt magazynowania i plan")}
+
+        <div class="card flow-stage">
+          <div class="card-title">3 · Prognoza zużycia</div>
+          <div class="check">
+            Profil uczony przez <b>${f.consumption_model.observed_days}</b> dni ·
+            bieżąca godzina (baza): <b>${n2(f.consumption_model.base_now_kwh)} kWh</b> ·
+            profile urządzeń: <b>${f.consumption_model.device_profiles}</b>
+          </div>
+        </div>
+
+        ${arrow("zapotrzebowanie + ceny → model baterii")}
+
+        <div class="card flow-stage">
+          <div class="card-title">4 · Model baterii — skąd bierze się „Cena w baterii"</div>
+          <div class="check">
+            Pojemność <b>${n2(bat.capacity_kwh, 1)} kWh</b> · SoC
+            <b>${bat.soc != null ? bat.soc.toFixed(0) + " %" : "—"}</b> ·
+            η ładowania <b>${n2(bat.charge_efficiency)}</b> ·
+            η rozładowania <b>${n2(bat.discharge_efficiency)}</b> ·
+            koszt zużycia (wear) <b>${n2(bat.wear_cost)} PLN/kWh</b>
+          </div>
+          <div class="flow-formula">
+            wkładanie: 1 kWh z sieci → ${n2(bat.charge_efficiency)} kWh w baterii
+            (strata ładowania) — zmagazynowanie teraz kosztowałoby
+            ≈ <b>${n2(bat.store_cost_now)} PLN/kWh</b>
+          </div>
+          <div class="flow-formula">
+            koszt zmagazynowany (średnia ważona zakupów): <b>${n2(bat.reservoir_cost)} PLN/kWh</b>
+          </div>
+          <div class="flow-formula flow-highlight">
+            „Cena w baterii" = ${n2(bat.reservoir_cost)} / η ${n2(bat.discharge_efficiency)}
+            + wear ${n2(bat.wear_cost)} = <b>${n2(bat.delivered_cost)} PLN/kWh</b>
+            <span class="muted">(strata rozładowania wliczana przy oddawaniu energii)</span>
+          </div>
+        </div>
+
+        ${arrow("koszt z sieci vs koszt z baterii → decyzje co godzinę")}
+
+        <div class="card flow-stage">
+          <div class="card-title">5 · Optymalizator</div>
+          <div class="check">
+            Plan z <b>${opt.created_at ? this._fmtRun(opt.created_at) : "—"}</b> ·
+            horyzont <b>${opt.horizon_hours} h</b> ·
+            koszt horyzontu <b>${n2(opt.total_cost)} PLN</b>
+          </div>
+          ${cur
+            ? html`<div class="check">
+                Bieżąca godzina: tryb
+                <b>${INVERTER_MODE_META[cur.inverter_mode]?.label ?? cur.inverter_mode}</b> ·
+                ładowanie <b>${n2(cur.battery_charge_kwh)} kWh</b> ·
+                rozładowanie <b>${n2(cur.battery_discharge_kwh)} kWh</b> ·
+                import <b>${n2(cur.grid_buy_kwh)} kWh</b>
+                ${cur.ev_charge_kwh > 0.005
+                  ? html` · EV <b>${n2(cur.ev_charge_kwh)} kWh</b>`
+                  : nothing}
+              </div>
+              <div class="check muted">
+                Koszt godziny: ${n2(cur.hour_cost)} PLN z sieci +
+                ${n2(cur.battery_use_cost)} PLN z baterii (rozładowanie ×
+                „cena w baterii") · SoC na koniec: ${cur.battery_soc_end.toFixed(0)} %
+              </div>`
+            : html`<div class="check muted">Brak decyzji dla bieżącej godziny.</div>`}
+          ${f.ev.enabled
+            ? html`<div class="check muted">
+                EV: SoC ${f.ev.soc != null ? f.ev.soc.toFixed(0) + " %" : "—"} ·
+                pojemność ${f.ev.capacity_kwh != null ? f.ev.capacity_kwh.toFixed(1) + " kWh" : "uczona"} ·
+                moc ładowarki ${f.ev.charger_power_kw != null ? f.ev.charger_power_kw.toFixed(1) + " kW" : "—"} ·
+                cele: ${f.ev.targets} · wyjazdy: ${f.ev.trips}
+              </div>`
+            : nothing}
+        </div>
+
+        ${arrow("decyzje → encje sterujące i wykresy")}
+
+        <div class="card flow-stage">
+          <div class="card-title">6 · Wyjścia</div>
+          <div class="check muted">
+            Tryb falownika i moc ładowania → encje integracji (automatyzacje) ·
+            plan i koszty → zakładka „Przegląd" · zapis vintage co godzinę →
+            zakładki „Symulacje" i porównania prognoz.
+          </div>
+        </div>
       </div>
     `;
   }
@@ -3334,6 +3629,70 @@ export class PowerPilotPanel extends LitElement {
       opacity: 0.65;
       font-variant-numeric: tabular-nums;
       font-size: 12px;
+    }
+    .flow-col {
+      display: flex;
+      flex-direction: column;
+      max-width: 860px;
+      margin: 0 auto;
+    }
+    .flow-stage {
+      margin-bottom: 0;
+    }
+    .flow-arrow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 0 6px 26px;
+      color: var(--secondary-text-color);
+      font-size: 12px;
+    }
+    .flow-arrow span:first-child {
+      font-size: 18px;
+      color: var(--primary-color);
+    }
+    .flow-inputs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .flow-input {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      padding: 8px 10px;
+      border: 1px solid var(--divider-color, #444);
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .flow-input.flow-missing {
+      opacity: 0.5;
+      border-style: dashed;
+    }
+    .flow-input-label {
+      font-size: 11px;
+      color: var(--secondary-text-color);
+    }
+    .flow-eid {
+      font-size: 10px;
+      color: var(--secondary-text-color);
+      font-family: monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .flow-formula {
+      margin: 6px 0;
+      padding: 8px 12px;
+      border-left: 3px solid var(--primary-color);
+      background: rgba(127, 127, 127, 0.07);
+      border-radius: 0 6px 6px 0;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+    .flow-formula.flow-highlight {
+      border-left-color: #14b8a6;
     }
     .kpi-grid {
       display: grid;

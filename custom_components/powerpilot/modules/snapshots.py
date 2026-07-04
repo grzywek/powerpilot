@@ -165,6 +165,24 @@ class SnapshotStore:
         seq = rec.get(key) or []
         return seq[0] if seq else None
 
+    def trips_overlapping(self, start: datetime, end: datetime) -> list[dict]:
+        """Trips recorded in any vintage whose away window overlaps [start, end).
+
+        Deduplicated by (label, event_start); the newest vintage's version of a
+        trip wins (its travel model is the most refined). This is how the chart
+        keeps showing past events after they were removed from the calendar —
+        the vintages that planned around them still remember them.
+        """
+        out: dict[tuple, dict] = {}
+        for key in sorted(self._records):  # oldest → newest; newer overwrite
+            for trip in self._records[key].get("trips") or []:
+                depart = dt_util.parse_datetime(trip.get("depart") or "")
+                ret = dt_util.parse_datetime(trip.get("return_end") or "")
+                if depart is None or ret is None or ret <= start or depart >= end:
+                    continue
+                out[(trip.get("label"), trip.get("event_start"))] = trip
+        return list(out.values())
+
     def prune(self) -> None:
         cutoff = dt_util.utcnow() - timedelta(days=_SNAPSHOT_RETENTION_DAYS)
         kept: dict[str, dict[str, Any]] = {}

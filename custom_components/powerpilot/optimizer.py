@@ -65,7 +65,7 @@ import logging
 import math
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import highspy
 import numpy as np
@@ -632,6 +632,13 @@ class Optimizer:
             the remainder must sit on the chronologically last chosen hour.
             ``room`` overrides the pack-room cap (deadline targets compute the
             room *at their deadline*, which the global estimate can't see).
+
+            Placement preferences (``EVRequest.prefer_contiguous`` /
+            ``prefer_early``) reshape the choice within a bounded extra cost:
+            contiguity keeps the block unbroken unless the scattered optimum is
+            more than ``contiguous_max_extra_pct`` % cheaper; earliness picks,
+            among placements within ``early_max_extra_pct`` % of the cheapest,
+            the one that finishes charging soonest.
             """
             deficit = min(deficit, capacity_left() if room is None else room)
             if deficit <= _EPS:
@@ -647,7 +654,17 @@ class Optimizer:
             # Remainder on the top-off hour, in (0, P]. Clamps to full power when
             # there aren't enough hours to fully reach the target.
             remainder = min(max(deficit - (needed - 1) * charger_kw, _EPS), charger_kw)
-            best: tuple[float, datetime, list] | None = None
+
+            hour_step = timedelta(hours=1)
+
+            def _contiguous(starts: list[datetime]) -> bool:
+                return all(b - a == hour_step for a, b in zip(starts, starts[1:]))
+
+            # One variant per candidate top-off hour: cheapest full blocks
+            # before it. For contiguity also try the block of `needed-1` slots
+            # *immediately* before the top-off (valid when they form an
+            # unbroken run of clock hours ending at it).
+            variants: list[tuple[float, datetime, list[datetime]]] = []
             for li in range(needed - 1, len(slots)):
                 top_off = slots[li]
                 fulls = sorted(slots[:li], key=lambda s: s.buy_price)[: needed - 1]
@@ -657,11 +674,51 @@ class Optimizer:
                     charger_kw * sum(s.buy_price for s in fulls)
                     + remainder * top_off.buy_price
                 )
-                if best is None or cost < best[0]:
-                    best = (cost, top_off.start, [s.start for s in fulls])
-            if best is None:
+                variants.append((cost, top_off.start, [s.start for s in fulls]))
+                if needed > 1:
+                    block = slots[li - (needed - 1) : li]
+                    block_starts = [s.start for s in block] + [top_off.start]
+                    if _contiguous(block_starts):
+                        bcost = (
+                            charger_kw * sum(s.buy_price for s in block)
+                            + remainder * top_off.buy_price
+                        )
+                        variants.append((bcost, top_off.start, [s.start for s in block]))
+            if not variants:
                 return {}
-            _, top_off_start, full_starts = best
+
+            best_cost = min(v[0] for v in variants)
+
+            def _within(cost: float, pct: float) -> bool:
+                # Bounded extra spend relative to the optimum; |·| keeps the
+                # bound meaningful when spot prices go negative.
+                return cost <= best_cost + abs(best_cost) * pct / 100.0 + _EPS
+
+            pool = variants
+            if ev_request.prefer_contiguous and needed > 1:
+                contiguous_pool = [
+                    v
+                    for v in variants
+                    if _contiguous(sorted([*v[2], v[1]]))
+                    and _within(v[0], ev_request.contiguous_max_extra_pct)
+                ]
+                # No block within budget → the gap is allowed (difference
+                # exceeds the configured threshold).
+                if contiguous_pool:
+                    pool = contiguous_pool
+            if ev_request.prefer_early:
+                pool_best = min(v[0] for v in pool)
+                budget = (
+                    pool_best
+                    + abs(pool_best) * ev_request.early_max_extra_pct / 100.0
+                    + _EPS
+                )
+                eligible = [v for v in pool if v[0] <= budget]
+                chosen = min(eligible, key=lambda v: (v[1], v[0]))
+            else:
+                chosen = min(pool, key=lambda v: v[0])
+
+            _, top_off_start, full_starts = chosen
             out = {start: charger_kw for start in full_starts}
             out[top_off_start] = remainder
             return out

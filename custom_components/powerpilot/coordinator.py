@@ -473,6 +473,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # vintage recorded at each hour. Captured from now on; older vintages
             # predate this field and stay blank.
             "bcost": [_r(d.battery_energy_cost, 4) for d in decisions],
+            # Calendar trips as this plan saw them — past events must stay
+            # visible on the chart even after being removed from the calendar,
+            # and a stale-lead view must show the events *that plan* knew about.
+            "trips": self.ev.trips_payload(),
         }
         self.snapshots.add(record)
         self.snapshots.prune()
@@ -2063,14 +2067,93 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if decision.ev_soc is not None:
                     prev_ev_soc = decision.ev_soc
 
+        # At a stale lead the whole chart is pinned to the selected vintage:
+        # bars, costs and prices come from THAT plan, not from realized data —
+        # otherwise switching the lead only moved the tooltip/dashed lines and
+        # the view mixed "reality" bars with a past plan's context. The solid
+        # realized SoC lines and the tooltip's "realne" column stay untouched
+        # as the comparison anchor.
+        if lead > 0:
+            for hour_dict in hours:
+                hstart = dt_util.parse_datetime(hour_dict["start"])
+                covered = hstart is not None and _pin_idx(hstart) is not None
+
+                def p(key: str, _h=hstart, _c=covered):
+                    return _pin_val(_h, key) if _c else None
+
+                buy, dist = p("buy"), p("dist")
+                grid, dischg, bcost = p("grid"), p("dischg"), p("bcost")
+                hour_dict.update(
+                    {
+                        "buy_price": buy,
+                        "distribution_price_kwh": dist,
+                        "total_price_kwh": (
+                            buy + dist if buy is not None and dist is not None else None
+                        ),
+                        "price_confirmed": p("ptype") == "c",
+                        "grid_buy_kwh": grid,
+                        "battery_discharge_kwh": dischg,
+                        "battery_charge_kwh": p("charge"),
+                        "charge_power_kw": p("charge_pw"),
+                        "ev_charge_kwh": p("ev"),
+                        # Bars fall back to the pinned plan's consumption
+                        # forecast (the panel prefers real when present).
+                        "consumption_real": None,
+                        "consumption_forecast": p("cons_fc"),
+                        "base_consumption_forecast": p("base_fc"),
+                        "devices_real": {eid: None for eid in device_ids},
+                        "hour_cost": p("cost"),
+                        "energy_cost": (
+                            round(grid * buy, 4)
+                            if grid is not None and buy is not None
+                            else None
+                        ),
+                        "distribution_cost": (
+                            round(grid * dist, 4)
+                            if grid is not None and dist is not None
+                            else None
+                        ),
+                        "battery_use_cost": (
+                            round(dischg * bcost, 4)
+                            if dischg is not None and bcost is not None
+                            else None
+                        ),
+                        "battery_energy_cost": bcost,
+                    }
+                )
+
+        # Trips for the away-window shading + tooltip. Stale lead → only the
+        # events the pinned plan knew about. Live view → current calendar trips
+        # plus the history harvested from vintages, so events removed from the
+        # calendar after the fact stay visible where they shaped past plans.
+        series_end = (
+            window_end
+            or (
+                plan.forecast.slots[-1].start + timedelta(hours=1)
+                if plan and plan.forecast.slots
+                else past_end
+            )
+        )
+        if lead > 0:
+            trips = list((pin_rec or {}).get("trips") or [])
+        else:
+            merged: dict[tuple, dict] = {
+                (t.get("label"), t.get("event_start")): t
+                for t in sn.trips_overlapping(past_start, series_end)
+            }
+            for t in self.ev.trips_payload():
+                merged[(t.get("label"), t.get("event_start"))] = t
+            trips = sorted(merged.values(), key=lambda t: t.get("depart") or "")
+
         return {
             # Exact present instant — the panel draws the "teraz" line here.
             "now": real_now.isoformat(),
             "past_hours": past_hours,
             "start": past_start.isoformat(),
-            "end": (window_end or (plan.forecast.slots[-1].start + timedelta(hours=1) if plan and plan.forecast.slots else past_end)).isoformat() if (window_end or plan) else past_end.isoformat(),
+            "end": series_end.isoformat(),
             "device_ids": device_ids,
             "hours": hours,
+            "trips": trips,
         }
 
     def ev_control(self) -> dict:
@@ -2116,6 +2199,164 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "charge_start": charge_start.isoformat() if charge_start else None,
             "soc_limit": ev.soc_limit_now(),
             "soc": ev.soc,
+        }
+
+    def get_flow(self) -> dict:
+        """Live snapshot of the computation pipeline for the "Przepływ" tab.
+
+        Answers "where does the in-battery price come from": which sensors
+        feed the model, how the gross price is assembled, where the charge /
+        discharge losses and wear cost enter, and what the optimizer decided
+        for the current hour. Values are read live so the diagram doubles as a
+        sanity check of the inputs.
+        """
+        from .const import (
+            CONF_BATTERY_CAPACITY_KWH,
+            CONF_BATTERY_CHARGE_SENSOR,
+            CONF_BATTERY_DISCHARGE_SENSOR,
+            CONF_BATTERY_WEAR_COST,
+            CONF_BUY_PRICE_SENSOR,
+            CONF_CHARGE_EFFICIENCY,
+            CONF_CONSUMPTION_SENSOR,
+            CONF_DEVICE_SENSORS,
+            CONF_DISCHARGE_EFFICIENCY,
+            CONF_EV_ENERGY_ADDED_SENSOR,
+            CONF_EV_SOC_SENSOR,
+            CONF_EXCISE_KWH,
+            CONF_GRID_IMPORT_SENSOR,
+            CONF_PRICE_MARKUP,
+            CONF_PRICE_SOURCE,
+            CONF_PRICE_VAT,
+            CONF_SOC_SENSOR,
+            CONF_WEATHER_ENTITY,
+            DEFAULTS,
+        )
+
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+
+        def ent(conf_key: str) -> dict | None:
+            eid = self.config.get(conf_key)
+            if not eid:
+                return None
+            state = self.hass.states.get(eid)
+            return {
+                "entity_id": eid,
+                "value": state.state if state else None,
+                "unit": (
+                    state.attributes.get("unit_of_measurement") if state else None
+                ),
+                "available": state is not None
+                and state.state not in ("unknown", "unavailable"),
+            }
+
+        def cfg(key: str, ndigits: int = 4) -> float:
+            value = self.config.get(key, DEFAULTS.get(key))
+            try:
+                return round(float(value), ndigits)
+            except (TypeError, ValueError):
+                return float(DEFAULTS.get(key) or 0.0)
+
+        buy = self.prices.price_at(now)
+        dist = self.tariff.snapshot_for(now)
+        eta_c = cfg(CONF_CHARGE_EFFICIENCY)
+        eta_d = cfg(CONF_DISCHARGE_EFFICIENCY)
+        wear = cfg(CONF_BATTERY_WEAR_COST)
+        reservoir_cost = round(self._battery_energy_cost, 4)
+        live_soc = self._read_soc()
+
+        current = self.current_decision(self.data) if self.data else None
+
+        return {
+            "now": now.isoformat(),
+            "inputs": {
+                "consumption": ent(CONF_CONSUMPTION_SENSOR),
+                "device_sensors": [
+                    {"entity_id": eid} for eid in (self.config.get(CONF_DEVICE_SENSORS) or [])
+                ],
+                "battery_soc": ent(CONF_SOC_SENSOR),
+                "battery_charge": ent(CONF_BATTERY_CHARGE_SENSOR),
+                "battery_discharge": ent(CONF_BATTERY_DISCHARGE_SENSOR),
+                "grid_import": ent(CONF_GRID_IMPORT_SENSOR),
+                "buy_price_sensor": ent(CONF_BUY_PRICE_SENSOR),
+                "weather": ent(CONF_WEATHER_ENTITY),
+                "ev_soc": ent(CONF_EV_SOC_SENSOR),
+                "ev_energy_added": ent(CONF_EV_ENERGY_ADDED_SENSOR),
+                "calendars": list(self.config.get(CONF_CALENDARS) or []),
+                "price_source": self.config.get(CONF_PRICE_SOURCE),
+            },
+            "pricing": {
+                "markup": cfg(CONF_PRICE_MARKUP),
+                "vat": cfg(CONF_PRICE_VAT),
+                "excise_kwh": cfg(CONF_EXCISE_KWH),
+                "buy_price_now": buy,
+                "distribution_now": dist,
+                "fixed_hourly": self.tariff.fixed_hourly_for(now),
+                "total_now": (
+                    round(buy + dist, 4) if buy is not None and dist is not None else None
+                ),
+                "confirmed": self.prices.is_confirmed(now),
+            },
+            "consumption_model": {
+                "observed_days": self.consumption.base.observed_days,
+                "base_now_kwh": self.consumption.base_value(now.weekday(), now.hour),
+                "device_profiles": len(self.consumption.devices),
+            },
+            "battery": {
+                "capacity_kwh": cfg(CONF_BATTERY_CAPACITY_KWH, 2),
+                "soc": round(live_soc, 1) if live_soc else None,
+                "charge_efficiency": eta_c,
+                "discharge_efficiency": eta_d,
+                "wear_cost": wear,
+                # PLN per kWh *stored* in the pack (blended over charges).
+                "reservoir_cost": reservoir_cost,
+                # PLN per kWh *delivered* to the house: losses + wear on the
+                # way out — this is the chart's "Cena w baterii".
+                "delivered_cost": (
+                    round(reservoir_cost / eta_d + wear, 4) if eta_d > 0 else None
+                ),
+                # What storing 1 kWh bought now would cost after charge losses
+                # (before blending into the reservoir average).
+                "store_cost_now": (
+                    round(((buy + dist) / eta_c) + wear, 4)
+                    if buy is not None and dist is not None and eta_c > 0
+                    else None
+                ),
+            },
+            "ev": {
+                "enabled": self.ev.enabled,
+                "soc": self.ev.soc,
+                "capacity_kwh": self.ev._capacity,
+                "charger_power_kw": self.ev.charger_power_kw,
+                "targets": len(self.ev._targets) + len(self.ev._trip_targets),
+                "trips": len(self.calendar.trips),
+            },
+            "optimizer": {
+                "created_at": (
+                    self.data.created_at.isoformat()
+                    if self.data and self.data.created_at
+                    else None
+                ),
+                "horizon_hours": len(self.data.decisions) if self.data else 0,
+                "total_cost": (
+                    round(self.data.total_cost, 2) if self.data else None
+                ),
+                "current": (
+                    {
+                        "inverter_mode": current.inverter_mode,
+                        "battery_charge_kwh": round(current.battery_charge_kwh, 3),
+                        "battery_discharge_kwh": round(
+                            current.battery_discharge_kwh, 3
+                        ),
+                        "grid_buy_kwh": round(current.grid_buy_kwh, 3),
+                        "ev_charge_kwh": round(current.ev_charge_kwh, 3),
+                        "battery_soc_end": round(current.battery_soc, 1),
+                        "hour_cost": round(current.hour_cost, 4),
+                        "battery_use_cost": round(current.battery_use_cost, 4),
+                    }
+                    if current
+                    else None
+                ),
+            },
         }
 
     def get_status(self) -> dict:

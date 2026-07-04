@@ -143,6 +143,13 @@ async def ws_accuracy(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], result)
 
 
+@websocket_api.websocket_command({vol.Required("type"): "powerpilot/flow"})
+@callback
+def ws_flow(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass)
+    connection.send_result(msg["id"], coordinator.get_flow() if coordinator else {})
+
+
 @websocket_api.websocket_command({vol.Required("type"): "powerpilot/debug"})
 @websocket_api.async_response
 async def ws_debug(hass: HomeAssistant, connection, msg) -> None:
@@ -190,6 +197,7 @@ def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_snapshots)
     websocket_api.async_register_command(hass, ws_snapshot)
     websocket_api.async_register_command(hass, ws_accuracy)
+    websocket_api.async_register_command(hass, ws_flow)
     websocket_api.async_register_command(hass, ws_debug)
     websocket_api.async_register_command(hass, ws_diagnostics)
     websocket_api.async_register_command(hass, ws_consumption_stats)

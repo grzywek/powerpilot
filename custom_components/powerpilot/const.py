@@ -126,6 +126,19 @@ CONF_EV_CHARGE_METER_SENSOR: Final = "ev_charge_meter_sensor"
 # upgrade — nothing reads it at runtime anymore.
 CONF_EV_CALENDAR: Final = "ev_calendar"
 CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # event-summary trigger word (e.g. "Kotek")
+# --- EV charging-hour placement preferences ---
+# The allocator's baseline is pure cost: cheapest hours win even when that
+# scatters charging (2 h on, 1 h gap, 2 h on). These options trade a bounded
+# amount of money for nicer placement:
+# * prefer contiguous — keep the charging hours in one unbroken block as long
+#   as the block costs at most ``contiguous_max_extra_pct`` % more than the
+#   scattered optimum; a bigger difference re-allows the gap.
+# * prefer early — among placements within ``early_max_extra_pct`` % of the
+#   cheapest, pick the one that finishes charging soonest.
+CONF_EV_PREFER_CONTIGUOUS: Final = "ev_prefer_contiguous"
+CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT: Final = "ev_contiguous_max_extra_pct"
+CONF_EV_PREFER_EARLY: Final = "ev_prefer_early"
+CONF_EV_EARLY_MAX_EXTRA_PCT: Final = "ev_early_max_extra_pct"
 
 # --- Calendars (integration-wide, not EV-specific) ---
 # HA ``calendar.*`` entities read for planning (works with Google, CalDAV/
@@ -238,6 +251,10 @@ DEFAULTS: Final = {
     CONF_EV_CHARGER_PHASE: 1,
     CONF_EV_CHARGER_PHASES: 1,
     CONF_EV_CALENDAR_KEYWORD: "Kotek",
+    CONF_EV_PREFER_CONTIGUOUS: False,
+    CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT: 15.0,
+    CONF_EV_PREFER_EARLY: False,
+    CONF_EV_EARLY_MAX_EXTRA_PCT: 10.0,
     CONF_TRAVEL_MARGIN_BEFORE_MIN: 30,
     CONF_TRAVEL_MARGIN_AFTER_MIN: 30,
 }

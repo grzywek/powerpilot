@@ -80,6 +80,12 @@ _LOGGER = logging.getLogger(__name__)
 
 _EPS = 1e-6
 
+# Tiny per-hour cost added to charging so that among *equally priced* hours the
+# LP picks the earliest ones (finish early → any shortfall extends into cheap
+# hours instead of expensive ones). One order of magnitude below the 4-decimal
+# price granularity, so it can never override a real price difference.
+_EARLY_TIE_BREAK = 1e-5  # PLN/kWh across the whole horizon
+
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # full-power-block allocator or a stale import.
@@ -113,6 +119,16 @@ class OptimizerConfig:
     min_charge_power_kw: float = 0.0
     # Maximum grid import power (kW). 0 disables the connection-power limit.
     connection_power_kw: float = 0.0
+    # Single-phase capacity (kW) = phase voltage × main fuse. Caps the battery
+    # charger during EV hours: worst case both draw through the same phase, so
+    # the inverter may take at most ``phase_capacity − EV per-phase draw``. 0 →
+    # fall back to the legacy blanket subtraction (which zeroed the battery
+    # whenever the EV charger was at least as strong as the inverter, splitting
+    # EV and ESS charging into disjoint hours for no physical reason).
+    phase_capacity_kw: float = 0.0
+    # Power-dependent charge efficiency samples: list of {"kw", "eff"} points
+    # (eff = 0..1). Empty/None → the battery's flat charge efficiency applies.
+    charge_efficiency_curve: list[dict] | None = None
     # Explicit terminal price (PLN/kWh) for energy left at the end of the
     # horizon. ``None`` → use the horizon-average total grid price.
     terminal_price: float | None = None
@@ -213,7 +229,7 @@ class Optimizer:
         demand = [max(0.0, s.total_consumption_kwh) for s in slots]
         ev_kwh = [ev_hours.get(slots[t].start, 0.0) for t in range(n)]
 
-        charge, discharge = self._solve_lp(
+        charge, discharge, stored = self._solve_lp(
             battery=battery,
             total_price=total_price,
             demand=demand,
@@ -226,6 +242,7 @@ class Optimizer:
             battery=battery,
             charge=charge,
             discharge=discharge,
+            stored=stored,
             energy_price=energy_price,
             distribution=distribution,
             total_price=total_price,
@@ -238,6 +255,56 @@ class Optimizer:
     # ------------------------------------------------------------------
     # Linear program
     # ------------------------------------------------------------------
+    def _efficiency_segments(self, ceff: float) -> list[tuple[float, float]]:
+        """Marginal charge-efficiency segments ``(width_kw, η)`` for the LP.
+
+        Built from the configured power→efficiency samples as the concave hull
+        of ``stored(P) = P·η(P)``: each hull chord is one segment whose slope is
+        the *marginal* efficiency over that power band. Slopes are non-increasing
+        by construction, so a pure LP fills the best segment first and the fill
+        order matches physics (charge power grows through the sweet spot before
+        the tail where efficiency falls off). The rising low-power part of a real
+        efficiency chart is convex and gets flattened by the hull — a deliberate
+        approximation (slopes are clamped to ≤ 1 so the model can never store
+        more than it draws), and the min-charge-power floor keeps the plan out
+        of that region anyway. Without a curve: one flat-η segment.
+        """
+        cap = self.config.inverter_max_charge_kw
+        curve = self.config.charge_efficiency_curve or []
+        points = sorted(
+            (float(p["kw"]), min(max(float(p["eff"]), 0.01), 1.0))
+            for p in curve
+            if float(p.get("kw", 0.0)) > _EPS
+        )
+        if not points or cap <= _EPS:
+            return [(cap, ceff)]
+
+        stored_pts: list[tuple[float, float]] = [(0.0, 0.0)]
+        prev_kw, prev_eff = 0.0, points[0][1]
+        for kw, eff in points:
+            if kw >= cap - _EPS:
+                # Interpolate η at the inverter cap and stop — powers beyond
+                # the cap are unreachable.
+                if kw > cap + _EPS and kw > prev_kw:
+                    frac = (cap - prev_kw) / (kw - prev_kw)
+                    eff = prev_eff + (eff - prev_eff) * frac
+                    kw = cap
+                stored_pts.append((kw, kw * eff))
+                break
+            stored_pts.append((kw, kw * eff))
+            prev_kw, prev_eff = kw, eff
+        else:
+            # Curve ends below the cap → extend flat with the last efficiency.
+            stored_pts.append((cap, cap * points[-1][1]))
+
+        hull = _upper_hull(sorted(set(stored_pts)))
+        segments: list[tuple[float, float]] = []
+        for (x1, y1), (x2, y2) in zip(hull, hull[1:]):
+            if x2 - x1 <= _EPS:
+                continue
+            segments.append((x2 - x1, min((y2 - y1) / (x2 - x1), 1.0)))
+        return segments or [(cap, ceff)]
+
     def _solve_lp(
         self,
         battery: BatteryModel,
@@ -245,7 +312,7 @@ class Optimizer:
         demand: list[float],
         ev_kwh: list[float],
         ev_charger_kw: float,
-    ) -> tuple[list[float], list[float]]:
+    ) -> tuple[list[float], list[float], list[float]]:
         cfg = self.config
         n = len(total_price)
         ceff = max(battery.charge_efficiency, _EPS)
@@ -265,47 +332,83 @@ class Optimizer:
         # to the house, displacing grid energy worth ``p_term`` each.
         tv = deff * p_term
 
+        # Charging is modelled per efficiency segment: hour t has K columns
+        # c[t,k] (grid kWh within power band k), stored energy = Σ η_k·c[t,k].
+        # With no efficiency curve K == 1 and η_1 == ceff — the legacy model.
+        segments = self._efficiency_segments(ceff)
+        seg_n = len(segments)
+        seg_width = [w for w, _ in segments]
+        seg_eff = [e for _, e in segments]
+
         h = highspy.Highs()
         h.setOptionValue("output_flag", False)
         inf = highspy.kHighsInf
 
-        # Charge columns c[0..n-1] are continuous grid-draw power (kWh per hour).
+        def seg_col(t: int, k: int) -> int:
+            return t * seg_n + k
+
+        d0 = n * seg_n  # first discharge column
+        y0 = d0 + n  # first min-charge indicator column
+
+        # Per-hour grid-side charge cap. During EV hours the battery may still
+        # charge — the real limit is electrical: worst case the EV charger and
+        # the inverter share one phase, so the inverter gets whatever the phase
+        # fuse leaves after the EV draw. Without fuse data fall back to the
+        # legacy blanket subtraction.
         charge_caps: list[float] = []
         for t in range(n):
             charge_cap = cfg.inverter_max_charge_kw
             if ev_kwh[t] > 0:
-                # EV shares a phase with the inverter; leave it head-room.
-                charge_cap = max(0.0, charge_cap - ev_charger_kw)
+                if cfg.phase_capacity_kw > _EPS:
+                    charge_cap = min(
+                        charge_cap,
+                        max(0.0, cfg.phase_capacity_kw - ev_charger_kw),
+                    )
+                else:
+                    charge_cap = max(0.0, charge_cap - ev_charger_kw)
             charge_caps.append(charge_cap)
-            h.addVar(0.0, charge_cap)
-        # Discharge columns d[0..n-1] are BINARY: each hour either covers the
-        # whole house demand from the battery (z=1 → cap[t] kWh delivered) or not
-        # at all (z=0). This makes every hour exactly one inverter mode and
-        # forbids rationing a *partial* discharge across hours — a deliberate
+
+        # Charge segment columns c[t,k].
+        for t in range(n):
+            for k in range(seg_n):
+                h.addVar(0.0, min(seg_width[k], charge_caps[t]))
+        # Discharge columns are BINARY: each hour either covers the whole house
+        # demand from the battery (z=1 → cap[t] kWh delivered) or not at all
+        # (z=0). This makes every hour exactly one inverter mode and forbids
+        # rationing a *partial* discharge across hours — a deliberate
         # simplification chosen over a marginally cheaper fractional plan.
         discharge_cap = [min(demand[t], cfg.inverter_max_discharge_kw) for t in range(n)]
         for t in range(n):
             if discharge_cap[t] > _EPS:
                 h.addVar(0.0, 1.0)
-                h.changeColIntegrality(n + t, highspy.HighsVarType.kInteger)
+                h.changeColIntegrality(d0 + t, highspy.HighsVarType.kInteger)
             else:
                 h.addVar(0.0, 0.0)  # no demand → nothing to cover this hour
 
-        cost = np.empty(2 * n, dtype=np.float64)
+        n_cols = d0 + n
+        cost = np.empty(n_cols, dtype=np.float64)
         for t in range(n):
-            cost[t] = total_price[t] + wear * ceff - tv * ceff
+            # Earliness tie-break: among equally priced hours prefer charging
+            # in the earliest, so an unfinished charge extends into the cheap
+            # tail instead of expensive hours.
+            tie = _EARLY_TIE_BREAK * (t / max(n - 1, 1))
+            for k in range(seg_n):
+                cost[seg_col(t, k)] = (
+                    total_price[t] + (wear - tv) * seg_eff[k] + tie
+                )
             # d-column is a 0/1 switch worth discharge_cap[t] kWh delivered.
-            cost[n + t] = (-total_price[t] + wear + tv / deff) * discharge_cap[t]
-        h.changeColsCost(2 * n, np.arange(2 * n, dtype=np.int32), cost)
+            cost[d0 + t] = (-total_price[t] + wear + tv / deff) * discharge_cap[t]
+        h.changeColsCost(n_cols, np.arange(n_cols, dtype=np.int32), cost)
 
         # SoC band on the running reservoir level after each hour.
         for t in range(n):
             idx: list[int] = []
             val: list[float] = []
             for k in range(t + 1):
-                idx.append(k)
-                val.append(ceff)
-                idx.append(n + k)
+                for s in range(seg_n):
+                    idx.append(seg_col(k, s))
+                    val.append(seg_eff[s])
+                idx.append(d0 + k)
                 val.append(-discharge_cap[k] / deff)
             h.addRow(
                 e_min - e0,
@@ -315,16 +418,30 @@ class Optimizer:
                 np.array(val, dtype=np.float64),
             )
 
+        # Per-hour total charge cap (the segment bounds alone allow up to the
+        # full inverter power; EV hours may leave less).
+        for t in range(n):
+            if charge_caps[t] < sum(seg_width) - _EPS:
+                h.addRow(
+                    -inf,
+                    charge_caps[t],
+                    seg_n,
+                    np.array([seg_col(t, k) for k in range(seg_n)], dtype=np.int32),
+                    np.ones(seg_n, dtype=np.float64),
+                )
+
         # Connection-power limit on grid import.
         if cfg.connection_power_kw and cfg.connection_power_kw > 0:
             for t in range(n):
                 rhs = cfg.connection_power_kw - demand[t] - ev_kwh[t]
+                idx = [seg_col(t, k) for k in range(seg_n)] + [d0 + t]
+                val = [1.0] * seg_n + [-discharge_cap[t]]
                 h.addRow(
                     -inf,
                     rhs,
-                    2,
-                    np.array([t, n + t], dtype=np.int32),
-                    np.array([1.0, -discharge_cap[t]], dtype=np.float64),
+                    len(idx),
+                    np.array(idx, dtype=np.int32),
+                    np.array(val, dtype=np.float64),
                 )
 
         # SoC-dependent charge curve (only when actually configured).
@@ -332,12 +449,13 @@ class Optimizer:
             if abs(slope) <= _EPS:
                 continue
             for t in range(n):
-                idx = [t]
-                val = [1.0]
+                idx = [seg_col(t, k) for k in range(seg_n)]
+                val = [1.0] * seg_n
                 for k in range(t):
-                    idx.append(k)
-                    val.append(-slope * ceff)
-                    idx.append(n + k)
+                    for s in range(seg_n):
+                        idx.append(seg_col(k, s))
+                        val.append(-slope * seg_eff[s])
+                    idx.append(d0 + k)
                     val.append(slope * discharge_cap[k] / deff)
                 h.addRow(
                     -inf,
@@ -347,34 +465,32 @@ class Optimizer:
                     np.array(val, dtype=np.float64),
                 )
 
-        # Minimum charge power: make each charge column semi-continuous — either 0
-        # or ≥ min_charge. Add one binary indicator y[t] (columns 2n..3n-1) with
-        #   c[t] ≤ cap[t]·y[t]   (charge only when the switch is on)
-        #   c[t] ≥ min_charge·y[t]  (and then at least the floor)
-        # y is appended after every other column/row so existing indices (the SoC,
-        # connection and charge-curve rows reference cols 0..2n-1) stay valid.
+        # Minimum charge power: make each hour's total charge semi-continuous —
+        # either 0 or ≥ min_charge. One binary indicator y[t] per hour with
+        #   Σ_k c[t,k] ≤ cap[t]·y[t]   (charge only when the switch is on)
+        #   Σ_k c[t,k] ≥ min_charge·y[t]  (and then at least the floor)
         min_charge = cfg.min_charge_power_kw or 0.0
         if min_charge > _EPS:
             for t in range(n):
                 h.addVar(0.0, 1.0)
-                h.changeColIntegrality(2 * n + t, highspy.HighsVarType.kInteger)
+                h.changeColIntegrality(y0 + t, highspy.HighsVarType.kInteger)
             for t in range(n):
-                cap = charge_caps[t]
-                # c[t] - cap·y[t] ≤ 0
+                idx = [seg_col(t, k) for k in range(seg_n)]
+                # Σc - cap·y ≤ 0
                 h.addRow(
                     -inf,
                     0.0,
-                    2,
-                    np.array([t, 2 * n + t], dtype=np.int32),
-                    np.array([1.0, -cap], dtype=np.float64),
+                    seg_n + 1,
+                    np.array([*idx, y0 + t], dtype=np.int32),
+                    np.array([*([1.0] * seg_n), -charge_caps[t]], dtype=np.float64),
                 )
-                # c[t] - min_charge·y[t] ≥ 0
+                # Σc - min_charge·y ≥ 0
                 h.addRow(
                     0.0,
                     inf,
-                    2,
-                    np.array([t, 2 * n + t], dtype=np.int32),
-                    np.array([1.0, -min_charge], dtype=np.float64),
+                    seg_n + 1,
+                    np.array([*idx, y0 + t], dtype=np.int32),
+                    np.array([*([1.0] * seg_n), -min_charge], dtype=np.float64),
                 )
 
         h.run()
@@ -382,10 +498,18 @@ class Optimizer:
         if status != highspy.HighsModelStatus.kOptimal:
             raise RuntimeError(f"HiGHS did not find an optimal plan: {status}")
         sol = list(h.getSolution().col_value)
-        charge = sol[:n]
+        charge = [
+            sum(sol[seg_col(t, k)] for k in range(seg_n)) for t in range(n)
+        ]
+        # Stored (post-loss) energy per hour, from the same segment solution —
+        # _build_plan replays it so the effective η matches the chosen power.
+        stored = [
+            sum(seg_eff[k] * sol[seg_col(t, k)] for k in range(seg_n))
+            for t in range(n)
+        ]
         # d-columns are 0/1 switches; expand back to delivered energy.
-        discharge = [discharge_cap[t] * sol[n + t] for t in range(n)]
-        return charge, discharge
+        discharge = [discharge_cap[t] * sol[d0 + t] for t in range(n)]
+        return charge, discharge, stored
 
     # ------------------------------------------------------------------
     # Replay the LP solution into Decisions + cost reporting
@@ -403,6 +527,7 @@ class Optimizer:
         ev_kwh: list[float],
         ev_request: EVRequest | None = None,
         reminders: list[str] | None = None,
+        stored: list[float] | None = None,
     ) -> Plan:
         cfg = self.config
         ceff = max(battery.charge_efficiency, _EPS)
@@ -443,14 +568,21 @@ class Optimizer:
             soc_before = battery.soc
             cost_before = battery.energy_cost
 
-            stored = 0.0
+            stored_kwh = 0.0
             delivered = 0.0
+            # Effective charge efficiency at the LP-chosen power (from the
+            # efficiency-curve segments); flat η when no curve is configured.
+            eff_t = (
+                stored[t] / c
+                if stored is not None and c > _EPS and stored[t] > _EPS
+                else None
+            )
             if c > 0:
-                stored = battery.charge_from_grid(c, tp)
+                stored_kwh = battery.charge_from_grid(c, tp, efficiency=eff_t)
             if d > 0:
                 delivered, _ = battery.discharge_to_load(d)
 
-            if stored > _EPS and stored >= delivered:
+            if stored_kwh > _EPS and stored_kwh >= delivered:
                 mode = InverterMode.CHARGE
             elif delivered > _EPS:
                 mode = InverterMode.DISCHARGE
@@ -470,12 +602,14 @@ class Optimizer:
             decision.charge_power = (
                 ChargePower.LIMITED if ev > 0 else ChargePower.FULL
             )
-            decision.battery_charge_kwh = stored
+            decision.battery_charge_kwh = stored_kwh
             # Grid-side charge power (kW) actually drawn this hour — what you set
-            # on the inverter as "force charge X kW". Equals ``stored / η_ch``
+            # on the inverter as "force charge X kW". Equals ``stored / η``
             # (reduced if the SoC ceiling clipped the charge mid-hour); the hour
             # slot is 1 h so kWh == average kW.
-            decision.charge_power_kw = stored / ceff if stored > _EPS else 0.0
+            decision.charge_power_kw = (
+                stored_kwh / (eff_t or ceff) if stored_kwh > _EPS else 0.0
+            )
             decision.battery_discharge_kwh = delivered
             decision.grid_buy_kwh = grid_buy
             decision.battery_soc = battery.soc
@@ -496,14 +630,15 @@ class Optimizer:
                 "discharge_threshold": round(discharge_threshold, 4),
                 "demand_kwh": round(demand[t], 3),
                 "ev_kwh": round(ev, 3),
-                "charge_kwh": round(stored, 3),
+                "charge_kwh": round(stored_kwh, 3),
+                "charge_efficiency": round(eff_t, 4) if eff_t is not None else None,
                 "discharge_kwh": round(delivered, 3),
                 "grid_buy_kwh": round(grid_buy, 3),
                 "soc_before": round(soc_before, 1),
                 "soc_after": round(battery.soc, 1),
                 "battery_energy_cost_before": round(cost_before, 4),
                 "reason": self._reason(
-                    mode, tp, charge_threshold, discharge_threshold, stored, delivered
+                    mode, tp, charge_threshold, discharge_threshold, stored_kwh, delivered
                 ),
             }
 

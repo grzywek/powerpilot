@@ -209,7 +209,16 @@
           "valid_from": "Valid from (optional)",
           "valid_to": "Valid to (optional)"
         }
+      },
+      "charge_curve": {
+        "title": "Charge curve",
+        "data": {
+          "charge_efficiency_curve_text": "Charge efficiency curve — \"power:efficiency%\" pairs, e.g. \"500:80, 1000:91, 2500:93, 5000:91\" (power in W or kW; empty = flat efficiency)"
+        }
       }
+    },
+    "error": {
+      "invalid_efficiency_curve": "Invalid efficiency curve — use comma-separated \"power:efficiency%\" pairs, e.g. \"1000:91, 2500:93\""
     }
   },
   "selector": {

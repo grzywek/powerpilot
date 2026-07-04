@@ -36,6 +36,12 @@ CONF_MAX_SOC: Final = "max_soc"  # %
 CONF_GRID_DISCONNECT_SOC: Final = "grid_disconnect_soc"  # %
 # Charge curve: list of {"soc_from", "soc_to", "max_kw"} segments.
 CONF_CHARGE_CURVE: Final = "charge_curve"
+# Power-dependent charge efficiency: list of {"kw", "eff"} points (eff is a
+# 0..1 fraction) sampled from the inverter's efficiency chart. The optimizer
+# builds a piecewise-linear stored-energy function from them and picks charge
+# powers accordingly (charging slower in the efficiency sweet spot beats one
+# full-power hour). Empty → the flat CONF_CHARGE_EFFICIENCY applies.
+CONF_CHARGE_EFFICIENCY_CURVE: Final = "charge_efficiency_curve"
 
 # --- Linked entities ---
 CONF_SOC_SENSOR: Final = "soc_sensor"  # current battery SoC %

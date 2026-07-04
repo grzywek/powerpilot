@@ -55,19 +55,25 @@ class BatteryModel:
     # ------------------------------------------------------------------
     # Operations
     # ------------------------------------------------------------------
-    def charge_from_grid(self, grid_kwh: float, grid_price: float) -> float:
+    def charge_from_grid(
+        self, grid_kwh: float, grid_price: float, efficiency: float | None = None
+    ) -> float:
         """Charge using ``grid_kwh`` drawn from the grid at ``grid_price``.
 
         Returns the energy actually stored (kWh), respecting the max-SoC ceiling.
+        ``efficiency`` overrides the flat charge efficiency for this hour — used
+        when a power-dependent efficiency curve is configured and the optimizer
+        already knows the effective η at the chosen charge power.
         """
         if grid_kwh <= 0:
             return 0.0
 
-        stored = grid_kwh * self.charge_efficiency
+        eff = self.charge_efficiency if efficiency is None else efficiency
+        stored = grid_kwh * eff
         headroom = self.usable_charge_headroom_kwh
         if stored > headroom:
             stored = headroom
-            grid_kwh = stored / self.charge_efficiency if self.charge_efficiency else 0.0
+            grid_kwh = stored / eff if eff else 0.0
 
         if stored <= 0:
             return 0.0

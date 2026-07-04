@@ -1444,7 +1444,8 @@ rect.legend-mouseover-inactive,
           <div class="check">
             Pojemność <b>${s(o.capacity_kwh,1)} kWh</b> · SoC
             <b>${o.soc!=null?o.soc.toFixed(0)+" %":"\u2014"}</b> ·
-            η ładowania <b>${s(o.charge_efficiency)}</b> ·
+            η ładowania
+            <b>${o.efficiency_curve_points?`krzywa (${o.efficiency_curve_points} pkt, zale\u017Cna od mocy)`:s(o.charge_efficiency)}</b> ·
             η rozładowania <b>${s(o.discharge_efficiency)}</b> ·
             koszt zużycia (wear) <b>${s(o.wear_cost)} PLN/kWh</b>
           </div>

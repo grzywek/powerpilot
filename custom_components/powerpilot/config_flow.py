@@ -24,6 +24,7 @@ from .const import (
     CONF_CALENDARS,
     CONF_CHARGE_CURVE,
     CONF_CHARGE_EFFICIENCY,
+    CONF_CHARGE_EFFICIENCY_CURVE,
     CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
@@ -343,7 +344,54 @@ def _charge_curve_schema(data: dict[str, Any]) -> vol.Schema:
         fields[
             vol.Required(charge_curve_band_key(band), default=stored.get(lo, flat))
         ] = _NUMBER(_NUM(min=0, max=50, step=0.1, unit_of_measurement="kW", mode="box"))
+    # Power-dependent charge efficiency, entered as "power:efficiency%" pairs
+    # (power in W or kW — values above 100 are read as watts), e.g.
+    # "500:80, 1000:91, 2000:93, 4000:93, 7000:88". Empty → flat efficiency.
+    fields[
+        vol.Optional(
+            EFFICIENCY_CURVE_FIELD,
+            default=_efficiency_curve_text(data.get(CONF_CHARGE_EFFICIENCY_CURVE)),
+        )
+    ] = selector.TextSelector()
     return vol.Schema(fields)
+
+
+# Transient form-field key for the efficiency-curve text (parsed into
+# CONF_CHARGE_EFFICIENCY_CURVE segments; never stored itself).
+EFFICIENCY_CURVE_FIELD = "charge_efficiency_curve_text"
+
+
+def _efficiency_curve_text(segments: list[dict] | None) -> str:
+    """Render stored {"kw","eff"} points back into the "kW:%" text format."""
+    if not segments:
+        return ""
+    return ", ".join(
+        f"{float(seg['kw']):g}:{float(seg['eff']) * 100.0:g}" for seg in segments
+    )
+
+
+def _parse_efficiency_curve(text: str) -> list[dict]:
+    """Parse "power:efficiency%" pairs into {"kw","eff"} points.
+
+    Power reads as watts when > 100 (the datasheet charts are in W), kW
+    otherwise. Efficiency is a percentage (0–100]. Raises ``ValueError`` on
+    malformed pairs so the form can flag the field.
+    """
+    points: list[dict] = []
+    for chunk in text.replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        power_str, _, eff_str = chunk.partition(":")
+        power = float(power_str.strip().replace(",", "."))
+        eff = float(eff_str.strip().replace(",", "."))
+        if power <= 0 or not 0 < eff <= 100:
+            raise ValueError(chunk)
+        if power > 100:  # watts
+            power /= 1000.0
+        points.append({"kw": round(power, 3), "eff": round(eff / 100.0, 4)})
+    points.sort(key=lambda p: p["kw"])
+    return points
 
 
 def _charge_curve_segments(user_input: dict[str, Any]) -> list[dict[str, Any]]:
@@ -579,9 +627,20 @@ class PowerPilotOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         self._ensure_loaded()
         if user_input is not None:
-            # Store only the canonical segment list; the per-band field keys are
+            try:
+                efficiency_curve = _parse_efficiency_curve(
+                    str(user_input.get(EFFICIENCY_CURVE_FIELD) or "")
+                )
+            except ValueError:
+                return self.async_show_form(
+                    step_id="charge_curve",
+                    data_schema=_charge_curve_schema(self._data),
+                    errors={"base": "invalid_efficiency_curve"},
+                )
+            # Store only the canonical segment lists; the form field keys are
             # transient and must not leak into the saved options.
             self._data[CONF_CHARGE_CURVE] = _charge_curve_segments(user_input)
+            self._data[CONF_CHARGE_EFFICIENCY_CURVE] = efficiency_curve
             return await self.async_step_init()
         return self.async_show_form(
             step_id="charge_curve", data_schema=_charge_curve_schema(self._data)

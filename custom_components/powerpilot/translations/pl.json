@@ -142,7 +142,8 @@
           "charge_curve_kw_31_50": "31–50 % SoC — maks. moc ładowania (kW)",
           "charge_curve_kw_51_70": "51–70 % SoC — maks. moc ładowania (kW)",
           "charge_curve_kw_71_90": "71–90 % SoC — maks. moc ładowania (kW)",
-          "charge_curve_kw_91_100": "91–100 % SoC — maks. moc ładowania (kW)"
+          "charge_curve_kw_91_100": "91–100 % SoC — maks. moc ładowania (kW)",
+          "charge_efficiency_curve_text": "Krzywa sprawności ładowania — pary \"moc:sprawność%\", np. \"500:80, 1000:91, 2500:93, 5000:91\" (moc w W lub kW; puste = sprawność stała)"
         }
       },
       "prices": {
@@ -241,6 +242,9 @@
           "valid_to": "Obowiązuje do (opcjonalnie)"
         }
       }
+    },
+    "error": {
+      "invalid_efficiency_curve": "Niepoprawna krzywa sprawności — podaj pary \"moc:sprawność%\" po przecinku, np. \"1000:91, 2500:93\""
     }
   },
   "selector": {

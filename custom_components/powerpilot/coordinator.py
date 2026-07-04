@@ -30,6 +30,7 @@ from .const import (
     CONF_CALENDARS,
     CONF_CHARGE_CURVE,
     CONF_CHARGE_EFFICIENCY,
+    CONF_CHARGE_EFFICIENCY_CURVE,
     CONF_DISCHARGE_EFFICIENCY,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_PRESENCE_ENTITIES,
@@ -343,6 +344,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 grid_disconnect_soc=float(self.config[CONF_GRID_DISCONNECT_SOC]),
                 charge_curve=curve,
                 connection_power_kw=connection_power_kw,
+                # Single-phase headroom for battery-charging alongside the EV.
+                phase_capacity_kw=voltage * fuse_a / 1000.0,
+                charge_efficiency_curve=list(
+                    self.config.get(CONF_CHARGE_EFFICIENCY_CURVE) or []
+                ),
                 min_charge_power_kw=float(
                     self.config.get(
                         CONF_MIN_CHARGE_POWER_KW, DEFAULTS[CONF_MIN_CHARGE_POWER_KW]
@@ -2217,6 +2223,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_BATTERY_WEAR_COST,
             CONF_BUY_PRICE_SENSOR,
             CONF_CHARGE_EFFICIENCY,
+            CONF_CHARGE_EFFICIENCY_CURVE,
             CONF_CONSUMPTION_SENSOR,
             CONF_DEVICE_SENSORS,
             CONF_DISCHARGE_EFFICIENCY,
@@ -2320,6 +2327,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     round(((buy + dist) / eta_c) + wear, 4)
                     if buy is not None and dist is not None and eta_c > 0
                     else None
+                ),
+                # Power-dependent efficiency curve points; when present the
+                # optimizer picks charge powers by marginal efficiency and the
+                # flat η above is only the fallback/average.
+                "efficiency_curve_points": len(
+                    self.config.get(CONF_CHARGE_EFFICIENCY_CURVE) or []
                 ),
             },
             "ev": {

@@ -361,6 +361,7 @@ interface FlowData {
     reservoir_cost: number;
     delivered_cost: number | null;
     store_cost_now: number | null;
+    efficiency_curve_points?: number;
   };
   ev: {
     enabled: boolean;
@@ -2629,7 +2630,10 @@ export class PowerPilotPanel extends LitElement {
           <div class="check">
             Pojemność <b>${n2(bat.capacity_kwh, 1)} kWh</b> · SoC
             <b>${bat.soc != null ? bat.soc.toFixed(0) + " %" : "—"}</b> ·
-            η ładowania <b>${n2(bat.charge_efficiency)}</b> ·
+            η ładowania
+            <b>${bat.efficiency_curve_points
+              ? `krzywa (${bat.efficiency_curve_points} pkt, zależna od mocy)`
+              : n2(bat.charge_efficiency)}</b> ·
             η rozładowania <b>${n2(bat.discharge_efficiency)}</b> ·
             koszt zużycia (wear) <b>${n2(bat.wear_cost)} PLN/kWh</b>
           </div>

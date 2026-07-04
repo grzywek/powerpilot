@@ -142,7 +142,8 @@
           "charge_curve_kw_31_50": "31–50 % SoC — max charge power (kW)",
           "charge_curve_kw_51_70": "51–70 % SoC — max charge power (kW)",
           "charge_curve_kw_71_90": "71–90 % SoC — max charge power (kW)",
-          "charge_curve_kw_91_100": "91–100 % SoC — max charge power (kW)"
+          "charge_curve_kw_91_100": "91–100 % SoC — max charge power (kW)",
+          "charge_efficiency_curve_text": "Charge efficiency curve — \"power:efficiency%\" pairs, e.g. \"500:80, 1000:91, 2500:93, 5000:91\" (power in W or kW; empty = flat efficiency)"
         }
       },
       "prices": {
@@ -241,6 +242,9 @@
           "valid_to": "Valid to (optional)"
         }
       }
+    },
+    "error": {
+      "invalid_efficiency_curve": "Invalid efficiency curve — use comma-separated \"power:efficiency%\" pairs, e.g. \"1000:91, 2500:93\""
     }
   },
   "selector": {

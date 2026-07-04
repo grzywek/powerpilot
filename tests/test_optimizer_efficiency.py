@@ -156,6 +156,34 @@ def test_curve_reduces_stored_energy_at_full_power() -> None:
     assert abs(d.charge_power_kw - 6.0) < 0.05
 
 
+def test_surplus_above_sweet_spot_lands_in_earliest_hours() -> None:
+    # Three equally cheap hours, pack fits 12 kWh stored. The sweet-spot band
+    # (3 kW @ 93 %) fills in ALL hours first (8.37 kWh stored); the remaining
+    # 3.63 kWh must use the 0.67-marginal tail — and the tie-break puts that
+    # surplus in the EARLIEST hours, so powers descend over time and any
+    # shortfall later can still extend into a cheap hour. Regression: with
+    # HiGHS' default MIP gap the near-ties resolved arbitrarily and the
+    # surplus landed in random hours.
+    plan = Optimizer(
+        _config(
+            inverter_max_charge_kw=6.0,
+            charge_efficiency_curve=[
+                {"kw": 3.0, "eff": 0.93},
+                {"kw": 6.0, "eff": 0.80},
+            ],
+        )
+    ).optimize(_forecast([0.10, 0.10, 0.10]), _battery(capacity=12.0))
+    kw = [d.charge_power_kw for d in plan.decisions]
+    # h0 slams full power, h1 takes the rest of the tail, h2 stays at the
+    # sweet spot: 6.0 / ~5.42 / 3.0.
+    assert abs(kw[0] - 6.0) < 0.05
+    assert abs(kw[1] - 5.42) < 0.1
+    assert abs(kw[2] - 3.0) < 0.05
+    assert kw[0] >= kw[1] >= kw[2]  # descending in time
+    stored_total = sum(d.battery_charge_kwh for d in plan.decisions)
+    assert abs(stored_total - 12.0) < 0.05
+
+
 def test_curve_spreads_charging_over_sweet_spot() -> None:
     # Two equally cheap hours, pack fits 6 kWh: filling one hour at 6 kW wastes
     # energy in the 0.67-marginal tail, so the LP uses both hours' 93 % bands.

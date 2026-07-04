@@ -80,11 +80,17 @@ _LOGGER = logging.getLogger(__name__)
 
 _EPS = 1e-6
 
-# Tiny per-hour cost added to charging so that among *equally priced* hours the
-# LP picks the earliest ones (finish early → any shortfall extends into cheap
-# hours instead of expensive ones). One order of magnitude below the 4-decimal
-# price granularity, so it can never override a real price difference.
-_EARLY_TIE_BREAK = 1e-5  # PLN/kWh across the whole horizon
+# Tiny per-hour-index cost added to charging so that among *equally priced*
+# hours the LP front-loads: the efficiency sweet spot fills everywhere first
+# (band differences dwarf this), then the above-sweet-spot surplus lands in
+# the EARLIEST hours — so any shortfall later extends into remaining cheap
+# hours instead of expensive ones. Sizing matters on both ends: over a 48 h
+# horizon the accumulated difference (~5e-5 PLN/kWh) stays below any real
+# price difference, while adjacent-hour moves (≥1e-6 PLN per kWh) stay above
+# the solver's tolerances — which also requires the tightened MIP gap set in
+# ``_solve_lp`` (HiGHS' default 1e-4 relative gap would happily return any
+# plan within a fraction of a grosz of optimal, scrambling the tie order).
+_EARLY_TIE_BREAK = 1e-6  # PLN/kWh per hour index
 
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
@@ -342,6 +348,13 @@ class Optimizer:
 
         h = highspy.Highs()
         h.setOptionValue("output_flag", False)
+        # Prove (near-)exact optimality: the earliness tie-break works in
+        # micro-PLN, far below HiGHS' default 1e-4 relative MIP gap — with the
+        # default the solver may return any of the many almost-equal plans and
+        # the charge powers land in arbitrary hours. The model is small
+        # (hundreds of columns), so the tight gap costs milliseconds.
+        h.setOptionValue("mip_rel_gap", 0.0)
+        h.setOptionValue("mip_abs_gap", 1e-7)
         inf = highspy.kHighsInf
 
         def seg_col(t: int, k: int) -> int:
@@ -391,7 +404,7 @@ class Optimizer:
             # Earliness tie-break: among equally priced hours prefer charging
             # in the earliest, so an unfinished charge extends into the cheap
             # tail instead of expensive hours.
-            tie = _EARLY_TIE_BREAK * (t / max(n - 1, 1))
+            tie = _EARLY_TIE_BREAK * t
             for k in range(seg_n):
                 cost[seg_col(t, k)] = (
                     total_price[t] + (wear - tv) * seg_eff[k] + tie

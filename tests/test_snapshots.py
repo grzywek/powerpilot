@@ -28,6 +28,20 @@ def _rec(run_at, start=None, total_cost=1.0):
     }
 
 
+def _trip(label, depart, return_end, event_start=None, event_end=None):
+    return {
+        "label": label,
+        "location": "Office",
+        "event_start": (event_start or depart).isoformat(),
+        "event_end": (event_end or return_end).isoformat(),
+        "depart": depart.isoformat(),
+        "return_end": return_end.isoformat(),
+        "distance_km": 10.0,
+        "duration_min": 20.0,
+        "energy_kwh": 4.0,
+    }
+
+
 def test_add_dedups_by_clock_hour() -> None:
     store = SnapshotStore()
     base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
@@ -124,6 +138,27 @@ def test_origin_at_reports_vintage_run_time() -> None:
     assert store.origin_at(base - timedelta(hours=1), 0) is None
     # lead 3 for `base` picks the plan current at base-3h == `old`.
     assert store.origin_at(base, 3) == store._key(base - timedelta(hours=3))
+
+
+def test_trip_history_cutoff_drops_future_ghost_events() -> None:
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    rec = _rec(base)
+    rec["trips"] = [
+        _trip("past", base - timedelta(hours=3), base - timedelta(hours=1)),
+        _trip("future-old", base + timedelta(hours=3), base + timedelta(hours=5)),
+    ]
+    store.add(rec)
+
+    window_start = base - timedelta(hours=6)
+    window_end = base + timedelta(hours=6)
+    all_trips = store.trips_overlapping(window_start, window_end)
+    live_history = store.trips_overlapping(
+        window_start, window_end, started_at_or_before=base
+    )
+
+    assert [t["label"] for t in all_trips] == ["past", "future-old"]
+    assert [t["label"] for t in live_history] == ["past"]
 
 
 def test_serialisation_roundtrip() -> None:

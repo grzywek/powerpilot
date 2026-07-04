@@ -165,13 +165,23 @@ class SnapshotStore:
         seq = rec.get(key) or []
         return seq[0] if seq else None
 
-    def trips_overlapping(self, start: datetime, end: datetime) -> list[dict]:
+    def trips_overlapping(
+        self,
+        start: datetime,
+        end: datetime,
+        started_at_or_before: datetime | None = None,
+    ) -> list[dict]:
         """Trips recorded in any vintage whose away window overlaps [start, end).
 
         Deduplicated by (label, event_start); the newest vintage's version of a
         trip wins (its travel model is the most refined). This is how the chart
         keeps showing past events after they were removed from the calendar —
         the vintages that planned around them still remember them.
+
+        ``started_at_or_before`` lets the live chart keep only trip history whose
+        away window has already begun. Future trips must come from the current
+        calendar read, otherwise an edited calendar event leaves its old future
+        time behind as a ghost from older snapshots.
         """
         out: dict[tuple, dict] = {}
         for key in sorted(self._records):  # oldest → newest; newer overwrite
@@ -179,6 +189,8 @@ class SnapshotStore:
                 depart = dt_util.parse_datetime(trip.get("depart") or "")
                 ret = dt_util.parse_datetime(trip.get("return_end") or "")
                 if depart is None or ret is None or ret <= start or depart >= end:
+                    continue
+                if started_at_or_before is not None and depart > started_at_or_before:
                     continue
                 out[(trip.get("label"), trip.get("event_start"))] = trip
         return list(out.values())

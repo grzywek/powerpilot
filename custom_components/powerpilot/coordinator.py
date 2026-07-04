@@ -2130,8 +2130,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         # Trips for the away-window shading + tooltip. Stale lead → only the
         # events the pinned plan knew about. Live view → current calendar trips
-        # plus the history harvested from vintages, so events removed from the
-        # calendar after the fact stay visible where they shaped past plans.
+        # plus already-started history harvested from vintages, so past events
+        # removed from the calendar stay visible where they shaped plans, while
+        # edited future events do not leave ghost copies from older snapshots.
         series_end = (
             window_end
             or (
@@ -2145,7 +2146,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         else:
             merged: dict[tuple, dict] = {
                 (t.get("label"), t.get("event_start")): t
-                for t in sn.trips_overlapping(past_start, series_end)
+                for t in sn.trips_overlapping(
+                    past_start, series_end, started_at_or_before=real_now
+                )
             }
             for t in self.ev.trips_payload():
                 merged[(t.get("label"), t.get("event_start"))] = t

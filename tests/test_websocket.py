@@ -5,7 +5,12 @@ from __future__ import annotations
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.powerpilot.const import CONF_SOC_SENSOR, DEFAULTS, DOMAIN
+from custom_components.powerpilot.const import (
+    CONF_SOC_SENSOR,
+    DEFAULTS,
+    DOMAIN,
+    INTEGRATION_VERSION,
+)
 
 
 async def _setup(hass: HomeAssistant) -> None:
@@ -35,6 +40,7 @@ async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:
     assert msg["success"]
     assert "checks" in msg["result"]
     assert "modules" in msg["result"]
+    assert msg["result"]["version"] == INTEGRATION_VERSION
 
     await client.send_json({"id": 2, "type": "powerpilot/plan"})
     msg = await client.receive_json()

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Final
 
 DOMAIN: Final = "powerpilot"
 PLATFORMS: Final = ["sensor", "binary_sensor", "number"]
+INTEGRATION_VERSION: Final[str] = json.loads(
+    Path(__file__).with_name("manifest.json").read_text(encoding="utf-8")
+)["version"]
 
 # ---------------------------------------------------------------------------
 # Config / options keys

@@ -2063,6 +2063,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_PRADCAST_API_KEY,
             CONF_PRICE_SOURCE,
             CONF_SOC_SENSOR,
+            INTEGRATION_VERSION,
             PRICE_SOURCE_PRADCAST,
         )
 
@@ -2122,6 +2123,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         )
 
         return {
+            "version": INTEGRATION_VERSION,
             "last_update": self.events[0]["time"] if self.events else None,
             "horizon_hours": len(plan.decisions) if plan else 0,
             "price_archive_hours": len(self.prices.archive),

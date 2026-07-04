@@ -77,6 +77,7 @@ interface EVPlan {
 }
 
 interface Status {
+  version: string;
   last_update: string | null;
   horizon_hours: number;
   price_archive_hours: number;
@@ -363,13 +364,18 @@ const DEVICE_PALETTE = [
   "#f1c40f",
 ];
 
-/** Inverter operating mode → human label + background tint for the energy chart.
- *  Tints use mid-opacity colors that read on both light and dark HA themes. */
-const INVERTER_MODE_META: Record<string, { label: string; fill: string }> = {
-  charge: { label: "charging", fill: "rgba(34, 197, 94, 0.16)" },
-  discharge: { label: "battery", fill: "rgba(233, 138, 160, 0.18)" },
-  passthrough: { label: "passthrough", fill: "transparent" },
+/** Inverter operating mode → human label + solid dot color. The mode is drawn
+ *  as a row of colored dots along the bottom of the energy chart (background
+ *  bands collided with the trip away-window shading and became unreadable). */
+const INVERTER_MODE_META: Record<string, { label: string; dot: string }> = {
+  charge: { label: "ładowanie baterii", dot: "#22c55e" },
+  discharge: { label: "z baterii", dot: "#e11d48" },
+  passthrough: { label: "passthrough", dot: "#94a3b8" },
 };
+
+/** Trip away-window shading: travel legs (dojazd/powrót + margins) vs the
+ *  event itself, so both read separately on the chart. */
+const TRIP_FILL = { travel: "#f59e0b", event: "#e74c3c" };
 
 type RangeMode = "24h" | "3d" | "7d";
 
@@ -815,6 +821,15 @@ export class PowerPilotPanel extends LitElement {
         </div>
         <div id="pp-chart-energy" class="apex-chart"></div>
         <div id="pp-chart-prices" class="apex-chart apex-chart-short"></div>
+        <div class="legend-row">
+          <span>Tryb falownika (kropki na dole):</span>
+          ${Object.values(INVERTER_MODE_META).map(
+            (m) => html`<span><span class="dot-sq" style=${"background:" + m.dot + ";border-radius:50%"}></span>${m.label}</span>`,
+          )}
+          <span style="margin-left:12px">Wyjazd EV:</span>
+          <span><span class="dot-sq" style=${"background:" + TRIP_FILL.travel}></span>dojazd/powrót (+margines)</span>
+          <span><span class="dot-sq" style=${"background:" + TRIP_FILL.event}></span>zdarzenie</span>
+        </div>
         ${this._series && !this._series.hours?.length
           ? html`<div class="empty">Brak danych dla wybranego okna (brak prognozy / poza horyzontem).</div>`
           : nothing}
@@ -1052,61 +1067,6 @@ export class PowerPilotPanel extends LitElement {
   }
 
   /**
-   * Colored background bands showing the inverter operating mode
-   * (charge / discharge / passthrough). Consecutive hours sharing the same
-   * mode are merged into a single region so the chart stays readable.
-   */
-  private _inverterModeAnnotations(s: Series): any[] {
-    const regions: any[] = [];
-    const labelColor = this._isDark() ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.55)";
-    let runStart: number | null = null;
-    let runMode: string | null = null;
-
-    const flush = (endTs: number) => {
-      if (runStart == null || runMode == null) return;
-      const meta = INVERTER_MODE_META[runMode];
-      if (meta) {
-        regions.push({
-          x: runStart,
-          x2: endTs,
-          fillColor: meta.fill,
-          opacity: 1,
-          borderColor: "transparent",
-          label: {
-            text: meta.label,
-            orientation: "horizontal",
-            position: "bottom",
-            offsetY: 14,
-            borderColor: "transparent",
-            style: {
-              background: "transparent",
-              color: labelColor,
-              fontSize: "9px",
-            },
-          },
-        });
-      }
-    };
-
-    for (const h of s.hours) {
-      const startTs = new Date(h.start).getTime();
-      const mode = h.inverter_mode;
-      if (mode !== runMode) {
-        // Close the previous run where this hour begins, then open a new one.
-        flush(startTs);
-        runStart = mode ? startTs : null;
-        runMode = mode;
-      }
-    }
-    // Close the trailing run at the last hour's end.
-    if (runStart != null && runMode != null) {
-      const last = s.hours[s.hours.length - 1];
-      flush(new Date(last.start).getTime() + 3600 * 1000);
-    }
-    return regions;
-  }
-
-  /**
    * Build ApexCharts options for the energy chart.
    *
    * Diverging stacked columns + SoC line:
@@ -1303,6 +1263,29 @@ export class PowerPilotPanel extends LitElement {
       });
     }
 
+    // Inverter mode as a dot lane along the bottom edge (replaces the old
+    // full-height background bands, which collided with the trip shading).
+    // One dot per hour at the hour midpoint, pinned low on the SoC axis;
+    // per-point colors come from markers.discrete below.
+    const MODE_SERIES = "Tryb falownika";
+    series.push({
+      name: MODE_SERIES,
+      type: "line",
+      data: ts.map((t, i) => ({
+        x: t + HALF_HOUR,
+        y: hrs[i].inverter_mode ? 1.5 : null,
+      })),
+      color: "#94a3b8",
+    });
+    const modeSeriesIndex = series.length - 1;
+    const modeMarkers = hrs.map((h, i) => ({
+      seriesIndex: modeSeriesIndex,
+      dataPointIndex: i,
+      fillColor: h.inverter_mode ? INVERTER_MODE_META[h.inverter_mode]?.dot ?? "transparent" : "transparent",
+      strokeColor: "transparent",
+      size: h.inverter_mode ? 4 : 0,
+    }));
+
     const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
     const dark = this._isDark();
     const nowColor = dark ? "#ffffff" : "#333333";
@@ -1326,13 +1309,22 @@ export class PowerPilotPanel extends LitElement {
       },
       theme: { mode: dark ? "dark" : "light" },
       stroke: {
-        width: series.map((sx: any) => (sx.type === "line" ? 2.5 : 0)),
+        // Mode lane has no line — only its per-hour dots are visible.
+        width: series.map((sx: any) =>
+          sx.name === MODE_SERIES ? 0 : sx.type === "line" ? 2.5 : 0,
+        ),
         // Forecast (planned) SoC / EV SoC dashed so they read apart from the
         // solid realized lines they track.
         dashArray: series.map((sx: any) =>
           typeof sx.name === "string" && sx.name.includes("prognoza") ? 6 : 0,
         ),
         curve: "straight",
+      },
+      markers: {
+        size: series.map((sx: any) => (sx.name === MODE_SERIES ? 4 : 0)),
+        strokeWidth: 0,
+        discrete: modeMarkers,
+        hover: { sizeOffset: 1 },
       },
       // Near-full width so each midpoint-plotted bar fills its hour [H, H+1]
       // and its left edge lands on the hour gridline.
@@ -1372,7 +1364,7 @@ export class PowerPilotPanel extends LitElement {
           },
         },
         {
-          seriesName: ["SoC %", "SoC prognoza %", "EV SoC %", "EV SoC prognoza %"],
+          seriesName: ["SoC %", "SoC prognoza %", "EV SoC %", "EV SoC prognoza %", MODE_SERIES],
           opposite: true,
           min: 0,
           max: 100,
@@ -1409,9 +1401,16 @@ export class PowerPilotPanel extends LitElement {
           const modeStr = modeMeta ? `  •  falownik: ${modeMeta.label}` : "";
 
           // Trip away-windows covering this hour: the on-chart label is
-          // truncated, so the tooltip carries the full event name.
+          // truncated, so the tooltip carries the full event name + details
+          // (event slot, departure/return incl. margins, distance, energy).
           const esc = (x: string) =>
             x.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
+          const fmtHM = (iso: string) => {
+            const d = new Date(iso);
+            return isNaN(d.getTime())
+              ? "—"
+              : d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+          };
           const hourTs = new Date(h.start).getTime();
           const tripRows = (this._status?.ev?.trips ?? [])
             .filter((t) => {
@@ -1419,10 +1418,24 @@ export class PowerPilotPanel extends LitElement {
               const b = new Date(t.return_end).getTime();
               return !isNaN(a) && !isNaN(b) && hourTs >= a && hourTs < b;
             })
-            .map(
-              (t) =>
-                `<div style="font-weight:400;font-size:11px;color:#e74c3c;margin-top:2px">🚗 ${esc(t.label)}</div>`,
-            )
+            .map((t) => {
+              const facts = [
+                t.distance_km != null ? `${t.distance_km.toFixed(0)} km` : null,
+                t.duration_min != null ? `dojazd ${Math.round(t.duration_min)} min` : null,
+                t.energy_kwh != null ? `~${t.energy_kwh.toFixed(1)} kWh` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ");
+              return (
+                `<div style="font-weight:400;font-size:11px;color:#e74c3c;margin-top:3px">🚗 ${esc(t.label)}</div>` +
+                `<div style="font-weight:400;font-size:11px;opacity:0.75">` +
+                `zdarzenie ${fmtHM(t.event_start)}–${fmtHM(t.event_end)} · wyjazd ${fmtHM(t.depart)} · powrót do ${fmtHM(t.return_end)}` +
+                `</div>` +
+                (facts
+                  ? `<div style="font-weight:400;font-size:11px;opacity:0.75">${facts}</div>`
+                  : "")
+              );
+            })
             .join("");
 
           // Split breakdown: realized vs forecast side by side, each with the
@@ -1497,14 +1510,21 @@ export class PowerPilotPanel extends LitElement {
               )
               .join("") +
             `</tr>`;
-          const socFn = (g: TipSide) =>
-            g.soc_start == null && g.soc_end == null
+          // Colored delta arrow so the direction reads at a glance:
+          // "31 → 38 % ▲7" (green up / red down / dimmed "＝" for no change).
+          const socDelta = (a: number | null | undefined, b: number | null | undefined) => {
+            if (a == null || b == null) return "";
+            const d = Math.round(b) - Math.round(a);
+            if (d > 0) return ` <span style="color:#16a34a;font-weight:600">▲${d}</span>`;
+            if (d < 0) return ` <span style="color:#dc2626;font-weight:600">▼${-d}</span>`;
+            return ` <span style="opacity:0.55">＝</span>`;
+          };
+          const socPair = (a: number | null | undefined, b: number | null | undefined) =>
+            a == null && b == null
               ? "—"
-              : `${g.soc_start != null ? g.soc_start.toFixed(0) : "—"} → ${g.soc_end != null ? g.soc_end.toFixed(0) : "—"} %`;
-          const evSocFn = (g: TipSide) =>
-            g.ev_soc_start == null && g.ev_soc_end == null
-              ? "—"
-              : `${g.ev_soc_start != null ? g.ev_soc_start.toFixed(0) : "—"} → ${g.ev_soc_end != null ? g.ev_soc_end.toFixed(0) : "—"} %`;
+              : `${a != null ? a.toFixed(0) : "—"} → ${b != null ? b.toFixed(0) : "—"} %${socDelta(a, b)}`;
+          const socFn = (g: TipSide) => socPair(g.soc_start, g.soc_end);
+          const evSocFn = (g: TipSide) => socPair(g.ev_soc_start, g.ev_soc_end);
           const hasEvSoc = sides.some((s) => s.g.ev_soc_start != null || s.g.ev_soc_end != null);
           const sep = `<tr><td colspan="${sides.length + 1}" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>`;
           const header =
@@ -1553,7 +1573,6 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
-          ...this._inverterModeAnnotations(s),
           ...this._dayBoundaryAnnotations(s),
           ...this._evForcedAnnotations(),
           ...this._evAwayAnnotations(),
@@ -1602,33 +1621,44 @@ export class PowerPilotPanel extends LitElement {
       });
   }
 
-  /** Trip away-windows (departure → return, incl. travel time and margins) as
-   *  shaded x-axis regions — the car is not home, charging can't happen. */
+  /** Trip away-windows as shaded x-axis regions — the car is not home,
+   *  charging can't happen. Each trip splits into up to three bands: travel
+   *  out (depart→event start, incl. margin), the event itself, and travel
+   *  back (event end→return, incl. margin), so the calendar slot reads apart
+   *  from the drive-time padding around it. */
   private _evAwayAnnotations(): any[] {
-    const trips = this._status?.ev?.trips ?? [];
-    return trips
-      .map((t) => ({
-        x: new Date(t.depart).getTime(),
-        x2: new Date(t.return_end).getTime(),
-        label: t.label,
-      }))
-      .filter((r) => !isNaN(r.x) && !isNaN(r.x2) && r.x2 > r.x)
-      .map((r) => ({
-        x: r.x,
-        x2: r.x2,
-        fillColor: "#e74c3c",
-        opacity: 0.12,
-        label: {
-          // Horizontal + truncated so the label hugs the top edge instead of
-          // running vertically through the data; the tooltip shows the full
-          // event name for every hour inside the window.
-          text: `🚗 ${r.label.length > 22 ? r.label.slice(0, 21) + "…" : r.label}`,
-          orientation: "horizontal",
-          position: "top",
-          offsetY: -6,
-          style: { background: "#e74c3c", color: "#ffffff", fontSize: "10px" },
-        },
-      }));
+    const regions: any[] = [];
+    for (const t of this._status?.ev?.trips ?? []) {
+      const depart = new Date(t.depart).getTime();
+      const ret = new Date(t.return_end).getTime();
+      if (isNaN(depart) || isNaN(ret) || ret <= depart) continue;
+      // Clamp event bounds into the away window; fall back to one event-colored
+      // band when the calendar times are missing/degenerate.
+      let evStart = new Date(t.event_start).getTime();
+      let evEnd = new Date(t.event_end).getTime();
+      if (isNaN(evStart) || isNaN(evEnd) || evEnd <= evStart) {
+        evStart = depart;
+        evEnd = ret;
+      }
+      evStart = Math.max(depart, Math.min(evStart, ret));
+      evEnd = Math.max(evStart, Math.min(evEnd, ret));
+
+      // Truncated horizontal label on the event band only; the tooltip shows
+      // the full event name + details for every hour inside the window.
+      const label = {
+        text: `🚗 ${t.label.length > 22 ? t.label.slice(0, 21) + "…" : t.label}`,
+        orientation: "horizontal",
+        position: "top",
+        offsetY: -6,
+        style: { background: TRIP_FILL.event, color: "#ffffff", fontSize: "10px" },
+      };
+      if (evStart > depart)
+        regions.push({ x: depart, x2: evStart, fillColor: TRIP_FILL.travel, opacity: 0.16 });
+      regions.push({ x: evStart, x2: evEnd, fillColor: TRIP_FILL.event, opacity: 0.16, label });
+      if (ret > evEnd)
+        regions.push({ x: evEnd, x2: ret, fillColor: TRIP_FILL.travel, opacity: 0.16 });
+    }
+    return regions;
   }
 
   /** Manual ("forced") calendar windows as shaded x-axis regions. */
@@ -2354,6 +2384,10 @@ export class PowerPilotPanel extends LitElement {
     if (!s) return html`<div class="card empty">Brak statusu.</div>`;
     return html`
       <div class="card">
+        <div class="card-title">Rozszerzenie</div>
+        <div class="check">Wersja: <b>${s.version}</b></div>
+      </div>
+      <div class="card">
         <div class="card-title">Co działa / czego brakuje</div>
         ${s.checks.map(
           (c) => html`<div class="check">
@@ -2889,58 +2923,85 @@ export class PowerPilotPanel extends LitElement {
       min-height: 100vh;
       box-sizing: border-box;
     }
+    /* Header styled after HA's toolbar: 20px regular title, text-style
+       action button. */
     .header {
       display: flex;
       align-items: center;
       margin-bottom: 12px;
     }
     .title {
-      font-size: 22px;
-      font-weight: 600;
+      font-size: 20px;
+      font-weight: 400;
+      letter-spacing: 0.1px;
     }
     .spacer {
       flex: 1;
     }
     .cfg {
       cursor: pointer;
-      border: 1px solid var(--divider-color);
-      background: var(--card-background-color);
-      color: var(--primary-text-color);
-      border-radius: 8px;
+      border: none;
+      background: transparent;
+      color: var(--primary-color);
+      border-radius: 4px;
       padding: 8px 12px;
       font-size: 14px;
+      font-weight: 500;
     }
+    .cfg:hover {
+      background: rgba(var(--rgb-primary-color, 33, 150, 243), 0.08);
+    }
+    /* Tabs styled after HA's underline tabs (ha-tabs / sl-tab-group). */
     .tabs {
       display: flex;
-      gap: 8px;
-      margin-bottom: 12px;
+      gap: 0;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--divider-color, rgba(127, 127, 127, 0.3));
+      overflow-x: auto;
     }
     .tab {
       cursor: pointer;
       border: none;
-      background: var(--card-background-color);
+      background: transparent;
       color: var(--secondary-text-color);
-      border-radius: 8px;
-      padding: 8px 14px;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      padding: 10px 16px;
       font-size: 14px;
+      font-weight: 500;
+      white-space: nowrap;
+      margin-bottom: -1px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab:hover {
+      color: var(--primary-text-color);
     }
     .tab.active {
-      color: var(--text-primary-color, #fff);
-      background: var(--primary-color);
+      color: var(--primary-color);
+      border-bottom-color: var(--primary-color);
+      background: transparent;
     }
     .content {
       display: flex;
       flex-direction: column;
       gap: 16px;
     }
+    /* Card styled after ha-card (border + radius + shadow from theme vars,
+       flat bordered look on default themes). */
     .card {
-      background: var(--card-background-color, #1c1c1c);
-      border-radius: 12px;
+      background: var(--ha-card-background, var(--card-background-color, #1c1c1c));
+      border-radius: var(--ha-card-border-radius, 12px);
+      border: var(--ha-card-border-width, 1px) solid
+        var(--ha-card-border-color, var(--divider-color, #e0e0e0));
       padding: 16px;
-      box-shadow: var(--ha-card-box-shadow, 0 2px 6px rgba(0, 0, 0, 0.2));
+      box-shadow: var(--ha-card-box-shadow, none);
     }
     .card-title {
-      font-weight: 600;
+      color: var(--ha-card-header-color, var(--primary-text-color));
+      font-family: var(--ha-card-header-font-family, inherit);
+      font-size: 16px;
+      font-weight: 500;
+      letter-spacing: 0.1px;
       margin-bottom: 10px;
     }
     .empty {
@@ -3412,6 +3473,16 @@ export class PowerPilotPanel extends LitElement {
     .apexcharts-tooltip-title {
       background: var(--secondary-background-color, #1f1f1f) !important;
       border-bottom: 1px solid var(--divider-color, #444) !important;
+    }
+    /* The energy/price panels render fully custom tooltip HTML that carries
+       its own background + border — strip the default Apex frame there so it
+       doesn't draw a second (gray) box inside the tooltip. */
+    #pp-chart-energy .apexcharts-tooltip,
+    #pp-chart-prices .apexcharts-tooltip {
+      background: transparent !important;
+      border: none !important;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
+      border-radius: 6px;
     }
     /* Force horizontal legend layout even when many series. */
     .apexcharts-legend {

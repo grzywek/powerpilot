@@ -12,6 +12,7 @@ import os
 from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import async_get_integration
 
 from .const import DOMAIN
 from .websocket_api import async_register_ws
@@ -43,6 +44,12 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         return
 
     if PANEL_URL_PATH not in hass.data.get("frontend_panels", {}):
+        # Cache-buster: the HA frontend (PWA/service worker) caches custom-panel
+        # modules by URL, so a bare path keeps serving the previous bundle even
+        # after an update + restart. Versioning the URL forces a fresh fetch
+        # exactly once per release.
+        integration = await async_get_integration(hass, DOMAIN)
+        module_url = f"{PANEL_JS_URL}?v={integration.version}"
         frontend.async_register_built_in_panel(
             hass,
             component_name="custom",
@@ -53,7 +60,7 @@ async def async_register_panel(hass: HomeAssistant) -> None:
             config={
                 "_panel_custom": {
                     "name": "powerpilot-panel",
-                    "module_url": PANEL_JS_URL,
+                    "module_url": module_url,
                     "embed_iframe": False,
                     "trust_external": False,
                 }

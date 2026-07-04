@@ -82,6 +82,27 @@ def _ev(charger_kw: float = 3.5) -> EVRequest:
     )
 
 
+def _victron_efficiency_curve() -> list[dict[str, float]]:
+    """Realistic inverter curve with a sweet spot around 2.78 kW."""
+    return [
+        {"kw": 0.18, "eff": 0.711},
+        {"kw": 0.33, "eff": 0.806},
+        {"kw": 0.394, "eff": 0.838},
+        {"kw": 0.434, "eff": 0.848},
+        {"kw": 0.532, "eff": 0.865},
+        {"kw": 0.76, "eff": 0.895},
+        {"kw": 0.964, "eff": 0.913},
+        {"kw": 1.228, "eff": 0.92},
+        {"kw": 1.516, "eff": 0.923},
+        {"kw": 2.006, "eff": 0.927},
+        {"kw": 2.78, "eff": 0.928},
+        {"kw": 3.532, "eff": 0.925},
+        {"kw": 4.744, "eff": 0.919},
+        {"kw": 6.0, "eff": 0.907},
+        {"kw": 7.52, "eff": 0.886},
+    ]
+
+
 def test_battery_charges_alongside_ev_with_phase_headroom() -> None:
     # Cheap hour 0 gets the EV; the phase fuse (7.36 kW) leaves 3.86 kW of
     # headroom next to the 3.5 kW charger → the battery charges there too.
@@ -182,6 +203,25 @@ def test_surplus_above_sweet_spot_lands_in_earliest_hours() -> None:
     assert kw[0] >= kw[1] >= kw[2]  # descending in time
     stored_total = sum(d.battery_charge_kwh for d in plan.decisions)
     assert abs(stored_total - 12.0) < 0.05
+
+
+def test_sub_grosz_price_noise_does_not_reorder_equal_display_price_hours() -> None:
+    # The UI and most bills reason in grosze: 0.20001 and 0.20000 both display
+    # as 0.20. That hidden sub-grosz difference must not push the surplus above
+    # the 2.78 kW sweet spot into later hours.
+    plan = Optimizer(
+        _config(
+            inverter_max_charge_kw=7.3,
+            charge_efficiency_curve=_victron_efficiency_curve(),
+        )
+    ).optimize(_forecast([0.20001, 0.20, 0.20]), _battery(capacity=10.0))
+    kw = [d.charge_power_kw for d in plan.decisions]
+    assert kw[0] > 3.6
+    assert abs(kw[1] - 3.532) < 0.05
+    assert abs(kw[2] - 3.532) < 0.05
+    assert kw[0] >= kw[1] >= kw[2]
+    assert plan.decisions[0].trace["total_price_raw"] == 0.20001
+    assert plan.decisions[0].trace["charge_order_price"] == 0.2
 
 
 def test_curve_spreads_charging_over_sweet_spot() -> None:

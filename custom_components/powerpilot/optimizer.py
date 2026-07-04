@@ -66,6 +66,7 @@ import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
 import highspy
 import numpy as np
@@ -92,10 +93,23 @@ _EPS = 1e-6
 # plan within a fraction of a grosz of optimal, scrambling the tie order).
 _EARLY_TIE_BREAK = 1e-6  # PLN/kWh per hour index
 
+# Charge-order price bucket: supplier bills and the UI reason about prices in
+# grosze, so hidden sub-grosz noise must not reshuffle equal-looking charge
+# hours. A full grosz difference (e.g. 0.19 vs 0.20) still dominates the
+# earliness tie-break.
+_CHARGE_PRICE_BUCKET = Decimal("0.01")
+
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # full-power-block allocator or a stale import.
 EV_ALLOCATOR_VERSION = "trip-drain-aware-2026-07"
+
+
+def _charge_order_price(price: float) -> float:
+    """Price used to order charge hours, rounded to the displayed grosz."""
+    return float(
+        Decimal(str(price)).quantize(_CHARGE_PRICE_BUCKET, rounding=ROUND_HALF_UP)
+    )
 
 
 @dataclass
@@ -232,6 +246,7 @@ class Optimizer:
         ]
         distribution = [s.distribution_price_kwh or 0.0 for s in slots]
         total_price = [energy_price[t] + distribution[t] for t in range(n)]
+        charge_order_price = [_charge_order_price(price) for price in total_price]
         demand = [max(0.0, s.total_consumption_kwh) for s in slots]
         ev_kwh = [ev_hours.get(slots[t].start, 0.0) for t in range(n)]
 
@@ -241,6 +256,7 @@ class Optimizer:
             demand=demand,
             ev_kwh=ev_kwh,
             ev_charger_kw=ev_charger_kw,
+            charge_order_price=charge_order_price,
         )
 
         return self._build_plan(
@@ -254,6 +270,7 @@ class Optimizer:
             total_price=total_price,
             demand=demand,
             ev_kwh=ev_kwh,
+            charge_order_price=charge_order_price,
             ev_request=ev_request,
             reminders=reminders,
         )
@@ -318,6 +335,7 @@ class Optimizer:
         demand: list[float],
         ev_kwh: list[float],
         ev_charger_kw: float,
+        charge_order_price: list[float] | None = None,
     ) -> tuple[list[float], list[float], list[float]]:
         cfg = self.config
         n = len(total_price)
@@ -328,6 +346,11 @@ class Optimizer:
         e_min = capacity_kwh * battery.min_soc / 100.0
         e_max = capacity_kwh * battery.max_soc / 100.0
         e0 = min(max(battery.energy_kwh, e_min), e_max)
+        charge_price = (
+            charge_order_price
+            if charge_order_price is not None
+            else [_charge_order_price(price) for price in total_price]
+        )
 
         p_term = (
             cfg.terminal_price
@@ -407,7 +430,7 @@ class Optimizer:
             tie = _EARLY_TIE_BREAK * t
             for k in range(seg_n):
                 cost[seg_col(t, k)] = (
-                    total_price[t] + (wear - tv) * seg_eff[k] + tie
+                    charge_price[t] + (wear - tv) * seg_eff[k] + tie
                 )
             # d-column is a 0/1 switch worth discharge_cap[t] kWh delivered.
             cost[d0 + t] = (-total_price[t] + wear + tv / deff) * discharge_cap[t]
@@ -538,6 +561,7 @@ class Optimizer:
         total_price: list[float],
         demand: list[float],
         ev_kwh: list[float],
+        charge_order_price: list[float] | None = None,
         ev_request: EVRequest | None = None,
         reminders: list[str] | None = None,
         stored: list[float] | None = None,
@@ -547,6 +571,9 @@ class Optimizer:
         deff = max(battery.discharge_efficiency, _EPS)
         wear = battery.wear_cost
         n = len(total_price)
+        charge_price = charge_order_price or [
+            _charge_order_price(price) for price in total_price
+        ]
         # EV SoC forecast: project the car's charge forward from its live SoC as
         # planned charging is delivered and predicted trip driving drains it.
         # Only possible when the SoC sensor and a battery size are known;
@@ -636,6 +663,8 @@ class Optimizer:
 
             decision.trace = {
                 "total_price": round(tp, 4),
+                "total_price_raw": round(tp, 6),
+                "charge_order_price": round(charge_price[t], 4),
                 "energy_price": round(energy_price[t], 4),
                 "distribution": round(distribution[t], 4),
                 "terminal_price": round(p_term, 4),

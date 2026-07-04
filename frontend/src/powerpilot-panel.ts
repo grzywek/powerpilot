@@ -810,15 +810,14 @@ export class PowerPilotPanel extends LitElement {
       </div>
       ${this._renderNavBar()}
       <div class="card">
-        <div class="card-title">Energia: ↑ sieć/bateria · ↓ zużycie (stack) + tryb falownika + SoC</div>
+        <div class="card-title">
+          Energia: ↑ sieć/bateria · ↓ zużycie (stack) + tryb falownika + SoC · poniżej: ceny i koszty
+        </div>
         <div id="pp-chart-energy" class="apex-chart"></div>
+        <div id="pp-chart-prices" class="apex-chart apex-chart-short"></div>
         ${this._series && !this._series.hours?.length
           ? html`<div class="empty">Brak danych dla wybranego okna (brak prognozy / poza horyzontem).</div>`
           : nothing}
-      </div>
-      <div class="card">
-        <div class="card-title">Koszty: cena zakupu (PLN/kWh) + koszt godziny (PLN)</div>
-        <div id="pp-chart-prices" class="apex-chart"></div>
       </div>
     `;
   }
@@ -1013,8 +1012,10 @@ export class PowerPilotPanel extends LitElement {
     return !!this.hass?.themes?.darkMode;
   }
 
-  /** Generate xaxis annotations for midnight boundaries within the visible series. */
-  private _dayBoundaryAnnotations(s: Series): any[] {
+  /** Generate xaxis annotations for midnight boundaries within the visible series.
+   *  `withLabels=false` draws only the boundary line — used on the lower (price)
+   *  panel so the day name isn't printed twice in the merged view. */
+  private _dayBoundaryAnnotations(s: Series, withLabels = true): any[] {
     const DAY_PL = ["niedz.", "pon.", "wt.", "śr.", "czw.", "pt.", "sob."];
     const dark = this._isDark();
     const borderColor = dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.18)";
@@ -1034,13 +1035,17 @@ export class PowerPilotPanel extends LitElement {
         x: midnight,
         borderColor,
         strokeDashArray: 0,
-        label: {
-          borderColor: "transparent",
-          style: { background: "transparent", color: textColor, fontSize: "10px" },
-          text: `${DAY_PL[d.getDay()]} ${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`,
-          orientation: "horizontal",
-          position: "top",
-        },
+        ...(withLabels
+          ? {
+              label: {
+                borderColor: "transparent",
+                style: { background: "transparent", color: textColor, fontSize: "10px" },
+                text: `${DAY_PL[d.getDay()]} ${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`,
+                orientation: "horizontal",
+                position: "top",
+              },
+            }
+          : {}),
       });
     }
     return annotations;
@@ -1176,6 +1181,21 @@ export class PowerPilotPanel extends LitElement {
       { label: "Bateria — ładowanie", color: "#c98a3a", key: "charge", get: (h) => h.battery_charge_kwh },
     ];
 
+    // √-compressed bar heights: an EV-charge hour (10+ kWh) would otherwise
+    // dwarf ordinary consumption (~0.3 kWh) into invisibility. Each stack is
+    // drawn with total height √(total) while every component keeps its true
+    // share of the bar, so within-bar proportions stay honest. Axis labels
+    // are squared back to real kWh and the tooltip reads raw values.
+    const upTotalOf = (h: SeriesHour): number =>
+      (h.grid_buy_kwh ?? 0) + (h.battery_discharge_kwh ?? 0);
+    const downTotalOf = (h: SeriesHour): number =>
+      (baseConsumption(h) ?? 0) +
+      deviceSum(h) +
+      (h.ev_charge_kwh ?? 0) +
+      (h.battery_charge_kwh ?? 0);
+    const sqrtFactor = (total: number): number =>
+      total > 1e-9 ? Math.sqrt(total) / total : 0;
+
     const series: any[] = [];
     const kwhNames: string[] = [];
     // sign = +1 for supply (up), -1 for consumption (down). Consumption values
@@ -1185,34 +1205,30 @@ export class PowerPilotPanel extends LitElement {
       color: string,
       sign: 1 | -1,
       getter: (h: SeriesHour) => number | null,
+      totalOf: (h: SeriesHour) => number,
     ) => {
       const signed = (h: SeriesHour) => {
         const v = getter(h);
-        return v == null ? null : sign * v;
+        return v == null ? null : sign * v * sqrtFactor(totalOf(h));
       };
       series.push({ name, type: "column", data: pairBar(signed), color });
       kwhNames.push(name);
     };
 
-    upRows.forEach((r) => pushKwh(r.label, r.color, 1, r.get));
-    downRows.forEach((r) => pushKwh(r.label, r.color, -1, r.get));
+    upRows.forEach((r) => pushKwh(r.label, r.color, 1, r.get, upTotalOf));
+    downRows.forEach((r) => pushKwh(r.label, r.color, -1, r.get, downTotalOf));
 
     // Shared symmetric-ish scale so every per-series axis aligns and the
     // stacked bars line up. Compute the largest up-stack and down-stack.
+    // Limits live in √-space to match the compressed bar heights.
     let posMax = 0;
     let negMax = 0;
     for (const h of hrs) {
-      const up = (h.grid_buy_kwh ?? 0) + (h.battery_discharge_kwh ?? 0);
-      const down =
-        (baseConsumption(h) ?? 0) +
-        deviceSum(h) +
-        (h.ev_charge_kwh ?? 0) +
-        (h.battery_charge_kwh ?? 0);
-      posMax = Math.max(posMax, up);
-      negMax = Math.max(negMax, down);
+      posMax = Math.max(posMax, upTotalOf(h));
+      negMax = Math.max(negMax, downTotalOf(h));
     }
-    const axMax = posMax > 0 ? posMax * 1.1 : 1;
-    const axMin = negMax > 0 ? -negMax * 1.1 : -1;
+    const axMax = posMax > 0 ? Math.sqrt(posMax) * 1.08 : 1;
+    const axMin = negMax > 0 ? -Math.sqrt(negMax) * 1.08 : -1;
 
     // SoC line on the right axis. `soc` is the END-of-hour state; plotting it
     // at the hour start would move the line one hour too early (a 17:00
@@ -1293,6 +1309,10 @@ export class PowerPilotPanel extends LitElement {
     const nowBg = dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.08)";
     return {
       chart: {
+        // `group` syncs cursor, tooltip and zoom with the price panel below,
+        // so both read as one chart with a shared time axis.
+        id: "pp-energy",
+        group: "pp-overview",
         type: "line",
         height: 598, // ~30% taller than the original 460
         stacked: true,
@@ -1326,10 +1346,10 @@ export class PowerPilotPanel extends LitElement {
         // midnight→end-of-window, even when data is missing at an edge.
         min: winStart,
         max: winEnd,
-        labels: {
-          datetimeUTC: false,
-          format: this._rangeMode === "24h" ? "HH:mm" : "dd.MM HH:mm",
-        },
+        // Time labels live on the price panel directly below — hiding them
+        // here glues the two panels into one visual chart.
+        labels: { show: false, datetimeUTC: false },
+        axisTicks: { show: false },
       },
       yaxis: [
         // ALL kWh column series share ONE physical axis — this is what makes
@@ -1343,8 +1363,13 @@ export class PowerPilotPanel extends LitElement {
           max: axMax,
           forceNiceScale: false,
           decimalsInFloat: 2,
-          title: { text: "kWh  (↑ sieć/bateria · ↓ zużycie)" },
-          labels: { formatter: (v: number) => (v != null ? Math.abs(v).toFixed(2) : "") },
+          title: { text: "kWh, skala √  (↑ sieć/bateria · ↓ zużycie)" },
+          // Ticks are placed in √-space (bar height = √kWh); square them back
+          // so the axis reads in real kWh.
+          labels: {
+            minWidth: 48,
+            formatter: (v: number) => (v != null ? (v * v).toFixed(2) : ""),
+          },
         },
         {
           seriesName: ["SoC %", "SoC prognoza %", "EV SoC %", "EV SoC prognoza %"],
@@ -1352,7 +1377,10 @@ export class PowerPilotPanel extends LitElement {
           min: 0,
           max: 100,
           title: { text: "SoC (%)" },
-          labels: { formatter: (v: number) => (v != null ? v.toFixed(0) + " %" : "") },
+          labels: {
+            minWidth: 48,
+            formatter: (v: number) => (v != null ? v.toFixed(0) + " %" : ""),
+          },
         },
       ],
       tooltip: {
@@ -1379,6 +1407,23 @@ export class PowerPilotPanel extends LitElement {
           });
           const modeMeta = h.inverter_mode ? INVERTER_MODE_META[h.inverter_mode] : null;
           const modeStr = modeMeta ? `  •  falownik: ${modeMeta.label}` : "";
+
+          // Trip away-windows covering this hour: the on-chart label is
+          // truncated, so the tooltip carries the full event name.
+          const esc = (x: string) =>
+            x.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
+          const hourTs = new Date(h.start).getTime();
+          const tripRows = (this._status?.ev?.trips ?? [])
+            .filter((t) => {
+              const a = new Date(t.depart).getTime();
+              const b = new Date(t.return_end).getTime();
+              return !isNaN(a) && !isNaN(b) && hourTs >= a && hourTs < b;
+            })
+            .map(
+              (t) =>
+                `<div style="font-weight:400;font-size:11px;color:#e74c3c;margin-top:2px">🚗 ${esc(t.label)}</div>`,
+            )
+            .join("");
 
           // Split breakdown: realized vs forecast side by side, each with the
           // full colored per-position breakdown. Settled past hours carry both
@@ -1474,7 +1519,7 @@ export class PowerPilotPanel extends LitElement {
 
           return `
             <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.45;min-width:240px">
-              <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}</div>
+              <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}${tripRows}</div>
               <table style="border-collapse:collapse;width:100%">
                 ${header}
                 ${totalRow("↑ Źródła energii", upRows)}
@@ -1496,7 +1541,9 @@ export class PowerPilotPanel extends LitElement {
         },
       },
       legend: {
-        position: "bottom",
+        // Top, so the bottom edge of this panel can sit flush against the
+        // price panel below.
+        position: "top",
         horizontalAlign: "center",
         itemMargin: { horizontal: 14, vertical: 2 },
         fontSize: "12px",
@@ -1572,8 +1619,13 @@ export class PowerPilotPanel extends LitElement {
         fillColor: "#e74c3c",
         opacity: 0.12,
         label: {
-          text: `🚗 ${r.label}`,
+          // Horizontal + truncated so the label hugs the top edge instead of
+          // running vertically through the data; the tooltip shows the full
+          // event name for every hour inside the window.
+          text: `🚗 ${r.label.length > 22 ? r.label.slice(0, 21) + "…" : r.label}`,
+          orientation: "horizontal",
           position: "top",
+          offsetY: -6,
           style: { background: "#e74c3c", color: "#ffffff", fontSize: "10px" },
         },
       }));
@@ -1620,14 +1672,35 @@ export class PowerPilotPanel extends LitElement {
     const winStart = winStartD.getTime();
     const winEnd = winEndD.getTime();
 
-    // Single continuous line for total price (energy + distribution).
-    // Tooltip shows the breakdown + confirmed/forecast indicator.
-    const priceData = ts.map((t, i) => ({ x: t, y: hrs[i].total_price_kwh }));
-    const batCostData = ts.map((t, i) => ({ x: t, y: hrs[i].battery_energy_cost }));
+    const HOUR = 3600 * 1000;
+    const HALF_HOUR = 1800 * 1000;
+
+    // Single stepline for total price (energy + distribution): the hour's
+    // price holds flat across the whole hour. An extra point extends the last
+    // step to the end of its hour. Tooltip shows the breakdown + indicator.
+    const stepLine = (get: (h: SeriesHour) => number | null) => {
+      const data = ts.map((t, i) => ({ x: t, y: get(hrs[i]) }));
+      if (hrs.length) data.push({ x: ts[ts.length - 1] + HOUR, y: get(hrs[hrs.length - 1]) });
+      return data;
+    };
+    const priceData = stepLine((h) => h.total_price_kwh);
+    const batCostData = stepLine((h) => h.battery_energy_cost);
+
     // Two PLN/h stacked columns: cost served from the grid vs cost served
     // from the battery. Sum = total cost of meeting demand this hour.
-    const gridCostData = ts.map((t, i) => ({ x: t, y: hrs[i].hour_cost }));
-    const batUseCostData = ts.map((t, i) => ({ x: t, y: hrs[i].battery_use_cost }));
+    // Same treatment as the energy panel: bars are plotted at the hour
+    // midpoint so they span [H, H+1], and heights are √-compressed (EV-charge
+    // hours cost 10-50× a normal hour) with per-component shares preserved.
+    // Axis labels square back to real PLN; the tooltip reads raw values.
+    const costTotalOf = (h: SeriesHour): number =>
+      (h.hour_cost ?? 0) + (h.battery_use_cost ?? 0);
+    const costSqrt = (h: SeriesHour, v: number | null): number | null => {
+      if (v == null) return null;
+      const total = costTotalOf(h);
+      return total > 1e-9 ? v * (Math.sqrt(total) / total) : v;
+    };
+    const gridCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].hour_cost) }));
+    const batUseCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].battery_use_cost) }));
 
     const series: any[] = [
       { name: "Cena pełna", type: "line", data: priceData, color: "#facc15" },
@@ -1639,28 +1712,30 @@ export class PowerPilotPanel extends LitElement {
     const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
     const dark = this._isDark();
     const nowColor = dark ? "#ffffff" : "#333333";
-    const nowBg = dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.08)";
     return {
       chart: {
+        // Same sync group as the energy panel above: shared cursor, tooltip
+        // and zoom, so both panels behave like one chart.
+        id: "pp-prices",
+        group: "pp-overview",
         type: "line",
-        height: 380,
+        height: 260,
         stacked: true,
         animations: { enabled: false },
-        toolbar: {
-          show: true,
-          tools: { download: false, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true },
-        },
+        // No second toolbar — zooming/panning the energy panel syncs here.
+        toolbar: { show: false },
         zoom: { enabled: true, type: "x" },
         background: "transparent",
       },
       theme: { mode: dark ? "dark" : "light" },
       stroke: {
-        // 2 lines + 2 columns = 4 series total.
+        // 2 lines + 2 columns = 4 series total. Steplines: the price holds
+        // flat for its whole hour instead of ramping between hour starts.
         width: [3, 2, 0, 0],
-        curve: "straight",
+        curve: ["stepline", "stepline", "straight", "straight"],
         dashArray: [0, 3, 0, 0],
       },
-      plotOptions: { bar: { columnWidth: "55%", borderRadius: 1 } },
+      plotOptions: { bar: { columnWidth: "95%", borderRadius: 0 } },
       dataLabels: { enabled: false },
       fill: { opacity: [1, 1, 0.75, 0.7] },
       series,
@@ -1678,15 +1753,22 @@ export class PowerPilotPanel extends LitElement {
           // Keep both PLN/kWh lines on one scale so equal values align visually.
           seriesName: ["Cena pełna", "Cena w baterii"],
           title: { text: "PLN/kWh" },
-          labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
+          labels: {
+            minWidth: 48,
+            formatter: (v: number) => (v != null ? v.toFixed(2) : ""),
+          },
           forceNiceScale: true,
           decimalsInFloat: 2,
         },
         {
           seriesName: ["Koszt energii - sieć", "Koszt energii - bateria"],
           opposite: true,
-          title: { text: "PLN/h" },
-          labels: { formatter: (v: number) => (v != null ? v.toFixed(2) : "") },
+          title: { text: "PLN/h, skala √" },
+          // Column heights live in √-space — square tick values back to PLN.
+          labels: {
+            minWidth: 48,
+            formatter: (v: number) => (v != null ? (v * v).toFixed(2) : ""),
+          },
           forceNiceScale: true,
           min: 0,
         },
@@ -1742,16 +1824,13 @@ export class PowerPilotPanel extends LitElement {
       },
       annotations: {
         xaxis: [
-          ...this._dayBoundaryAnnotations(s),
+          // Boundary lines only — the day names are printed on the energy
+          // panel above; the "teraz" line likewise goes unlabelled here.
+          ...this._dayBoundaryAnnotations(s, false),
           {
             x: nowTs,
             borderColor: nowColor,
             strokeDashArray: 4,
-            label: {
-              borderColor: nowColor,
-              style: { background: nowBg, color: nowColor },
-              text: "teraz",
-            },
           },
         ],
       },

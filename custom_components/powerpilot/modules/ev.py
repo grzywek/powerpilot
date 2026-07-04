@@ -48,6 +48,7 @@ from ..const import (
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_ODOMETER_SENSOR,
+    CONF_EV_PRESENCE_ENTITIES,
     CONF_EV_SOC_SENSOR,
     DEFAULTS,
     DOMAIN,
@@ -354,7 +355,7 @@ class EVModule(PowerPilotModule):
         self._energy_added = self._read_float(
             self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
         )
-        self._home = self._read_home(self.config.get(CONF_EV_LOCATION_SENSOR))
+        self._home = self._combined_home()
         self._charging = self._read_bool(
             self.config.get(CONF_EV_CHARGING_SENSOR), CHARGING_STATES
         )
@@ -535,17 +536,60 @@ class EVModule(PowerPilotModule):
             return None
         return value in true_states
 
-    def _read_home(self, entity_id: str | None) -> bool | None:
+    def _read_presence(self, entity_id: str | None) -> bool | None:
+        """Tri-state presence read: ``None`` when unset/unknown/unavailable.
+
+        Unlike a plain HOME_STATES check, an unavailable tracker reads as
+        *unknown* — not as "away" — so a flaky entity can't poison the
+        combined answer below.
+        """
         if not entity_id:
             return None
         state = self.hass.states.get(entity_id)
         if state is None:
             return None
-        return str(state.state).lower() in HOME_STATES
+        value = str(state.state).lower()
+        if value in ("unknown", "unavailable", "none", ""):
+            return None
+        return value in HOME_STATES
+
+    def _combined_home(self) -> bool | None:
+        """Combine the car tracker with the extra presence entities.
+
+        Car trackers often poll rarely, so a fresh "not home" from any
+        configured presence entity beats a stale "home" from the car: away
+        wins, home requires every known reading to agree. ``None`` when no
+        entity has a usable state.
+        """
+        readings = [self._read_presence(self.config.get(CONF_EV_LOCATION_SENSOR))]
+        for entity_id in self.config.get(CONF_EV_PRESENCE_ENTITIES) or []:
+            readings.append(self._read_presence(entity_id))
+        known = [r for r in readings if r is not None]
+        if not known:
+            return None
+        return all(known)
 
     # ------------------------------------------------------------------
     # Calendar (events + trips come from the calendar module, updated first)
     # ------------------------------------------------------------------
+    def calendar_fingerprint(self) -> tuple:
+        """Stable digest of the calendar-derived charging inputs.
+
+        The coordinator compares this between planning cycles: a change means
+        an event was added/edited/removed, which justifies releasing the
+        frozen current-hour decision so charging can start mid-hour.
+        """
+        return (
+            tuple(
+                sorted(
+                    (t.deadline.isoformat(), t.target_soc, t.source)
+                    for t in (*self._targets, *self._trip_targets)
+                )
+            ),
+            tuple(sorted(h.isoformat() for h in self._forced_hours)),
+            tuple(sorted(h.isoformat() for h in self._unavailable_hours)),
+        )
+
     def _load_calendar_plans(self) -> None:
         """Turn the calendar module's events/trips into charging inputs."""
         self._targets = []

@@ -173,6 +173,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await async_register_panel(hass)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     coordinator.async_start_hour_boundary_updates()
+    # Calendar / presence changes trigger an immediate re-plan between the
+    # hourly boundary refreshes (new trip → charging can start right away).
+    unsub_reactive = coordinator.async_start_reactive_listeners()
+    if unsub_reactive is not None:
+        entry.async_on_unload(unsub_reactive)
     return True
 
 

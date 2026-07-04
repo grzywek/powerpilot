@@ -15,7 +15,10 @@ from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.event import (
+    async_track_point_in_time,
+    async_track_state_change_event,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -24,9 +27,12 @@ from .battery import BatteryModel
 from .const import (
     CONF_BATTERY_CAPACITY_KWH,
     CONF_BATTERY_WEAR_COST,
+    CONF_CALENDARS,
     CONF_CHARGE_CURVE,
     CONF_CHARGE_EFFICIENCY,
     CONF_DISCHARGE_EFFICIENCY,
+    CONF_EV_LOCATION_SENSOR,
+    CONF_EV_PRESENCE_ENTITIES,
     CONF_GRID_DISCONNECT_SOC,
     CONF_GRID_VOLTAGE,
     CONF_INVERTER_MAX_CHARGE_KW,
@@ -124,6 +130,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # recorded forecast stays intact. Released automatically at the boundary.
         self._committed_hour: datetime | None = None
         self._committed_decision: Decision | None = None
+        # Digest of the calendar-derived EV inputs from the previous cycle.
+        # When it changes mid-hour (event added/edited), the frozen decision
+        # above is released so e.g. EV charging can start immediately.
+        self._ev_inputs_fingerprint: tuple | None = None
 
     @callback
     def async_start_hour_boundary_updates(self) -> None:
@@ -136,6 +146,44 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if self._unsub_hour_boundary is not None:
             self._unsub_hour_boundary()
             self._unsub_hour_boundary = None
+
+    @callback
+    def async_start_reactive_listeners(self) -> CALLBACK_TYPE | None:
+        """Refresh the plan when calendars or presence entities change.
+
+        The hourly cadence stays the baseline; this listener closes the gap
+        between "event added to the calendar" and the next boundary. Calendar
+        entities fire on any change (their next-event attributes matter);
+        presence entities only on an actual state flip, so GPS attribute
+        chatter from phone trackers doesn't re-run the optimizer every few
+        minutes. ``async_request_refresh`` debounces bursts.
+        """
+        calendar_ids = [str(e) for e in (self.config.get(CONF_CALENDARS) or [])]
+        presence_ids = [
+            str(e)
+            for e in (
+                [self.config.get(CONF_EV_LOCATION_SENSOR)]
+                + list(self.config.get(CONF_EV_PRESENCE_ENTITIES) or [])
+            )
+            if e
+        ]
+        entities = calendar_ids + presence_ids
+        if not entities:
+            return None
+        presence_set = set(presence_ids)
+
+        @callback
+        def _on_state_change(event) -> None:
+            entity_id = event.data.get("entity_id")
+            old = event.data.get("old_state")
+            new = event.data.get("new_state")
+            if new is None:
+                return
+            if entity_id in presence_set and old is not None and old.state == new.state:
+                return
+            self.hass.async_create_task(self.async_request_refresh())
+
+        return async_track_state_change_event(self.hass, entities, _on_state_change)
 
     @callback
     def _schedule_hour_boundary_update(self) -> None:
@@ -330,6 +378,21 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         battery = self._build_battery(soc)
         optimizer = self._build_optimizer()
         plan = optimizer.optimize(forecast, battery, ev_request, reminders)
+
+        # A calendar edit can change what the EV needs *right now* (a new trip
+        # an hour away → charging must start immediately). When the
+        # calendar-derived inputs differ from the previous cycle, release the
+        # frozen current-hour decision below so the plan may change mid-hour;
+        # with unchanged inputs the freeze keeps mid-hour refreshes from
+        # flip-flopping the already-applied action.
+        ev_fingerprint = self.ev.calendar_fingerprint()
+        if (
+            self._ev_inputs_fingerprint is not None
+            and ev_fingerprint != self._ev_inputs_fingerprint
+        ):
+            self._committed_hour = None
+            self._committed_decision = None
+        self._ev_inputs_fingerprint = ev_fingerprint
 
         # Freeze the active clock hour. The optimizer always re-plans the whole
         # horizon from the live SoC; for the *current* hour that means a restart

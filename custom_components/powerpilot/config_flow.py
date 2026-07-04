@@ -37,6 +37,7 @@ from .const import (
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_ODOMETER_SENSOR,
+    CONF_EV_PRESENCE_ENTITIES,
     CONF_EV_SOC_SENSOR,
     CONF_GMAPS_API_KEY,
     CONF_GRID_DISCONNECT_SOC,
@@ -280,6 +281,13 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_EV_LOCATION_SENSOR, default=d(CONF_EV_LOCATION_SENSOR) or vol.UNDEFINED
             ): _entity(["device_tracker", "binary_sensor", "person"]),
+            vol.Optional(
+                CONF_EV_PRESENCE_ENTITIES, default=list(d(CONF_EV_PRESENCE_ENTITIES) or [])
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["device_tracker", "person", "binary_sensor"], multiple=True
+                )
+            ),
             vol.Optional(
                 CONF_EV_CALENDAR_KEYWORD, default=d(CONF_EV_CALENDAR_KEYWORD)
             ): selector.TextSelector(),

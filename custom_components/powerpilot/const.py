@@ -101,6 +101,10 @@ CONF_EV_SOC_SENSOR: Final = "ev_soc_sensor"
 # the optimizer is allowed to plan charging (see CONF_EV_CALENDAR: calendar
 # events with a non-home ``location`` are the only source of *unavailability*).
 CONF_EV_LOCATION_SENSOR: Final = "ev_location_sensor"
+# Extra presence entities (phones, person.*) combined with the car tracker —
+# car trackers often poll rarely, so a fresh "not home" from any of these
+# beats a stale "home" from the car. Home only when every known reading agrees.
+CONF_EV_PRESENCE_ENTITIES: Final = "ev_presence_entities"
 CONF_EV_RANGE_KM: Final = "ev_range_km"  # km on a full charge
 CONF_EV_BATTERY_KWH: Final = "ev_battery_kwh"
 CONF_EV_WEEKLY_KM: Final = "ev_weekly_km"  # off-calendar weekly km

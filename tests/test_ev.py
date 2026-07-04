@@ -17,6 +17,8 @@ from custom_components.powerpilot.const import (
     CONF_EV_CHARGER_PHASE,
     CONF_EV_CHARGER_PHASES,
     CONF_EV_ENABLED,
+    CONF_EV_LOCATION_SENSOR,
+    CONF_EV_PRESENCE_ENTITIES,
 )
 from custom_components.powerpilot.battery import BatteryModel
 from custom_components.powerpilot.models import Forecast, HourSlot
@@ -894,3 +896,91 @@ def test_no_reminder_when_target_reachable() -> None:
     ]
     module.get_request(fc)
     assert module._deadline_feasibility_reminders() == []
+
+
+# ---------------------------------------------------------------------------
+# Combined presence (EV tracker + extra presence entities)
+# ---------------------------------------------------------------------------
+
+
+class _States:
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._mapping = mapping
+
+    def get(self, entity_id: str):
+        value = self._mapping.get(entity_id)
+        return SimpleNamespace(state=value) if value is not None else None
+
+
+def _presence_module(
+    states: dict[str, str], location: str | None, extras: list[str]
+) -> EVModule:
+    module = object.__new__(EVModule)
+    module.hass = SimpleNamespace(states=_States(states))
+    module.config = {
+        CONF_EV_LOCATION_SENSOR: location,
+        CONF_EV_PRESENCE_ENTITIES: extras,
+    }
+    return module
+
+
+def test_combined_home_fresh_away_beats_stale_home() -> None:
+    module = _presence_module(
+        {"device_tracker.car": "home", "person.owner": "not_home"},
+        location="device_tracker.car",
+        extras=["person.owner"],
+    )
+    assert module._combined_home() is False
+
+
+def test_combined_home_requires_all_known_readings_home() -> None:
+    module = _presence_module(
+        {"device_tracker.car": "home", "person.owner": "home"},
+        location="device_tracker.car",
+        extras=["person.owner"],
+    )
+    assert module._combined_home() is True
+
+
+def test_combined_home_unavailable_entity_reads_as_unknown_not_away() -> None:
+    module = _presence_module(
+        {"device_tracker.car": "unavailable", "person.owner": "home"},
+        location="device_tracker.car",
+        extras=["person.owner"],
+    )
+    assert module._combined_home() is True
+
+
+def test_combined_home_none_when_nothing_known() -> None:
+    module = _presence_module({}, location="device_tracker.car", extras=[])
+    assert module._combined_home() is None
+
+
+# ---------------------------------------------------------------------------
+# Calendar-input fingerprint (drives the mid-hour commit release)
+# ---------------------------------------------------------------------------
+
+
+def test_calendar_fingerprint_changes_with_inputs() -> None:
+    module = _bare_module()
+    fp_empty = module.calendar_fingerprint()
+    module._forced_hours.add(BASE + timedelta(hours=2))
+    fp_forced = module.calendar_fingerprint()
+    assert fp_empty != fp_forced
+
+    module._targets.append(
+        EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=90.0)
+    )
+    assert module.calendar_fingerprint() != fp_forced
+
+
+def test_calendar_fingerprint_stable_for_same_inputs() -> None:
+    a = _bare_module()
+    b = _bare_module()
+    for module in (a, b):
+        module._forced_hours.add(BASE + timedelta(hours=2))
+        module._unavailable_hours.add(BASE + timedelta(hours=3))
+        module._targets.append(
+            EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=90.0)
+        )
+    assert a.calendar_fingerprint() == b.calendar_fingerprint()

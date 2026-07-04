@@ -1246,15 +1246,21 @@ export class PowerPilotPanel extends LitElement {
 
     // EV SoC on the same right axis. `ev_soc` is the END-of-hour state, plotted
     // on the hour-end boundary (t + 1h) to line up with the right edge of the
-    // EV-charge bar. The solid line is REAL, so — like the battery SoC line — it
-    // is drawn for past/current hours only; the future is owned by the dashed
-    // forecast line (otherwise the solid line duplicates the dashed one).
+    // EV-charge bar. The solid line is REAL, so — like the battery SoC line —
+    // it covers only *completed* hours: the in-progress hour is excluded, so
+    // both realized lines end on the same boundary (the start of the current
+    // hour) instead of the EV line reaching into the not-yet-finished hour.
+    // (An exact stop at "teraz" would need an in-hour point, which breaks
+    // ApexCharts' column sizing — see the battery SoC note above.)
     const hasEvSoc = hrs.some((h) => h.is_past && h.ev_soc != null);
     if (hasEvSoc) {
       series.push({
         name: "EV SoC %",
         type: "line",
-        data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].is_past ? hrs[i].ev_soc : null })),
+        data: ts.map((t, i) => ({
+          x: t + HOUR,
+          y: hrs[i].is_past && !hrs[i].partial ? hrs[i].ev_soc : null,
+        })),
         color: "#3498db",
       });
     }

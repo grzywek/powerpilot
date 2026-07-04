@@ -374,8 +374,9 @@ const INVERTER_MODE_META: Record<string, { label: string; dot: string }> = {
 };
 
 /** Trip away-window shading: travel legs (dojazd/powrót + margins) vs the
- *  event itself, so both read separately on the chart. */
-const TRIP_FILL = { travel: "#f59e0b", event: "#e74c3c" };
+ *  event itself, so both read separately on the chart. Grays on purpose —
+ *  the chart already carries a lot of color in the bars and lines. */
+const TRIP_FILL = { travel: "#9ca3af", event: "#4b5563" };
 
 type RangeMode = "24h" | "3d" | "7d";
 
@@ -822,9 +823,9 @@ export class PowerPilotPanel extends LitElement {
         <div id="pp-chart-energy" class="apex-chart"></div>
         <div id="pp-chart-prices" class="apex-chart apex-chart-short"></div>
         <div class="legend-row">
-          <span>Tryb falownika (kropki na dole):</span>
+          <span>Tryb falownika (znaczniki na dole):</span>
           ${Object.values(INVERTER_MODE_META).map(
-            (m) => html`<span><span class="dot-sq" style=${"background:" + m.dot + ";border-radius:50%"}></span>${m.label}</span>`,
+            (m) => html`<span><span class="dot-sq" style=${"background:" + m.dot}></span>${m.label}</span>`,
           )}
           <span style="margin-left:12px">Wyjazd EV:</span>
           <span><span class="dot-sq" style=${"background:" + TRIP_FILL.travel}></span>dojazd/powrót (+margines)</span>
@@ -1008,13 +1009,17 @@ export class PowerPilotPanel extends LitElement {
     if (this._energyChart) {
       // `redrawPaths=false, animate=false` keeps zoom + tooltip state alive
       // through the data refresh; ApexCharts patches the SVG in place.
-      this._energyChart.updateOptions(energyOpts, false, false);
+      // `updateSyncedCharts=false` is CRITICAL: both charts share a sync
+      // group, and the default (true) copies these options onto the sibling
+      // chart — the energy panel would inherit the price panel's axes (and
+      // vice versa) on every refresh or range change.
+      this._energyChart.updateOptions(energyOpts, false, false, false);
     } else {
       this._energyChart = new ApexCharts(energyEl, energyOpts);
       this._energyChart.render();
     }
     if (this._priceChart) {
-      this._priceChart.updateOptions(priceOpts, false, false);
+      this._priceChart.updateOptions(priceOpts, false, false, false);
     } else {
       this._priceChart = new ApexCharts(priceEl, priceOpts);
       this._priceChart.render();
@@ -1283,7 +1288,8 @@ export class PowerPilotPanel extends LitElement {
       dataPointIndex: i,
       fillColor: h.inverter_mode ? INVERTER_MODE_META[h.inverter_mode]?.dot ?? "transparent" : "transparent",
       strokeColor: "transparent",
-      size: h.inverter_mode ? 4 : 0,
+      size: h.inverter_mode ? 5 : 0,
+      shape: "square",
     }));
 
     const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
@@ -1321,7 +1327,8 @@ export class PowerPilotPanel extends LitElement {
         curve: "straight",
       },
       markers: {
-        size: series.map((sx: any) => (sx.name === MODE_SERIES ? 4 : 0)),
+        size: series.map((sx: any) => (sx.name === MODE_SERIES ? 5 : 0)),
+        shape: "square",
         strokeWidth: 0,
         discrete: modeMarkers,
         hover: { sizeOffset: 1 },
@@ -1339,9 +1346,11 @@ export class PowerPilotPanel extends LitElement {
         min: winStart,
         max: winEnd,
         // Time labels live on the price panel directly below — hiding them
-        // here glues the two panels into one visual chart.
+        // here glues the two panels into one visual chart. The hover box on
+        // this axis goes too (it floated mid-view between the panels).
         labels: { show: false, datetimeUTC: false },
         axisTicks: { show: false },
+        tooltip: { enabled: false },
       },
       yaxis: [
         // ALL kWh column series share ONE physical axis — this is what makes
@@ -1427,7 +1436,7 @@ export class PowerPilotPanel extends LitElement {
                 .filter(Boolean)
                 .join(" · ");
               return (
-                `<div style="font-weight:400;font-size:11px;color:#e74c3c;margin-top:3px">🚗 ${esc(t.label)}</div>` +
+                `<div style="font-weight:500;font-size:11px;opacity:0.85;margin-top:3px">🚗 ${esc(t.label)}</div>` +
                 `<div style="font-weight:400;font-size:11px;opacity:0.75">` +
                 `zdarzenie ${fmtHM(t.event_start)}–${fmtHM(t.event_end)} · wyjazd ${fmtHM(t.depart)} · powrót do ${fmtHM(t.return_end)}` +
                 `</div>` +
@@ -1511,18 +1520,21 @@ export class PowerPilotPanel extends LitElement {
               .join("") +
             `</tr>`;
           // Colored delta arrow so the direction reads at a glance:
-          // "31 → 38 % ▲7" (green up / red down / dimmed "＝" for no change).
+          // "31 → 38% ↑7" (green up / red down / dimmed "=" for no change).
+          // The delta sits in a fixed-width box so the "%" values line up
+          // across rows regardless of how wide each delta is.
           const socDelta = (a: number | null | undefined, b: number | null | undefined) => {
             if (a == null || b == null) return "";
             const d = Math.round(b) - Math.round(a);
-            if (d > 0) return ` <span style="color:#16a34a;font-weight:600">▲${d}</span>`;
-            if (d < 0) return ` <span style="color:#dc2626;font-weight:600">▼${-d}</span>`;
-            return ` <span style="opacity:0.55">＝</span>`;
+            if (d > 0) return `<span style="color:#16a34a;font-weight:600">↑${d}</span>`;
+            if (d < 0) return `<span style="color:#dc2626;font-weight:600">↓${-d}</span>`;
+            return `<span style="opacity:0.55">=</span>`;
           };
           const socPair = (a: number | null | undefined, b: number | null | undefined) =>
             a == null && b == null
               ? "—"
-              : `${a != null ? a.toFixed(0) : "—"} → ${b != null ? b.toFixed(0) : "—"} %${socDelta(a, b)}`;
+              : `${a != null ? a.toFixed(0) : "—"} → ${b != null ? b.toFixed(0) : "—"}%` +
+                `<span style="display:inline-block;min-width:28px;text-align:right">${socDelta(a, b)}</span>`;
           const socFn = (g: TipSide) => socPair(g.soc_start, g.soc_end);
           const evSocFn = (g: TipSide) => socPair(g.ev_soc_start, g.ev_soc_end);
           const hasEvSoc = sides.some((s) => s.g.ev_soc_start != null || s.g.ev_soc_end != null);
@@ -1538,7 +1550,7 @@ export class PowerPilotPanel extends LitElement {
               : `<tr><td></td><td style="text-align:right;opacity:0.7">${sides[0].label}</td></tr>`;
 
           return `
-            <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.45;min-width:240px">
+            <div style="padding:8px 10px;color:${tt.fg};font-size:12px;line-height:1.45;min-width:240px">
               <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}${tripRows}</div>
               <table style="border-collapse:collapse;width:100%">
                 ${header}
@@ -1606,7 +1618,9 @@ export class PowerPilotPanel extends LitElement {
       }))
       .filter((t) => !isNaN(t.ts))
       .map((t) => {
-        const color = t.trip ? "#e74c3c" : "#3498db";
+        // Trip minimums in the event gray (they belong to the away window);
+        // manual calendar targets keep the EV blue.
+        const color = t.trip ? TRIP_FILL.event : "#3498db";
         return {
           x: t.ts,
           y: t.soc,
@@ -1734,7 +1748,9 @@ export class PowerPilotPanel extends LitElement {
 
     const series: any[] = [
       { name: "Cena pełna", type: "line", data: priceData, color: "#facc15" },
-      { name: "Cena w baterii", type: "line", data: batCostData, color: "#9e9e9e" },
+      // Teal, not gray — the gray dashed line disappeared against the blue
+      // battery-cost columns it usually overlaps.
+      { name: "Cena w baterii", type: "line", data: batCostData, color: "#14b8a6" },
       { name: "Koszt energii - sieć", type: "column", data: gridCostData, color: "#e67e22" },
       { name: "Koszt energii - bateria", type: "column", data: batUseCostData, color: "#3b82f6" },
     ];
@@ -1807,7 +1823,9 @@ export class PowerPilotPanel extends LitElement {
         shared: true,
         intersect: false,
         followCursor: false,
-        x: { format: "EEEE dd.MM HH:mm" },
+        // NOTE: ApexCharts datetime tokens, not date-fns — "EEEE" would
+        // render literally in the x-axis hover box.
+        x: { format: "dd.MM HH:mm" },
         // Custom HTML so price lines can show the energy/distribution split
         // that's encoded in the total. ApexCharts passes the data index of
         // the hovered point; we use it to look the slot back up.
@@ -1829,7 +1847,7 @@ export class PowerPilotPanel extends LitElement {
             ? { bg: "#1f2937", fg: "#f3f4f6", border: "#374151" }
             : { bg: "#ffffff", fg: "#1f2937", border: "#d1d5db" };
           return `
-            <div style="padding:8px 10px;background:${tt.bg};color:${tt.fg};border:1px solid ${tt.border};border-radius:6px;font-size:12px;line-height:1.4;min-width:240px">
+            <div style="padding:8px 10px;color:${tt.fg};font-size:12px;line-height:1.4;min-width:240px">
               <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}</div>
               <table style="border-collapse:collapse;width:100%">
                 <tr><td style="padding:1px 0">Cena całkowita ${confirmed}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.total_price_kwh)} PLN/kWh</td></tr>
@@ -3461,6 +3479,10 @@ export class PowerPilotPanel extends LitElement {
     /* Tooltip flicker workaround for ApexCharts inside Shadow DOM:
        the tooltip element itself catches mouse events and re-triggers
        enter/leave loops. Disabling pointer events keeps it stable. */
+    /* One box, not two: the wrapper carries the background/border/radius and
+       the custom tooltip HTML inside is frameless (a second inner frame plus
+       the wrapper's own background used to read as a gray box with a white
+       gap around it). */
     .apexcharts-tooltip,
     .apexcharts-xaxistooltip,
     .apexcharts-yaxistooltip {
@@ -3470,19 +3492,13 @@ export class PowerPilotPanel extends LitElement {
       border: 1px solid var(--divider-color, #444) !important;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
     }
+    .apexcharts-tooltip {
+      border-radius: 8px !important;
+      overflow: hidden;
+    }
     .apexcharts-tooltip-title {
       background: var(--secondary-background-color, #1f1f1f) !important;
       border-bottom: 1px solid var(--divider-color, #444) !important;
-    }
-    /* The energy/price panels render fully custom tooltip HTML that carries
-       its own background + border — strip the default Apex frame there so it
-       doesn't draw a second (gray) box inside the tooltip. */
-    #pp-chart-energy .apexcharts-tooltip,
-    #pp-chart-prices .apexcharts-tooltip {
-      background: transparent !important;
-      border: none !important;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
-      border-radius: 6px;
     }
     /* Force horizontal legend layout even when many series. */
     .apexcharts-legend {

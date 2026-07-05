@@ -187,10 +187,6 @@ class Forecast:
     def __len__(self) -> int:
         return len(self.slots)
 
-    @property
-    def buy_prices(self) -> list[float]:
-        return [s.buy_price for s in self.slots if s.buy_price is not None]
-
 
 @dataclass
 class Plan:

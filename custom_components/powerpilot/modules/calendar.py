@@ -41,6 +41,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # How far ahead calendar events are read (matches the optimizer horizon cap).
 CALENDAR_LOOKAHEAD_HOURS = 96
+IGNORE_EVENT_TAG = "#powerpilot_ignore"
+_HOME_LOCATION = "home"
+_RETURN_TRAVEL_UNSET = object()
 
 
 @dataclass
@@ -58,10 +61,10 @@ class CalendarEvent:
 class Trip:
     """A located event: the car is away ``depart`` → ``return_end``.
 
-    ``distance_km``/``duration_min`` are the *one-way* Google Maps values;
-    ``None`` when travel could not be resolved (no API key, unknown address) —
-    then the away window is just the event span plus margins, with no
-    drive-energy model.
+    The legacy ``distance_km``/``duration_min`` fields describe the outbound leg
+    for display. ``outbound_*`` and ``return_*`` carry the exact route legs used
+    for EV drain modelling; either leg may be ``None`` when Google Maps could
+    not resolve it, and no distance is guessed.
     """
 
     label: str
@@ -72,6 +75,12 @@ class Trip:
     return_end: datetime
     distance_km: float | None = None
     duration_min: float | None = None
+    origin_location: str = _HOME_LOCATION
+    return_location: str = _HOME_LOCATION
+    outbound_distance_km: float | None = None
+    outbound_duration_min: float | None = None
+    return_distance_km: float | None = None
+    return_duration_min: float | None = None
 
 
 def trip_window(
@@ -80,12 +89,23 @@ def trip_window(
     travel: TravelInfo | None,
     margin_before_min: float,
     margin_after_min: float,
+    return_travel: TravelInfo | None | object = _RETURN_TRAVEL_UNSET,
 ) -> tuple[datetime, datetime]:
     """Away window for a located event: travel time (if known) plus margins."""
-    travel_min = travel.duration_min if travel is not None else 0.0
-    depart = event_start - timedelta(minutes=travel_min + margin_before_min)
-    return_end = event_end + timedelta(minutes=travel_min + margin_after_min)
+    outbound_min = travel.duration_min if travel is not None else 0.0
+    inbound = travel if return_travel is _RETURN_TRAVEL_UNSET else return_travel
+    return_min = inbound.duration_min if inbound is not None else 0.0
+    depart = event_start - timedelta(minutes=outbound_min + margin_before_min)
+    return_end = event_end + timedelta(minutes=return_min + margin_after_min)
     return depart, return_end
+
+
+def _is_home_location(location: str) -> bool:
+    return location.strip().lower() in HOME_LOCATION_MARKERS
+
+
+def _same_location(left: str, right: str) -> bool:
+    return " ".join(left.split()).lower() == " ".join(right.split()).lower()
 
 
 class CalendarModule(PowerPilotModule):
@@ -171,13 +191,46 @@ class CalendarModule(PowerPilotModule):
                 CONF_TRAVEL_MARGIN_AFTER_MIN, DEFAULTS[CONF_TRAVEL_MARGIN_AFTER_MIN]
             )
         )
+        parent_by_event = {
+            id(event): self._parent_event(event)
+            for event in self.events
+            if event.location.strip() and not _is_home_location(event.location)
+        }
+        terminal_parent_ids = {
+            id(parent)
+            for event in self.events
+            for parent in [parent_by_event.get(id(event))]
+            if parent is not None
+            and event.end == parent.end
+            and not _same_location(event.location, parent.location)
+        }
         for event in self.events:
             location = event.location.strip()
-            if not location or location.lower() in HOME_LOCATION_MARKERS:
+            if not location or _is_home_location(location):
                 continue
-            travel: TravelInfo | None = None
+            parent = parent_by_event.get(id(event))
+            origin = parent.location if parent is not None else _HOME_LOCATION
+            if _same_location(origin, location):
+                continue
+            if parent is None:
+                return_to: str | None = (
+                    None if id(event) in terminal_parent_ids else _HOME_LOCATION
+                )
+            else:
+                return_to = _HOME_LOCATION if event.end == parent.end else parent.location
+
+            outbound: TravelInfo | None = None
+            inbound: TravelInfo | None = None
             if self._resolver is not None:
-                travel = await self._resolver.async_resolve(location)
+                outbound = await self._resolver.async_resolve_route(
+                    None if origin == _HOME_LOCATION else origin,
+                    location,
+                )
+                if return_to is not None:
+                    inbound = await self._resolver.async_resolve_route(
+                        location,
+                        None if return_to == _HOME_LOCATION else return_to,
+                    )
             elif location:
                 self.log_warning(
                     "Brak klucza Google Maps — wyjazd "
@@ -185,7 +238,12 @@ class CalendarModule(PowerPilotModule):
                     extra={"location": location},
                 )
             depart, return_end = trip_window(
-                event.start, event.end, travel, margin_before, margin_after
+                event.start,
+                event.end,
+                outbound,
+                margin_before,
+                margin_after,
+                return_travel=inbound,
             )
             self.trips.append(
                 Trip(
@@ -195,11 +253,33 @@ class CalendarModule(PowerPilotModule):
                     event_end=event.end,
                     depart=depart,
                     return_end=return_end,
-                    distance_km=travel.distance_km if travel else None,
-                    duration_min=travel.duration_min if travel else None,
+                    distance_km=outbound.distance_km if outbound else None,
+                    duration_min=outbound.duration_min if outbound else None,
+                    origin_location=origin,
+                    return_location=return_to or location,
+                    outbound_distance_km=outbound.distance_km if outbound else None,
+                    outbound_duration_min=outbound.duration_min if outbound else None,
+                    return_distance_km=inbound.distance_km if inbound else None,
+                    return_duration_min=inbound.duration_min if inbound else None,
                 )
             )
         self.trips.sort(key=lambda t: t.depart)
+
+    def _parent_event(self, event: CalendarEvent) -> CalendarEvent | None:
+        """Smallest located event that fully contains ``event``."""
+        candidates = [
+            candidate
+            for candidate in self.events
+            if candidate is not event
+            and candidate.location.strip()
+            and not _is_home_location(candidate.location)
+            and candidate.start <= event.start
+            and event.end <= candidate.end
+            and (candidate.start < event.start or event.end < candidate.end)
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda e: (e.end - e.start, e.start))
 
     # ------------------------------------------------------------------
     # Event fetching / parsing
@@ -235,12 +315,15 @@ class CalendarModule(PowerPilotModule):
         return list(data.get("events") or [])
 
     def _parse_event(self, raw: dict, cal_entity: str) -> CalendarEvent | None:
+        summary = str(raw.get("summary") or "").strip()
+        if IGNORE_EVENT_TAG in summary.lower():
+            return None
         start = self._parse_dt(raw.get("start"))
         end = self._parse_dt(raw.get("end"))
         if start is None or end is None or end <= start:
             return None
         return CalendarEvent(
-            summary=str(raw.get("summary") or "").strip(),
+            summary=summary,
             location=str(raw.get("location") or "").strip(),
             start=start,
             end=end,
@@ -278,6 +361,12 @@ class CalendarModule(PowerPilotModule):
                     "return_end": t.return_end.isoformat(),
                     "distance_km": t.distance_km,
                     "duration_min": t.duration_min,
+                    "origin_location": t.origin_location,
+                    "return_location": t.return_location,
+                    "outbound_distance_km": t.outbound_distance_km,
+                    "return_distance_km": t.return_distance_km,
+                    "outbound_duration_min": t.outbound_duration_min,
+                    "return_duration_min": t.return_duration_min,
                 }
                 for t in self.trips
             ],

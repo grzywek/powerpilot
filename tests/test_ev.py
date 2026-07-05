@@ -19,12 +19,15 @@ from custom_components.powerpilot.const import (
     CONF_EV_ENABLED,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_PRESENCE_ENTITIES,
+    CONF_TRAVEL_MARGIN_AFTER_MIN,
+    CONF_TRAVEL_MARGIN_BEFORE_MIN,
 )
 from custom_components.powerpilot.battery import BatteryModel
 from custom_components.powerpilot.models import Forecast, HourSlot
 from custom_components.powerpilot.profiles import WeeklyAccumulator
 from custom_components.powerpilot.modules.calendar import (
     CalendarEvent,
+    CalendarModule,
     Trip,
     trip_window,
 )
@@ -332,6 +335,34 @@ def _event(summary: str, start: int, end: int, location: str = "") -> CalendarEv
     )
 
 
+class _RouteResolver:
+    def __init__(self, routes: dict[tuple[str | None, str | None], TravelInfo]) -> None:
+        self.routes = routes
+        self.calls: list[tuple[str | None, str | None]] = []
+
+    async def async_resolve_route(
+        self, origin: str | None, destination: str | None
+    ) -> TravelInfo | None:
+        self.calls.append((origin, destination))
+        return self.routes.get((origin, destination))
+
+
+def _calendar_module(
+    events: list[CalendarEvent],
+    resolver: _RouteResolver | None,
+) -> CalendarModule:
+    module = object.__new__(CalendarModule)
+    module.config = {
+        CONF_TRAVEL_MARGIN_BEFORE_MIN: 0.0,
+        CONF_TRAVEL_MARGIN_AFTER_MIN: 0.0,
+    }
+    module.events = events
+    module.trips = []
+    module._resolver = resolver
+    module.log_warning = lambda *a, **kw: None
+    return module
+
+
 def test_parse_percent_event_is_deadline_target() -> None:
     module = _bare_module()
     module._parse_keyword_event(_event("Kotek 100%", 4, 5), "Kotek", BASE)
@@ -372,6 +403,17 @@ def test_parse_custom_keyword_case_insensitive() -> None:
     module = _bare_module()
     module._parse_keyword_event(_event("auto 75%", 4, 5), "Auto", BASE)
     assert module._targets[0].target_soc == 75.0
+
+
+def test_calendar_parse_ignores_powerpilot_ignore_hashtag() -> None:
+    module = object.__new__(CalendarModule)
+    raw = {
+        "summary": "Spotkanie #PowerPilot_Ignore",
+        "location": "Warszawa",
+        "start": (BASE + timedelta(hours=2)).isoformat(),
+        "end": (BASE + timedelta(hours=3)).isoformat(),
+    }
+    assert module._parse_event(raw, "calendar.test") is None
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +472,61 @@ def test_trip_window_without_travel_uses_margins_only() -> None:
     assert return_end == BASE + timedelta(hours=12, minutes=30)
 
 
+async def test_nested_event_uses_parent_location_as_base() -> None:
+    parent = _event("Wyjazd Kraków", 24, 72, "Kraków")
+    child = _event("Spotkanie", 30, 32, "Kraków biuro")
+    resolver = _RouteResolver(
+        {
+            (None, "Kraków"): TravelInfo(300.0, 180.0),
+            ("Kraków", None): TravelInfo(300.0, 180.0),
+            ("Kraków", "Kraków biuro"): TravelInfo(10.0, 20.0),
+            ("Kraków biuro", "Kraków"): TravelInfo(10.0, 20.0),
+        }
+    )
+    module = _calendar_module([parent, child], resolver)
+
+    await module._build_trips()
+
+    assert len(module.trips) == 2
+    parent_trip, child_trip = sorted(module.trips, key=lambda t: t.event_start)
+    assert parent_trip.origin_location == "home"
+    assert parent_trip.return_location == "home"
+    assert parent_trip.outbound_distance_km == 300.0
+    assert parent_trip.return_distance_km == 300.0
+    assert child_trip.origin_location == "Kraków"
+    assert child_trip.return_location == "Kraków"
+    assert child_trip.outbound_distance_km == 10.0
+    assert child_trip.return_distance_km == 10.0
+    assert child_trip.depart == child.start - timedelta(minutes=20)
+    assert child_trip.return_end == child.end + timedelta(minutes=20)
+
+
+async def test_terminal_nested_event_returns_home_without_parent_return() -> None:
+    parent = _event("Wyjazd Kraków", 24, 72, "Kraków")
+    child = _event("Lotnisko", 70, 72, "Balice")
+    resolver = _RouteResolver(
+        {
+            (None, "Kraków"): TravelInfo(300.0, 180.0),
+            ("Kraków", "Balice"): TravelInfo(15.0, 25.0),
+            ("Balice", None): TravelInfo(290.0, 170.0),
+        }
+    )
+    module = _calendar_module([parent, child], resolver)
+
+    await module._build_trips()
+
+    parent_trip, child_trip = sorted(module.trips, key=lambda t: t.event_start)
+    assert ("Kraków", None) not in resolver.calls
+    assert parent_trip.outbound_distance_km == 300.0
+    assert parent_trip.return_distance_km is None
+    assert parent_trip.return_end == parent.end
+    assert child_trip.origin_location == "Kraków"
+    assert child_trip.return_location == "home"
+    assert child_trip.outbound_distance_km == 15.0
+    assert child_trip.return_distance_km == 290.0
+    assert child_trip.return_end == child.end + timedelta(minutes=170)
+
+
 def test_apply_trip_marks_away_hours_unavailable() -> None:
     module = _bare_module()
     # Event 10–12, travel 45 min + margin 30 min → away 8:45 – 13:15.
@@ -451,6 +548,27 @@ def test_apply_trip_builds_drain_and_target() -> None:
     assert target.source == "trip"
     assert target.deadline == BASE + timedelta(hours=9)
     assert round(target.target_soc, 2) == 53.33
+
+
+def test_apply_trip_uses_asymmetric_leg_distances() -> None:
+    module = _bare_module(kwh_per_km=0.2, min_soc=20.0)
+    event_start = BASE + timedelta(hours=10)
+    event_end = BASE + timedelta(hours=12)
+    trip = Trip(
+        label="Nested",
+        location="Balice",
+        event_start=event_start,
+        event_end=event_end,
+        depart=event_start - timedelta(hours=1),
+        return_end=event_end + timedelta(hours=1),
+        outbound_distance_km=10.0,
+        return_distance_km=40.0,
+    )
+    module._apply_trip(trip, BASE)
+    assert round(sum(module._trip_drain.values()), 3) == 10.0
+    target = module._trip_targets[0]
+    assert target.deadline == BASE + timedelta(hours=9)
+    assert round(target.target_soc, 2) == 36.67
 
 
 def test_apply_trip_without_distance_is_unavailability_only() -> None:

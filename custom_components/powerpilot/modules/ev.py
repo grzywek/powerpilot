@@ -109,6 +109,15 @@ def _spread_energy(start: datetime, end: datetime, kwh: float) -> dict[datetime,
     return {hour: per_hour for hour in hours}
 
 
+def _trip_energy_distance_km(trip: Trip) -> float | None:
+    """Total resolved driving distance represented by a trip."""
+    if trip.outbound_distance_km is not None or trip.return_distance_km is not None:
+        return (trip.outbound_distance_km or 0.0) + (trip.return_distance_km or 0.0)
+    if trip.distance_km is None:
+        return None
+    return 2.0 * trip.distance_km
+
+
 def _value_at(history: list[tuple[datetime, float]], when: datetime) -> float | None:
     """Value of a (time, value) series at ``when`` (last sample at/before it)."""
     found: float | None = None
@@ -667,26 +676,46 @@ class EVModule(PowerPilotModule):
             self._unavailable_hours.add(hour)
             hour += timedelta(hours=1)
 
-        # 2. Drive energy: one-way legs spread over the departure/return spans.
-        if trip.distance_km is None:
+        # 2. Drive energy: each resolved leg is spread over its own span. Older
+        # tests/records may only carry ``distance_km``; for live trips the
+        # calendar module fills the explicit outbound/return distances.
+        has_explicit_legs = (
+            trip.outbound_distance_km is not None or trip.return_distance_km is not None
+        )
+        if has_explicit_legs:
+            outbound_km = trip.outbound_distance_km
+            return_km = trip.return_distance_km
+        else:
+            outbound_km = trip.distance_km
+            return_km = trip.distance_km
+        if outbound_km is None and return_km is None:
             return  # calendar module already logged the missing travel model
         if not self._kwh_per_km:
             self.log_warning(
                 f"Wyjazd „{trip.label}”: brak nauczonego zużycia kWh/km — "
                 "energia dojazdu nieuwzględniona w prognozie SoC.",
-                extra={"trip": trip.label, "distance_km": trip.distance_km},
+                extra={
+                    "trip": trip.label,
+                    "outbound_km": outbound_km,
+                    "return_km": return_km,
+                },
             )
             return
-        leg_kwh = trip.distance_km * self._kwh_per_km
-        for bucket, kwh in _spread_energy(trip.depart, trip.event_start, leg_kwh).items():
+        outbound_kwh = (outbound_km or 0.0) * self._kwh_per_km
+        return_kwh = (return_km or 0.0) * self._kwh_per_km
+        for bucket, kwh in _spread_energy(
+            trip.depart, trip.event_start, outbound_kwh
+        ).items():
             self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + kwh
-        for bucket, kwh in _spread_energy(trip.event_end, trip.return_end, leg_kwh).items():
+        for bucket, kwh in _spread_energy(
+            trip.event_end, trip.return_end, return_kwh
+        ).items():
             self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + kwh
 
         # 3. Pre-departure target: reserve + round trip must be in the pack.
         if trip.depart <= now or not self._capacity:
             return
-        needed_soc = self.min_soc + (2.0 * leg_kwh) / self._capacity * 100.0
+        needed_soc = self.min_soc + (outbound_kwh + return_kwh) / self._capacity * 100.0
         self._trip_targets.append(
             EVChargeTarget(
                 deadline=trip.depart,
@@ -889,9 +918,16 @@ class EVModule(PowerPilotModule):
                 "return_end": trip.return_end.isoformat(),
                 "distance_km": trip.distance_km,
                 "duration_min": trip.duration_min,
+                "origin_location": trip.origin_location,
+                "return_location": trip.return_location,
+                "outbound_distance_km": trip.outbound_distance_km,
+                "return_distance_km": trip.return_distance_km,
+                "outbound_duration_min": trip.outbound_duration_min,
+                "return_duration_min": trip.return_duration_min,
                 "energy_kwh": (
-                    round(2.0 * trip.distance_km * self._kwh_per_km, 2)
-                    if trip.distance_km is not None and self._kwh_per_km
+                    round(distance * self._kwh_per_km, 2)
+                    if self._kwh_per_km
+                    and (distance := _trip_energy_distance_km(trip)) is not None
                     else None
                 ),
             }

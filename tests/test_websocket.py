@@ -189,6 +189,60 @@ async def test_series_lead_uses_single_pinned_vintage(hass: HomeAssistant) -> No
     assert before["inverter_mode"] is None
 
 
+async def test_series_can_pin_exact_forecast_run_at(hass: HomeAssistant) -> None:
+    """The chart can pin the prognoza to the vintage in force at a moment.
+
+    ``forecast_run_at`` picks the newest plan made at or before the given
+    datetime — even when a newer vintage exists — and reports the pinned
+    plan's coverage window so the panel can mark it on the chart.
+    """
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+
+    now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    selected_start = now - timedelta(hours=8)
+    newer_start = now - timedelta(hours=3)
+    for run_at, soc in ((selected_start, 77.0), (newer_start, 12.0)):
+        coordinator.snapshots.add(
+            {
+                "run_at": run_at.isoformat(),
+                "start": run_at.isoformat(),
+                "n": 14,
+                "horizon_hours": 14,
+                "total_cost": 1.0,
+                "soc": [soc] * 14,
+                "grid": [0.0] * 14,
+                "dischg": [0.0] * 14,
+                "ev": [0.0] * 14,
+                "charge": [0.0] * 14,
+                "mode": ["p"] * 14,
+            }
+        )
+
+    selected_key = coordinator.snapshots._key(selected_start)
+    # Pick a moment BETWEEN the two vintages → the older one was in force.
+    picked = (selected_start + timedelta(hours=1, minutes=30)).isoformat()
+    result = await coordinator.get_series(past_hours=10, forecast_run_at=picked)
+
+    covered = [
+        h
+        for h in result["hours"]
+        if h.get("forecast_origin") == selected_key and h.get("forecast")
+    ]
+    assert covered
+    assert all(h["forecast"]["soc_end"] == 77.0 for h in covered)
+
+    pin = result["forecast_pin"]
+    assert pin is not None
+    assert pin["run_at"] == selected_key
+    assert pin["start"] == selected_start.isoformat()
+    assert pin["end"] == (selected_start + timedelta(hours=14)).isoformat()
+
+
 async def test_series_no_vintage_hides_forecast(hass: HomeAssistant) -> None:
     """A past hour with no backing plan shows no "prognoza" — only real data.
 

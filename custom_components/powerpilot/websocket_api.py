@@ -73,6 +73,7 @@ async def ws_forecasts(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("start"): str,
         vol.Optional("end"): str,
         vol.Optional("forecast_lead", default=0): int,
+        vol.Optional("forecast_run_at"): str,
     }
 )
 @websocket_api.async_response
@@ -86,6 +87,7 @@ async def ws_series(hass: HomeAssistant, connection, msg) -> None:
         start=msg.get("start"),
         end=msg.get("end"),
         forecast_lead=int(msg.get("forecast_lead", 0)),
+        forecast_run_at=msg.get("forecast_run_at"),
     )
     connection.send_result(msg["id"], result)
 

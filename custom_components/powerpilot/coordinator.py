@@ -1349,6 +1349,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         start: str | None = None,
         end: str | None = None,
         forecast_lead: int = 0,
+        forecast_run_at: str | None = None,
     ) -> dict:
         """Unified hourly series for the chart panel.
 
@@ -1367,6 +1368,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         ``forecast_lead`` picks how many hours out each past hour's "prognoza"
         comparison is read from (0 = the freshest plan made as the hour began).
+        ``forecast_run_at`` (ISO datetime) instead pins the ENTIRE prognoza to
+        the single vintage in force at that moment (the newest one made at or
+        before it) — hours that vintage never covered show realized data only.
+        It takes precedence over ``forecast_lead``.
         """
         from .const import (
             CONF_BATTERY_CHARGE_SENSOR,
@@ -1544,7 +1549,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # horizon) get a blank forecast, which is correct: it said nothing there.
         sn = self.snapshots
         lead = max(int(forecast_lead or 0), 0)
-        pin_key = sn.nearest_run_at(now - timedelta(hours=lead)) if lead > 0 else None
+        pin_key: str | None = None
+        if forecast_run_at:
+            picked = dt_util.parse_datetime(forecast_run_at)
+            # The vintage in force at the picked moment: the newest plan made
+            # at or before it (plans are recorded once per clock hour).
+            pin_key = sn.nearest_run_at(picked) if picked else None
+        elif lead > 0:
+            pin_key = sn.nearest_run_at(now - timedelta(hours=lead))
+        pin_requested = bool(forecast_run_at) or lead > 0
         pin_rec = sn.get(pin_key) if pin_key else None
         pin_start = (
             dt_util.parse_datetime(pin_rec.get("start") or "") if pin_rec else None
@@ -1573,13 +1586,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             return seq[idx] if idx < len(seq) else None
 
         def _fc(hour: datetime, key: str):
-            if lead > 0:
+            if pin_requested:
                 return _pin_val(hour, key)
             return sn.run0_at(hour, key)
 
         def _fc_origin(hour: datetime) -> str | None:
             """When the forecast shown for ``hour`` was made (vintage run time)."""
-            if lead > 0:
+            if pin_requested:
                 return pin_key if _pin_idx(hour) is not None else None
             return sn.origin_at(hour, 0)
 
@@ -1719,11 +1732,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "soc": round(soc_real[h], 1) if h in soc_real else None,
                     "ev_soc": round(ev_soc_real[h], 1) if h in ev_soc_real else None,
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
-                    # At a stale lead the mode band follows the pinned plan's
+                    # At a pinned forecast the mode band follows that plan's
                     # schedule; otherwise it shows the realized mode.
                     "inverter_mode": (
                         _pin_mode(h)
-                        if lead > 0
+                        if pin_requested
                         else _real_mode(bat_charge_real.get(h), bat_discharge_real.get(h))
                     ),
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
@@ -1839,10 +1852,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     if _sl.start == now:
                         cur_slot, cur_dec = _sl, _dc
                         break
-            if lead > 0:
-                # Keep the current hour on the SAME pinned plan as the rest of the
-                # stale-lead prognoza, so the dashed line has no one-hour blip at
-                # "now". Blank when the pinned plan didn't reach this hour.
+            if pin_requested:
+                # Keep the current hour on the SAME pinned plan as the rest of
+                # the pinned prognoza, so the dashed line has no one-hour blip
+                # at "now". Blank when the pinned plan didn't reach this hour.
                 if _fc_origin(now) is not None:
                     fc_soc_end = _pin_val(now, "soc")
                     fc_ev_soc_end = _pin_val(now, "ev_soc")
@@ -1901,7 +1914,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     ),
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                     "inverter_mode": (
-                        _pin_mode(now) if lead > 0 else _real_mode(cur_charge, cur_discharge)
+                        _pin_mode(now)
+                        if pin_requested
+                        else _real_mode(cur_charge, cur_discharge)
                     ),
                     "battery_charge_kwh": round(cur_charge, 3) if cur_charge is not None else None,
                     "battery_discharge_kwh": round(cur_discharge, 3) if cur_discharge is not None else None,
@@ -1963,10 +1978,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # current-hour slot is a duplicate → forecast starts at the next hour.
         forecast_cutoff = (now + timedelta(hours=1)) if emitted_current else past_end
 
-        # At lead N the future side continues the SAME pinned plan used for the
-        # past (`_pin_val`), so the dashed prognoza is one coherent line across the
-        # whole horizon and can be read against the live plan (the solid line). At
-        # lead 0 the future side is just the live plan.
+        # With a pinned forecast (lead N or an exact run_at) the future side
+        # continues the SAME pinned plan used for the past (`_pin_val`), so the
+        # dashed prognoza is one coherent line across the whole horizon and can
+        # be read against the live plan (the solid line). Without a pin the
+        # future side is just the live plan.
         # Seed the pinned forecast SoC from the vintage's own state entering the
         # first shown future hour, so its dashed trajectory chains coherently.
         fc_prev_soc = _pin_val(forecast_cutoff - timedelta(hours=1), "soc")
@@ -1992,7 +2008,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     else None
                     for eid in device_ids
                 }
-                if lead > 0:
+                if pin_requested:
                     # Dashed forecast continues the pinned plan's trajectory.
                     fc_soc_end = _pin_val(slot.start, "soc")
                     fc_ev_soc_end = _pin_val(slot.start, "ev_soc")
@@ -2052,7 +2068,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         ),
                         "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                         "inverter_mode": (
-                            _pin_mode(slot.start) if lead > 0 else decision.inverter_mode
+                            _pin_mode(slot.start)
+                            if pin_requested
+                            else decision.inverter_mode
                         ),
                         "battery_charge_kwh": round(decision.battery_charge_kwh, 3),
                         "battery_discharge_kwh": round(decision.battery_discharge_kwh, 3),
@@ -2073,13 +2091,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if decision.ev_soc is not None:
                     prev_ev_soc = decision.ev_soc
 
-        # At a stale lead the whole chart is pinned to the selected vintage:
-        # bars, costs and prices come from THAT plan, not from realized data —
-        # otherwise switching the lead only moved the tooltip/dashed lines and
-        # the view mixed "reality" bars with a past plan's context. The solid
-        # realized SoC lines and the tooltip's "realne" column stay untouched
-        # as the comparison anchor.
-        if lead > 0:
+        # At a pinned forecast the whole chart is pinned to the selected
+        # vintage: bars, costs and prices come from THAT plan, not from
+        # realized data — otherwise switching the pin only moved the tooltip /
+        # dashed lines and the view mixed "reality" bars with a past plan's
+        # context. The solid realized SoC lines and the tooltip's "realne"
+        # column stay untouched as the comparison anchor.
+        if pin_requested:
             for hour_dict in hours:
                 hstart = dt_util.parse_datetime(hour_dict["start"])
                 covered = hstart is not None and _pin_idx(hstart) is not None
@@ -2141,7 +2159,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 else past_end
             )
         )
-        if lead > 0:
+        if pin_requested:
             trips = list((pin_rec or {}).get("trips") or [])
         else:
             merged: dict[tuple, dict] = {
@@ -2154,6 +2172,18 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 merged[(t.get("label"), t.get("event_start"))] = t
             trips = sorted(merged.values(), key=lambda t: t.get("depart") or "")
 
+        # Pinned-vintage metadata: when the prognoza is pinned (lead N or an
+        # exact run_at) the panel marks the span that plan actually covered —
+        # inside it the hours carry both realne and prognoza, outside only
+        # realne, which is how forecast evolution is audited hour by hour.
+        forecast_pin: dict | None = None
+        if pin_requested and pin_rec is not None and pin_start is not None:
+            forecast_pin = {
+                "run_at": pin_key,
+                "start": pin_start.isoformat(),
+                "end": (pin_start + timedelta(hours=pin_n)).isoformat(),
+            }
+
         return {
             # Exact present instant — the panel draws the "teraz" line here.
             "now": real_now.isoformat(),
@@ -2163,6 +2193,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "device_ids": device_ids,
             "hours": hours,
             "trips": trips,
+            "forecast_pin": forecast_pin,
         }
 
     def ev_control(self) -> dict:

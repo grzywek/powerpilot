@@ -201,6 +201,10 @@ interface Series {
    *  snapshot vintages (past events stay visible after leaving the calendar);
    *  at a stale forecast lead, only the pinned vintage's trips. */
   trips?: EVTrip[];
+  /** When the prognoza is pinned (lead N or an exact run_at): the pinned
+   *  vintage and the span it covered — hours inside carry realne + prognoza,
+   *  hours outside only realne. */
+  forecast_pin?: { run_at: string; start: string; end: string } | null;
 }
 
 type PriceType = "certain" | "forecast" | "estimated";
@@ -515,6 +519,9 @@ export class PowerPilotPanel extends LitElement {
   @state() private _anchor: Date | null = null;
   /** Selected forecast lead (hours) for the past "prognoza" comparison. */
   @state() private _forecastLead = 0;
+  /** Exact prognoza pin: show the plan in force at this local datetime
+   *  (ISO, hour precision). Takes precedence over the lead buttons. */
+  @state() private _forecastRunAt: string | null = null;
   /** Selected day on the Prices tab (ISO string YYYY-MM-DD). Null = today. */
   @state() private _pricesDay: string | null = null;
   /** Price archive payload for the selected day (independent of the chart window). */
@@ -595,6 +602,8 @@ export class PowerPilotPanel extends LitElement {
           // `forecast_lead` picks how far out the past "prognoza" comparison is
           // read from (0 = the freshest plan made as each hour began).
           forecast_lead: this._forecastLead,
+          // Exact pin beats the lead: show the plan in force at that moment.
+          ...(this._forecastRunAt ? { forecast_run_at: this._forecastRunAt } : {}),
         }),
       ]);
       this._plan = plan;
@@ -647,7 +656,31 @@ export class PowerPilotPanel extends LitElement {
 
   private _setForecastLead(hours: number): void {
     this._forecastLead = hours;
+    this._forecastRunAt = null; // the preset buttons drop an exact pin
     this._refresh();
+  }
+
+  /** Pin the prognoza to the plan in force at the picked local datetime. */
+  private _onForecastPinPick(ev: Event): void {
+    const value = (ev.target as HTMLInputElement).value; // "YYYY-MM-DDTHH:mm"
+    if (!value) {
+      this._forecastRunAt = null;
+      this._refresh();
+      return;
+    }
+    const picked = new Date(value);
+    if (isNaN(picked.getTime())) return;
+    picked.setMinutes(0, 0, 0); // vintages are hourly
+    this._forecastRunAt = picked.toISOString();
+    this._refresh();
+  }
+
+  /** The exact-pin input value ("YYYY-MM-DDTHH:00") for the current state. */
+  private _forecastPinInputValue(): string {
+    if (!this._forecastRunAt) return "";
+    const d = new Date(this._forecastRunAt);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`;
   }
 
   private async _loadForecasts(): Promise<void> {
@@ -991,7 +1024,9 @@ export class PowerPilotPanel extends LitElement {
           ${FORECAST_LEADS.map(
             (l) => html`
               <button
-                class="nav-btn ${this._forecastLead === l.hours ? "active" : ""}"
+                class="nav-btn ${!this._forecastRunAt && this._forecastLead === l.hours
+                  ? "active"
+                  : ""}"
                 @click=${() => this._setForecastLead(l.hours)}
                 title="Porównaj z prognozą sprzed ${l.hours} h"
               >
@@ -999,6 +1034,26 @@ export class PowerPilotPanel extends LitElement {
               </button>
             `
           )}
+          <input
+            type="datetime-local"
+            class="nav-date ${this._forecastRunAt ? "active" : ""}"
+            step="3600"
+            .value=${this._forecastPinInputValue()}
+            @change=${this._onForecastPinPick}
+            title="Pokaż prognozę obowiązującą o wskazanej godzinie (na wykresie zaznaczony jej zakres)"
+          />
+          ${this._forecastRunAt
+            ? html`<button
+                class="nav-btn"
+                @click=${() => {
+                  this._forecastRunAt = null;
+                  this._refresh();
+                }}
+                title="Wróć do prognozy wybranej przyciskami"
+              >
+                ✕
+              </button>`
+            : nothing}
         </div>
         <div class="nav-info">
           Okno: <strong>${fmtDay(start)}</strong> →
@@ -1721,6 +1776,7 @@ export class PowerPilotPanel extends LitElement {
           ...this._dayBoundaryAnnotations(s),
           ...this._evForcedAnnotations(),
           ...this._evAwayAnnotations(),
+          ...this._forecastPinAnnotations(s),
           {
             x: nowTs,
             borderColor: nowColor,
@@ -1735,6 +1791,38 @@ export class PowerPilotPanel extends LitElement {
         points: this._evDeadlineAnnotations(),
       },
     };
+  }
+
+  /** Coverage of the pinned prognoza vintage: a shaded band over the hours
+   *  that plan actually covered (inside it the tooltip carries realne AND
+   *  prognoza; outside only realne) plus a line at the moment the plan was
+   *  made — so it's readable at a glance which forecast is on screen and
+   *  from when to when it applied. */
+  private _forecastPinAnnotations(s: Series): any[] {
+    const pin = s.forecast_pin;
+    if (!pin) return [];
+    const from = new Date(pin.start).getTime();
+    const to = new Date(pin.end).getTime();
+    const made = new Date(pin.run_at).getTime();
+    if (isNaN(from) || isNaN(to) || to <= from) return [];
+    const color = "#8e44ad";
+    const d = new Date(isNaN(made) ? from : made);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const madeTxt = `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:00`;
+    return [
+      { x: from, x2: to, fillColor: color, opacity: 0.06 },
+      {
+        x: isNaN(made) ? from : made,
+        borderColor: color,
+        strokeDashArray: 6,
+        label: {
+          borderColor: color,
+          style: { background: color, color: "#ffffff", fontSize: "10px" },
+          text: `prognoza z ${madeTxt}`,
+          position: "top",
+        },
+      },
+    ];
   }
 
   /** Calendar deadline targets ("Kotek 100%") and automatic pre-trip minimums
@@ -2015,6 +2103,9 @@ export class PowerPilotPanel extends LitElement {
           // Boundary lines only — the day names are printed on the energy
           // panel above; the "teraz" line likewise goes unlabelled here.
           ...this._dayBoundaryAnnotations(s, false),
+          // Pinned-prognoza coverage band (unlabelled twin of the energy
+          // panel's — prices/costs below also come from the pinned plan).
+          ...this._forecastPinAnnotations(s).filter((a) => a.x2 != null),
           {
             x: nowTs,
             borderColor: nowColor,

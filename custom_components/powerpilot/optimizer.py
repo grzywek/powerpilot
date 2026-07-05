@@ -62,7 +62,6 @@ stay consistent with the rest of the integration.
 from __future__ import annotations
 
 import logging
-import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -838,10 +837,12 @@ class Optimizer:
         ) -> dict[datetime, float]:
             """Cost-optimal on/off full-power hours for ``deficit`` kWh.
 
-            ``candidates`` = eligible, not-yet-allocated slots. Returns full power
-            on the cheapest blocks plus the unavoidable remainder on the cheapest
-            valid top-off hour. The car fills the chosen hours chronologically, so
-            the remainder must sit on the chronologically last chosen hour.
+            ``candidates`` = eligible slots; hours partially taken by an
+            earlier commitment keep their remaining headroom (topping them up
+            is the same physical full-power hour). Returns headroom-filling on
+            the cheapest hours plus the unavoidable remainder on the cheapest
+            valid top-off hour. The car fills the chosen hours chronologically,
+            so the remainder must sit on the chronologically last chosen hour.
             ``room`` overrides the pack-room cap (deadline targets compute the
             room *at their deadline*, which the global estimate can't see).
 
@@ -855,47 +856,101 @@ class Optimizer:
             deficit = min(deficit, capacity_left() if room is None else room)
             if deficit <= _EPS:
                 return {}
+            # Hours already carrying a partial allocation stay eligible with
+            # their remaining headroom — an earlier small target (a trip floor)
+            # must not fence the cheapest hour off from a later, bigger target
+            # and scatter its block over pricier hours. Physically the charger
+            # simply runs at full power through the union of the chosen hours.
             slots = sorted(
-                (s for s in candidates if s.start not in allocation),
+                (
+                    s
+                    for s in candidates
+                    if charger_kw - allocation.get(s.start, 0.0) > _EPS
+                ),
                 key=lambda s: s.start,
             )
             if not slots:
                 return {}
-            needed = max(1, math.ceil(deficit / charger_kw - 1e-9))
-            needed = min(needed, len(slots))  # can't reach target → use them all
-            # Remainder on the top-off hour, in (0, P]. Clamps to full power when
-            # there aren't enough hours to fully reach the target.
-            remainder = min(max(deficit - (needed - 1) * charger_kw, _EPS), charger_kw)
+            caps = {
+                s.start: charger_kw - allocation.get(s.start, 0.0) for s in slots
+            }
+            # Every variant must deliver the same energy or it isn't comparable
+            # by cost (an under-filled variant would win on price alone).
+            deliverable = min(deficit, sum(caps.values()))
 
             hour_step = timedelta(hours=1)
 
             def _contiguous(starts: list[datetime]) -> bool:
-                return all(b - a == hour_step for a, b in zip(starts, starts[1:]))
+                # Consecutive clock hours; hours already charging from an
+                # earlier commitment bridge gaps — the charger doesn't switch
+                # off there, so the physical session is still unbroken.
+                for a, b in zip(starts, starts[1:]):
+                    h = a + hour_step
+                    while h < b:
+                        if allocation.get(h, 0.0) <= _EPS:
+                            return False
+                        h += hour_step
+                return True
 
-            # One variant per candidate top-off hour: cheapest full blocks
-            # before it. For contiguity also try the block of `needed-1` slots
-            # *immediately* before the top-off (valid when they form an
-            # unbroken run of clock hours ending at it).
-            variants: list[tuple[float, datetime, list[datetime]]] = []
-            for li in range(needed - 1, len(slots)):
-                top_off = slots[li]
-                fulls = sorted(slots[:li], key=slot_price)[: needed - 1]
-                if len(fulls) < needed - 1:
-                    continue
+            def _variant(
+                top_off, fulls: list
+            ) -> tuple[float, datetime, list[datetime], dict[datetime, float]]:
+                covered = sum(caps[s.start] for s in fulls)
+                rem = deliverable - covered  # in (0, cap(top_off)]
                 cost = (
-                    charger_kw * sum(slot_price(s) for s in fulls)
-                    + remainder * slot_price(top_off)
+                    sum(caps[s.start] * slot_price(s) for s in fulls)
+                    + rem * slot_price(top_off)
                 )
-                variants.append((cost, top_off.start, [s.start for s in fulls]))
-                if needed > 1:
-                    block = slots[li - (needed - 1) : li]
-                    block_starts = [s.start for s in block] + [top_off.start]
-                    if _contiguous(block_starts):
-                        bcost = (
-                            charger_kw * sum(slot_price(s) for s in block)
-                            + remainder * slot_price(top_off)
-                        )
-                        variants.append((bcost, top_off.start, [s.start for s in block]))
+                fill = {s.start: caps[s.start] for s in fulls}
+                fill[top_off.start] = rem
+                return (cost, top_off.start, [s.start for s in fulls], fill)
+
+            # One variant per candidate top-off hour: hours before it filled to
+            # their headroom, cheapest first — forced ones until the top-off can
+            # absorb the rest, then only hours cheaper than the top-off (each
+            # displaces top-off energy), keeping a positive remainder on it.
+            variants: list[
+                tuple[float, datetime, list[datetime], dict[datetime, float]]
+            ] = []
+            for li, top_off in enumerate(slots):
+                cap_top = caps[top_off.start]
+                by_price = sorted(slots[:li], key=slot_price)
+                fulls: list = []
+                covered = 0.0
+                i = 0
+                while deliverable - covered > cap_top + _EPS and i < len(by_price):
+                    fulls.append(by_price[i])
+                    covered += caps[by_price[i].start]
+                    i += 1
+                if deliverable - covered > cap_top + _EPS:
+                    continue  # this top-off can't hold the remainder
+                p_top = slot_price(top_off)
+                while i < len(by_price):
+                    s = by_price[i]
+                    i += 1
+                    if slot_price(s) >= p_top:
+                        break  # price-sorted → nothing cheaper follows
+                    if deliverable - covered - caps[s.start] <= _EPS:
+                        continue  # would leave no top-off remainder
+                    fulls.append(s)
+                    covered += caps[s.start]
+                variants.append(_variant(top_off, fulls))
+                # Contiguity candidate: the run of slots *immediately* before
+                # the top-off, just long enough that the remainder fits on it
+                # (valid when their clock hours chain up to the top-off).
+                if fulls:
+                    bfulls: list = []
+                    bcov = 0.0
+                    j = li - 1
+                    while j >= 0 and deliverable - bcov > cap_top + _EPS:
+                        bfulls.append(slots[j])
+                        bcov += caps[slots[j].start]
+                        j -= 1
+                    block = list(reversed(bfulls))
+                    if deliverable - bcov <= cap_top + _EPS and _contiguous(
+                        [s.start for s in block] + [top_off.start]
+                    ):
+                        variants.append(_variant(top_off, block))
             if not variants:
                 return {}
 
@@ -907,7 +962,7 @@ class Optimizer:
                 return cost <= best_cost + abs(best_cost) * pct / 100.0 + _EPS
 
             pool = variants
-            if ev_request.prefer_contiguous and needed > 1:
+            if ev_request.prefer_contiguous:
                 contiguous_pool = [
                     v
                     for v in variants
@@ -930,10 +985,7 @@ class Optimizer:
             else:
                 chosen = min(pool, key=lambda v: v[0])
 
-            _, top_off_start, full_starts = chosen
-            out = {start: charger_kw for start in full_starts}
-            out[top_off_start] = remainder
-            return out
+            return dict(chosen[3])
 
         def commit(chosen: dict[datetime, float]) -> None:
             for start, kwh in chosen.items():

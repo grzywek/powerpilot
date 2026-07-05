@@ -358,6 +358,36 @@ def test_targets_skipped_when_soc_sensor_unavailable() -> None:
     assert _optimizer()._plan_ev(fc, req) == {}
 
 
+def test_overlapping_targets_top_up_the_cheapest_hour() -> None:
+    # An earlier small target (a trip floor) takes a 2 kWh partial on the
+    # cheapest hour. The later, bigger target must be able to TOP UP that
+    # hour's remaining headroom instead of treating it as fenced off and
+    # scattering its block over pricier hours (the charger physically just
+    # runs at full power through the union of the chosen hours).
+    prices = [0.10, 0.50, 0.50, 0.60, 0.60, 0.60]
+    fc = _forecast(prices)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=10.0,
+        battery_kwh=100.0,
+        current_soc=0.0,
+        available_hours={s.start for s in fc.slots},
+        targets=[
+            # 2 kWh by h2 → 2 kWh partial lands on h0 (cheapest).
+            EVChargeTarget(deadline=BASE + timedelta(hours=2), target_soc=2.0),
+            # 12 kWh total by h6 → 10 more; h0 still has 8 kWh headroom.
+            EVChargeTarget(deadline=BASE + timedelta(hours=6), target_soc=12.0),
+        ],
+    )
+    alloc = _hours(_optimizer()._plan_ev(fc, req))
+    assert round(sum(alloc.values()), 3) == 12.0
+    # h0 is filled to full power (2 + 8), only 2 kWh spill to the next-cheapest
+    # hour — not a 10 kWh block on the expensive hours.
+    assert alloc[0] == 10.0
+    assert round(alloc[1], 3) == 2.0
+    assert set(alloc) == {0, 1}
+
+
 def test_forced_window_respects_charge_ceiling() -> None:
     # 60 kWh pack at 83 %, active ceiling 95 % → only 7.2 kWh may be bought,
     # even though three manual calendar hours are present.

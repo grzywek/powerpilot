@@ -102,7 +102,7 @@ _CHARGE_PRICE_BUCKET = Decimal("0.01")
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # full-power-block allocator or a stale import.
-EV_ALLOCATOR_VERSION = "trip-drain-aware-2026-07"
+EV_ALLOCATOR_VERSION = "full-price-ceiling-2026-07"
 
 
 def _charge_order_price(price: float) -> float:
@@ -580,6 +580,13 @@ class Optimizer:
         # otherwise the line stays blank.
         ev_battery_kwh = ev_request.battery_kwh if ev_request else 0.0
         ev_drain = ev_request.drain_kwh if ev_request else {}
+        # The projected EV SoC can never exceed the active charge ceiling — the
+        # car's BMS stops there, so a line climbing past it would be fiction.
+        ev_ceiling_kwh = (
+            max(0.0, min(100.0, ev_request.charge_ceiling_soc)) / 100.0 * ev_battery_kwh
+            if ev_request is not None and ev_request.charge_ceiling_soc is not None
+            else ev_battery_kwh
+        )
         ev_soc_kwh: float | None = (
             ev_request.current_soc / 100.0 * ev_battery_kwh
             if ev_request is not None
@@ -637,7 +644,7 @@ class Optimizer:
             decision.ev_charge_kwh = ev
             if ev_soc_kwh is not None:
                 drain = ev_drain.get(slot.start, 0.0)
-                ev_soc_kwh = min(ev_battery_kwh, max(0.0, ev_soc_kwh + ev - drain))
+                ev_soc_kwh = min(ev_ceiling_kwh, max(0.0, ev_soc_kwh + ev - drain))
                 decision.ev_soc = round(ev_soc_kwh / ev_battery_kwh * 100.0, 1)
             decision.charge_power = (
                 ChargePower.LIMITED if ev > 0 else ChargePower.FULL
@@ -753,7 +760,8 @@ class Optimizer:
         and keep the globally cheapest combination. This is what stops the plan
         from e.g. wasting a whole expensive hour just to shave a few minutes.
 
-        Three layers, never exceeding the pack's room to 100 %:
+        Three layers, never exceeding the request's SoC ceiling
+        (``charge_ceiling_soc`` — the car is steered to stop there):
 
         1. **Forced windows** — bare ``"<keyword>"`` calendar events: charge full
            power in exactly those hours (user's explicit choice, not cost-driven).
@@ -763,9 +771,10 @@ class Optimizer:
            to the target SoC.
 
         Predicted trip drain (``EVRequest.drain_kwh``) is folded in on both
-        sides: deadline targets buy extra to cover driving that happens before
-        the deadline, and the room-to-100 % cap credits energy the trips take
-        back out of the pack.
+        sides: deadline targets buy extra to cover driving the car can still
+        recharge after (never the leg driven off after the last chargeable
+        hour), and the room-to-ceiling cap credits energy the trips take back
+        out of the pack.
         """
         if ev_request is None or not ev_request.is_actionable:
             return {}
@@ -773,8 +782,34 @@ class Optimizer:
         slots_by_start = {
             s.start: s for s in forecast.slots if s.buy_price is not None
         }
+
+        def slot_price(slot) -> float:
+            """Per-kWh price the EV actually pays in a slot.
+
+            The charger is grid-fed, so it pays the FULL price — energy plus
+            distribution — the same composition the battery LP optimises on.
+            Ordering by ``buy_price`` alone picked hours that looked cheap on
+            the energy component but were expensive once the TOU distribution
+            band was added. Bucketed to the displayed grosz (like the battery
+            charge order) so sub-grosz noise can't reshuffle equal-looking
+            hours between planning cycles; sorts are stable, so grosz ties
+            stay chronological.
+            """
+            return _charge_order_price(
+                slot.buy_price + (slot.distribution_price_kwh or 0.0)
+            )
+
         charger_kw = max(ev_request.charger_power_kw, 0.1)
         battery_kwh = max(ev_request.battery_kwh, 0.0)
+        # Highest SoC the planner may intentionally buy to. The car/charger is
+        # steered off ``soc_limit_now`` and stops there, so energy planned past
+        # the ceiling is undeliverable by construction.
+        ceiling_kwh = (
+            max(0.0, min(100.0, ev_request.charge_ceiling_soc)) / 100.0 * battery_kwh
+            if ev_request.charge_ceiling_soc is not None and battery_kwh > 0
+            else (battery_kwh if battery_kwh > 0 else float("inf"))
+        )
+        soc_known = ev_request.current_soc is not None
         soc0_kwh = (
             max(0.0, (ev_request.current_soc or 0.0) / 100.0 * battery_kwh)
             if battery_kwh
@@ -784,7 +819,7 @@ class Optimizer:
         allocation: dict[datetime, float] = {}
 
         def capacity_left() -> float:
-            """Room to 100 % including predicted trip drain over the horizon.
+            """Room to the SoC ceiling including predicted trip drain.
 
             Drain frees room in the pack (the car returns from a trip lower
             than it left), so the routine top-up after a trip may buy the trip
@@ -795,7 +830,7 @@ class Optimizer:
                 return float("inf")
             drained = sum(ev_request.drain_kwh.values())
             return max(
-                0.0, battery_kwh - soc0_kwh + drained - sum(allocation.values())
+                0.0, ceiling_kwh - soc0_kwh + drained - sum(allocation.values())
             )
 
         def select(
@@ -844,12 +879,12 @@ class Optimizer:
             variants: list[tuple[float, datetime, list[datetime]]] = []
             for li in range(needed - 1, len(slots)):
                 top_off = slots[li]
-                fulls = sorted(slots[:li], key=lambda s: s.buy_price)[: needed - 1]
+                fulls = sorted(slots[:li], key=slot_price)[: needed - 1]
                 if len(fulls) < needed - 1:
                     continue
                 cost = (
-                    charger_kw * sum(s.buy_price for s in fulls)
-                    + remainder * top_off.buy_price
+                    charger_kw * sum(slot_price(s) for s in fulls)
+                    + remainder * slot_price(top_off)
                 )
                 variants.append((cost, top_off.start, [s.start for s in fulls]))
                 if needed > 1:
@@ -857,8 +892,8 @@ class Optimizer:
                     block_starts = [s.start for s in block] + [top_off.start]
                     if _contiguous(block_starts):
                         bcost = (
-                            charger_kw * sum(s.buy_price for s in block)
-                            + remainder * top_off.buy_price
+                            charger_kw * sum(slot_price(s) for s in block)
+                            + remainder * slot_price(top_off)
                         )
                         variants.append((bcost, top_off.start, [s.start for s in block]))
             if not variants:
@@ -905,7 +940,7 @@ class Optimizer:
                 allocation[start] = allocation.get(start, 0.0) + kwh
 
         # 1. Forced windows: full power in the user's chosen hours, chronological
-        #    cap (the car can't take more than its room to 100 %).
+        #    cap (the car can't take more than its room to the SoC ceiling).
         for start in sorted(ev_request.forced_hours):
             if start not in ev_request.available_hours or start not in slots_by_start:
                 continue
@@ -915,8 +950,14 @@ class Optimizer:
             allocation[start] = take
 
         # 2. Deadline targets, earliest deadline first. Predicted trip drain
-        #    before a deadline lowers what's in the pack when it arrives, so the
-        #    allocator has to buy that much more to still hit the target.
+        #    lowers what's in the pack, so the allocator buys that much more to
+        #    still hit the target — but only drain the car can charge *after*:
+        #    energy driven off past the last chargeable hour (the outbound leg
+        #    right before a trip deadline) cannot be bought back in time, and
+        #    crediting it overfilled the pack past its ceiling at departure.
+        #    Sizing a % deficit needs the live SoC; when the sensor is asleep
+        #    the targets are skipped rather than seeded from a fabricated 0 %
+        #    (which used to swing the plan by half a pack between cycles).
         def drain_before(moment: datetime) -> float:
             return sum(
                 kwh
@@ -924,23 +965,38 @@ class Optimizer:
                 if start < moment
             )
 
-        for target in sorted(ev_request.targets, key=lambda t: t.deadline):
-            target_kwh = (
-                target.target_soc / 100.0 * battery_kwh if battery_kwh else 0.0
+        targets = sorted(ev_request.targets, key=lambda t: t.deadline)
+        if targets and not soc_known and battery_kwh > 0:
+            _LOGGER.warning(
+                "EV: SoC niedostępny — cele procentowe pominięte w tym cyklu "
+                "(nie da się policzyć deficytu bez stanu naładowania)."
             )
-            before = (
-                soc0_kwh
-                - drain_before(target.deadline)
-                + sum(
-                    kwh for start, kwh in allocation.items() if start < target.deadline
-                )
+            targets = []
+        for target in targets:
+            target_kwh = (
+                min(target.target_soc / 100.0 * battery_kwh, ceiling_kwh)
+                if battery_kwh
+                else 0.0
             )
             candidates = [
                 slot
                 for start, slot in slots_by_start.items()
                 if start < target.deadline and start in ev_request.available_hours
             ]
-            room_at_deadline = max(0.0, battery_kwh - before) if battery_kwh else None
+            last_charge_end = (
+                max(s.start for s in candidates) + timedelta(hours=1)
+                if candidates
+                else target.deadline
+            )
+            compensable = min(last_charge_end, target.deadline)
+            before = (
+                soc0_kwh
+                - drain_before(compensable)
+                + sum(
+                    kwh for start, kwh in allocation.items() if start < target.deadline
+                )
+            )
+            room_at_deadline = max(0.0, ceiling_kwh - before) if battery_kwh else None
             commit(select(target_kwh - before, candidates, room=room_at_deadline))
 
         # 3. Default top-up (no calendar plan).

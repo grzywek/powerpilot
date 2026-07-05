@@ -273,6 +273,108 @@ def test_target_already_met_allocates_nothing() -> None:
     assert _optimizer()._plan_ev(fc, req) == {}
 
 
+def test_allocation_orders_by_full_price_not_energy_price() -> None:
+    # The EV pays energy + distribution. h0 looks cheapest on the energy
+    # component alone, but a TOU distribution band makes it the most expensive
+    # hour overall — the allocator must order by the FULL price (reproduces the
+    # "charged at 42 gr instead of 20 gr" incident: the picked hour looked
+    # cheap on buy_price only).
+    slots = []
+    for hour, (buy, dist) in enumerate([(0.10, 0.35), (0.20, 0.02), (0.25, 0.02)]):
+        slot = HourSlot(
+            start=BASE + timedelta(hours=hour),
+            buy_price=buy,
+            distribution_price_kwh=dist,
+        )
+        slots.append(slot)
+    fc = Forecast(slots=slots)
+    req = EVRequest(
+        enabled=True,
+        required_kwh=7.0,
+        charger_kw=7.0,
+        battery_kwh=60.0,
+        current_soc=50.0,
+        available_hours={s.start for s in fc.slots},
+    )
+    alloc = _hours(_optimizer()._plan_ev(fc, req))
+    # Full prices: h0 0.45, h1 0.22, h2 0.27 → the single needed hour is h1.
+    assert alloc == {1: 7.0}
+
+
+def test_target_ignores_uncompensable_outbound_drain() -> None:
+    # The reported incident: "Michał 95%" at the event start (h6) on a located
+    # event — the car departs at ~h5, so h5 is unavailable and the outbound leg
+    # drains during it. That drain can NEVER be recharged before the deadline
+    # (charging is over by then), so compensating it just bought phantom hours
+    # and pushed the pre-departure SoC past 100 %.
+    fc = _forecast([0.5] * 8)
+    depart_hour = BASE + timedelta(hours=5)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=10.5,
+        battery_kwh=60.0,
+        current_soc=83.0,
+        available_hours={s.start for s in fc.slots} - {depart_hour},
+        targets=[EVChargeTarget(deadline=BASE + timedelta(hours=6), target_soc=95.0)],
+        drain_kwh={depart_hour: 8.0},
+    )
+    alloc = _optimizer()._plan_ev(fc, req)
+    # Deficit is exactly 95% − 83% of 60 kWh = 7.2 kWh — not 7.2 + 8 outbound.
+    assert round(sum(alloc.values()), 3) == 7.2
+    assert all(start < depart_hour for start in alloc)
+
+
+def test_target_still_compensates_drain_before_charge_hours() -> None:
+    # Drain the car CAN recharge after (a commute before the evening deadline,
+    # with chargeable hours following it) must still be bought back in full.
+    fc = _forecast([0.5] * 10)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=10.0,
+        battery_kwh=60.0,
+        current_soc=50.0,
+        available_hours={s.start for s in fc.slots},
+        targets=[EVChargeTarget(deadline=BASE + timedelta(hours=9), target_soc=50.0)],
+        drain_kwh={BASE + timedelta(hours=2): 6.0},
+    )
+    alloc = _optimizer()._plan_ev(fc, req)
+    # At target already, but the 6 kWh commute must be recovered by h9.
+    assert round(sum(alloc.values()), 3) == 6.0
+
+
+def test_targets_skipped_when_soc_sensor_unavailable() -> None:
+    # A sleeping car reports no SoC. Sizing the deficit from a fabricated 0 %
+    # used to swing the plan by half a pack between cycles — without the live
+    # SoC the percent targets are skipped (and a reminder is surfaced).
+    fc = _forecast([0.5] * 6)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=7.0,
+        battery_kwh=60.0,
+        current_soc=None,
+        available_hours={s.start for s in fc.slots},
+        targets=[EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=95.0)],
+    )
+    assert _optimizer()._plan_ev(fc, req) == {}
+
+
+def test_forced_window_respects_charge_ceiling() -> None:
+    # 60 kWh pack at 83 %, active ceiling 95 % → only 7.2 kWh may be bought,
+    # even though three manual calendar hours are present.
+    fc = _forecast([0.8] * 4)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=7.0,
+        battery_kwh=60.0,
+        current_soc=83.0,
+        charge_ceiling_soc=95.0,
+        available_hours={s.start for s in fc.slots},
+        forced_hours={BASE + timedelta(hours=h) for h in (0, 1, 2)},
+    )
+    alloc = _optimizer()._plan_ev(fc, req)
+    assert round(sum(alloc.values()), 3) == 7.2
+
+
 # ---------------------------------------------------------------------------
 # Allocator: default top-up (no calendar)
 # ---------------------------------------------------------------------------
@@ -722,10 +824,12 @@ def test_get_request_passes_phases() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_soc_limit_forced_window_is_unlimited() -> None:
+def test_soc_limit_forced_window_keeps_active_ceiling() -> None:
+    # A bare calendar window chooses *when* to charge, not permission to blow
+    # past the SoC limit — the car is steered to stop at the active ceiling.
     now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
-    module = _module_with_state(forced_hours={now_hour})
-    assert module.soc_limit_now() == 100.0
+    module = _module_with_state(forced_hours={now_hour}, target_soc=95.0)
+    assert module.soc_limit_now() == 95.0
 
 
 def test_soc_limit_uses_next_target() -> None:
@@ -948,6 +1052,25 @@ def test_plan_ev_soc_line_subtracts_trip_drain() -> None:
     socs = [d.ev_soc for d in plan.decisions]
     # 50% → 40% → 30% (6 kWh = 10% of 60 kWh per drained hour), then flat.
     assert socs == [50.0, 40.0, 30.0, 30.0]
+
+
+def test_plan_ev_soc_line_respects_charge_ceiling() -> None:
+    # The projected EV SoC line must stop at the active limit (the car's BMS
+    # is steered to stop there) — it used to climb to 100 % past a 95 % limit.
+    fc = _forecast([0.5] * 3)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=10.5,
+        battery_kwh=60.0,
+        current_soc=83.0,
+        charge_ceiling_soc=95.0,
+        available_hours={s.start for s in fc.slots},
+        forced_hours={BASE, BASE + timedelta(hours=1)},
+    )
+    battery = BatteryModel(capacity_kwh=10.0, soc=50.0)
+    plan = _optimizer().optimize(fc, battery, req)
+    assert all((d.ev_soc or 0.0) <= 95.0 for d in plan.decisions)
+    assert plan.decisions[-1].ev_soc == 95.0
 
 
 # ---------------------------------------------------------------------------

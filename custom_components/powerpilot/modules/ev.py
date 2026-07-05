@@ -12,7 +12,8 @@ the calendar module — which the registry updates *before* this one):
   12:00–13:00 means *"the EV must be at 100 % SoC by 12:00"*. The optimizer is
   free to pick the cheapest available hours before that deadline.
 * **Forced windows** — a bare calendar event ``"<keyword>"`` means *"charge at
-  full power for the event's hours"* (manual choice, no SoC limit).
+  full power in the event's hours"* (manual timing choice, still capped by the
+  active SoC target/limit — the car stops there anyway).
 * **Trips** — events with a non-home ``location``. The calendar module turns
   them into away windows (event span extended by Google-Maps travel time plus
   the configured margins): those hours are *unavailable* for charging, the
@@ -253,6 +254,10 @@ class EVRequest:
     drain_kwh: dict[datetime, float] = field(default_factory=dict)
     # Safety reserve (%) the plan should never dip the car below.
     min_soc: float = 0.0
+    # Highest SoC (%) the planner may buy up to — mirrors ``soc_limit_now``,
+    # the value automations push to the car, so the plan never schedules
+    # energy the charger will refuse to deliver. ``None`` → no ceiling.
+    charge_ceiling_soc: float | None = None
     # Placement preferences (see const.py CONF_EV_PREFER_*): trade a bounded
     # % of extra cost for an unbroken charging block / an earlier finish.
     prefer_contiguous: bool = False
@@ -779,6 +784,7 @@ class EVModule(PowerPilotModule):
             targets=[*self._targets, *self._trip_targets],
             drain_kwh=dict(self._trip_drain),
             min_soc=self.min_soc,
+            charge_ceiling_soc=self._charge_ceiling_soc(),
             prefer_contiguous=bool(self.config.get(CONF_EV_PREFER_CONTIGUOUS)),
             contiguous_max_extra_pct=float(
                 self.config.get(CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT, 15.0) or 0.0
@@ -803,6 +809,14 @@ class EVModule(PowerPilotModule):
         # away from home there's nothing the user can do about it right now.
         if need and self._home is not False and self._charging is False:
             reminders.append("Podłącz samochód — zaplanowane jest ładowanie EV.")
+        # Percent targets can't be sized without the live SoC (the allocator
+        # skips them rather than guessing) — the user should know why the plan
+        # is empty and can wake the car / fix the sensor.
+        if self._request.targets and self._request.current_soc is None:
+            reminders.append(
+                "SoC EV niedostępny — cele procentowe z kalendarza nie są "
+                "planowane, dopóki czujnik nie wróci."
+            )
         # Plan-vs-reality: a forced window is due this hour but the charger is
         # idle, or it's charging somewhere other than home (doesn't realize
         # the home charging plan the optimizer priced in).
@@ -873,9 +887,10 @@ class EVModule(PowerPilotModule):
             "enabled": self.enabled,
             "available": now_hour not in self._unavailable_hours,
             "home": self._home,
-            "soc": self._soc,
+            "soc": self.soc,
             "target_soc": self.target_soc,
             "soc_limit": self.soc_limit_now(),
+            "charge_ceiling_soc": self._charge_ceiling_soc(),
             "energy_added_kwh": self._energy_added,
             "charging": self._charging,
             "charger_power_kw": self.charger_power_kw,
@@ -958,6 +973,7 @@ class EVModule(PowerPilotModule):
             "available_to": avail[-1].isoformat() if avail else None,
             "forced_hours": [h.isoformat() for h in sorted(r.forced_hours)],
             "min_soc": r.min_soc,
+            "charge_ceiling_soc": r.charge_ceiling_soc,
             "drain_total_kwh": round(sum(r.drain_kwh.values()), 3),
             "drain_hours": {
                 h.isoformat(): round(kwh, 3) for h, kwh in sorted(r.drain_kwh.items())
@@ -973,29 +989,40 @@ class EVModule(PowerPilotModule):
             ],
         }
 
+    def _charge_ceiling_soc(self) -> float:
+        """Highest SoC (%) the plan may intentionally buy to.
+
+        Explicit keyword targets set the ceiling (the highest of them, so an
+        earlier smaller target can't cap a later bigger one). Otherwise the
+        integration's own target-SoC entity (or the built-in default) applies —
+        raised when an upcoming trip needs more (trip targets are a floor,
+        never a cap). A bare calendar window chooses *timing*, not permission
+        to exceed the active limit: the car stops at ``soc_limit_now`` anyway,
+        so planning past it only produced phantom charge hours.
+        """
+        base = self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
+        ceiling = (
+            max(t.target_soc for t in self._targets) if self._targets else base
+        )
+        if self._trip_targets:
+            ceiling = max(ceiling, max(t.target_soc for t in self._trip_targets))
+        return ceiling
+
     def soc_limit_now(self) -> float | None:
         """The SoC (%) the car should be allowed to charge to right now.
 
-        A bare calendar window means "charge with no limit" → 100 %. With
-        keyword deadline targets the soonest upcoming one sets the ceiling.
-        Otherwise the integration's own target-SoC entity (or the built-in
-        default) applies — raised when an upcoming trip needs more than that
-        (trip targets are a floor, never a cap).
+        With keyword deadline targets the soonest upcoming one sets the
+        ceiling. Otherwise the integration's own target-SoC entity (or the
+        built-in default) applies — raised when an upcoming trip needs more
+        than that (trip targets are a floor, never a cap). A bare calendar
+        window is a timing choice and does not lift the limit to 100 %.
         """
         if not self.enabled:
             return None
-        now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
-        if now_hour in self._forced_hours:
-            return 100.0
         if self._targets:
             upcoming = sorted(self._targets, key=lambda t: t.deadline)
             return upcoming[0].target_soc
-        if self._forced_hours:
-            return 100.0
-        base = self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
-        if self._trip_targets:
-            base = max(base, max(t.target_soc for t in self._trip_targets))
-        return base
+        return self._charge_ceiling_soc()
 
     @property
     def charger_power_kw(self) -> float:
@@ -1006,7 +1033,14 @@ class EVModule(PowerPilotModule):
 
     @property
     def soc(self) -> float | None:
-        return self._soc
+        """Live EV SoC (%), read straight from the sensor.
+
+        The coordinator only refreshes on the hour, so the value cached at the
+        last cycle (``_soc``, used for plan consistency within a cycle) can lag
+        the car by most of an hour — the panel's "realne" column and the
+        control surface need the current reading, not the planning snapshot.
+        """
+        return self._read_float(self.config.get(CONF_EV_SOC_SENSOR))
 
     @property
     def home(self) -> bool | None:

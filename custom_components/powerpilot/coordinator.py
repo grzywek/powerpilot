@@ -2162,15 +2162,35 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if pin_requested:
             trips = list((pin_rec or {}).get("trips") or [])
         else:
-            merged: dict[tuple, dict] = {
-                (t.get("label"), t.get("event_start")): t
-                for t in sn.trips_overlapping(
-                    past_start, series_end, started_at_or_before=real_now
-                )
-            }
-            for t in self.ev.trips_payload():
-                merged[(t.get("label"), t.get("event_start"))] = t
-            trips = sorted(merged.values(), key=lambda t: t.get("depart") or "")
+            live = self.ev.trips_payload()
+
+            def _window(t: dict) -> tuple[datetime, datetime] | None:
+                depart = dt_util.parse_datetime(t.get("depart") or "")
+                ret = dt_util.parse_datetime(t.get("return_end") or "")
+                return (depart, ret) if depart and ret else None
+
+            live_windows = [w for w in map(_window, live) if w]
+
+            def _clashes_with_live(t: dict) -> bool:
+                w = _window(t)
+                if w is None:
+                    return True  # unparseable history row — cannot place it
+                return any(w[0] < ret and w[1] > dep for dep, ret in live_windows)
+
+            # The live calendar is the current truth wherever it says anything:
+            # a harvested trip overlapping a live one is either the same event
+            # (already in ``live``) or its stale pre-edit copy — drop it.
+            trips = sorted(
+                [
+                    t
+                    for t in sn.trips_overlapping(
+                        past_start, series_end, started_at_or_before=real_now
+                    )
+                    if not _clashes_with_live(t)
+                ]
+                + live,
+                key=lambda t: t.get("depart") or "",
+            )
 
         # Pinned-vintage metadata: when the prognoza is pinned (lead N or an
         # exact run_at) the panel marks the span that plan actually covered —

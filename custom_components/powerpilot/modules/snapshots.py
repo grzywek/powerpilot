@@ -173,27 +173,48 @@ class SnapshotStore:
     ) -> list[dict]:
         """Trips recorded in any vintage whose away window overlaps [start, end).
 
-        Deduplicated by (label, event_start); the newest vintage's version of a
-        trip wins (its travel model is the most refined). This is how the chart
-        keeps showing past events after they were removed from the calendar —
-        the vintages that planned around them still remember them.
+        Deduplicated by away-window overlap: a newer vintage's view of any
+        overlapping span replaces older-vintage trips there (one car cannot be
+        on two overlapping trips), so editing an event's hour or title does not
+        leave the pre-edit copy behind. Trips *within* one vintage never
+        suppress each other — nested events (a leg inside a multi-day trip)
+        legitimately overlap. Past events removed from the calendar still stay
+        visible: no newer overlapping trip arrives to displace them.
 
         ``started_at_or_before`` lets the live chart keep only trip history whose
         away window has already begun. Future trips must come from the current
         calendar read, otherwise an edited calendar event leaves its old future
         time behind as a ghost from older snapshots.
         """
-        out: dict[tuple, dict] = {}
-        for key in sorted(self._records):  # oldest → newest; newer overwrite
+        out: list[tuple[datetime, datetime, dict]] = []
+        for key in sorted(self._records):  # oldest → newest
+            # Everything this vintage knew inside the window — including trips
+            # the ``started_at_or_before`` filter keeps off the chart — must
+            # suppress older overlapping copies, or an event edited to a later,
+            # not-yet-started hour keeps its old copy visible until it starts.
+            known: list[tuple[datetime, datetime]] = []
+            shown: list[tuple[datetime, datetime, dict]] = []
             for trip in self._records[key].get("trips") or []:
                 depart = dt_util.parse_datetime(trip.get("depart") or "")
                 ret = dt_util.parse_datetime(trip.get("return_end") or "")
                 if depart is None or ret is None or ret <= start or depart >= end:
                     continue
+                known.append((depart, ret))
                 if started_at_or_before is not None and depart > started_at_or_before:
                     continue
-                out[(trip.get("label"), trip.get("event_start"))] = trip
-        return list(out.values())
+                shown.append((depart, ret, trip))
+            if not known:
+                continue
+            out = [
+                entry
+                for entry in out
+                if not any(
+                    entry[0] < k_ret and entry[1] > k_dep for k_dep, k_ret in known
+                )
+            ]
+            out.extend(shown)
+        out.sort(key=lambda entry: entry[0])
+        return [trip for _, _, trip in out]
 
     def prune(self) -> None:
         cutoff = dt_util.utcnow() - timedelta(days=_SNAPSHOT_RETENTION_DAYS)

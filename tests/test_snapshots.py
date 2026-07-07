@@ -161,6 +161,86 @@ def test_trip_history_cutoff_drops_future_ghost_events() -> None:
     assert [t["label"] for t in live_history] == ["past"]
 
 
+def test_trip_edit_newer_vintage_replaces_overlapping_copy() -> None:
+    """Editing an event's hour/title must not leave the pre-edit ghost behind."""
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    old = _rec(base - timedelta(hours=3))
+    old["trips"] = [_trip("Wyjazd", base - timedelta(hours=2), base + timedelta(hours=1))]
+    store.add(old)
+
+    # The same event, retitled and moved an hour later (windows overlap).
+    fresh = _rec(base)
+    fresh["trips"] = [
+        _trip("Wyjazd (nowa nazwa)", base - timedelta(hours=1), base + timedelta(hours=2))
+    ]
+    store.add(fresh)
+
+    trips = store.trips_overlapping(
+        base - timedelta(hours=6), base + timedelta(hours=6), started_at_or_before=base
+    )
+    assert [t["label"] for t in trips] == ["Wyjazd (nowa nazwa)"]
+
+
+def test_trip_edited_to_unstarted_hour_still_suppresses_old_copy() -> None:
+    """A trip moved to a later, not-yet-started hour suppresses its old copy even
+    though the new copy itself is filtered out of the harvested history (the live
+    calendar supplies it instead)."""
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    old = _rec(base - timedelta(hours=3))
+    old["trips"] = [_trip("Wyjazd", base - timedelta(hours=2), base + timedelta(hours=2))]
+    store.add(old)
+
+    fresh = _rec(base)
+    fresh["trips"] = [_trip("Wyjazd", base + timedelta(hours=1), base + timedelta(hours=4))]
+    store.add(fresh)
+
+    trips = store.trips_overlapping(
+        base - timedelta(hours=6), base + timedelta(hours=6), started_at_or_before=base
+    )
+    assert trips == []
+
+
+def test_trip_removed_from_calendar_stays_in_history() -> None:
+    """A newer vintage with no overlapping trip must not erase past history."""
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    old = _rec(base - timedelta(hours=3))
+    old["trips"] = [_trip("Usunięty", base - timedelta(hours=2), base - timedelta(hours=1))]
+    store.add(old)
+
+    fresh = _rec(base)
+    fresh["trips"] = []
+    store.add(fresh)
+
+    trips = store.trips_overlapping(
+        base - timedelta(hours=6), base + timedelta(hours=6), started_at_or_before=base
+    )
+    assert [t["label"] for t in trips] == ["Usunięty"]
+
+
+def test_nested_trips_within_one_vintage_both_kept() -> None:
+    """A leg inside a multi-day trip legitimately overlaps its parent."""
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    rec = _rec(base)
+    rec["trips"] = [
+        _trip("Parent", base - timedelta(hours=5), base - timedelta(hours=1)),
+        _trip("Leg", base - timedelta(hours=4), base - timedelta(hours=3)),
+    ]
+    store.add(rec)
+
+    trips = store.trips_overlapping(
+        base - timedelta(hours=6), base + timedelta(hours=6), started_at_or_before=base
+    )
+    assert sorted(t["label"] for t in trips) == ["Leg", "Parent"]
+
+
 def test_serialisation_roundtrip() -> None:
     store = SnapshotStore()
     base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)

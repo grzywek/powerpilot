@@ -574,13 +574,15 @@ export class PowerPilotPanel extends LitElement {
 
   /** Compute the start/end of the current window.
    *
-   * The window always starts at **local midnight** of the selected day and
-   * spans whole days: 24h = one day, 3d = three days, 7d = a week. `_anchor`
-   * holds that start day; `null` means "today" (live). The selected date is
+   * The window starts at the selected anchor — local midnight when picked from
+   * the date field, and possibly noon after « / » stepping (they move in 12 h
+   * half-days) — and spans 24h / 3d / 7d from there. `_anchor` holds that
+   * start; `null` means "today from midnight" (live). The selected moment is
    * therefore always the left edge of the chart. */
   private _computeWindow(): { start: Date; end: Date; pastHours: number } {
     const hours = RANGE_HOURS[this._rangeMode];
-    const start = this._midnight(this._anchor ?? new Date());
+    const start = this._anchor ? new Date(this._anchor) : this._midnight(new Date());
+    start.setMinutes(0, 0, 0);
     const end = new Date(start.getTime() + hours * 3600 * 1000);
     return { start, end, pastHours: hours };
   }
@@ -629,11 +631,12 @@ export class PowerPilotPanel extends LitElement {
     this._refresh();
   }
 
-  /** Move the selected day by ±1 (the « / » buttons). Picking today or later
-   *  returns to live mode. */
+  /** Move the window start by ±12 h (the « / » buttons) — half-day hops make
+   *  it easy to visualise the chart sliding. Reaching today (or later) returns
+   *  to live mode. */
   private _shiftDay(delta: number): void {
-    const base = this._midnight(this._anchor ?? new Date());
-    base.setDate(base.getDate() + delta);
+    const base = new Date(this._anchor ?? this._midnight(new Date()));
+    base.setHours(base.getHours() + delta * 12, 0, 0, 0);
     this._anchor = base.getTime() >= this._midnight(new Date()).getTime() ? null : base;
     this._refresh();
   }
@@ -672,15 +675,67 @@ export class PowerPilotPanel extends LitElement {
     if (isNaN(picked.getTime())) return;
     picked.setMinutes(0, 0, 0); // vintages are hourly
     this._forecastRunAt = picked.toISOString();
+    this._ensurePinVisible(picked);
     this._refresh();
   }
 
-  /** The exact-pin input value ("YYYY-MM-DDTHH:00") for the current state. */
+  /** The datetime the prognoza is effectively pinned to: the explicit pick, or
+   *  the vintage the backend resolved a lead preset (−3h, −6h…) to. Null when
+   *  nothing is pinned ("ostatnia" = freshest plan per hour). */
+  private _effectivePinDate(): Date | null {
+    const iso = this._forecastRunAt ?? this._series?.forecast_pin?.run_at ?? null;
+    if (!iso) return null;
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  /** Step the prognoza pin ±1 h (the ‹ / › buttons). Starts from the effective
+   *  pin (explicit or preset-resolved), or from the current hour when nothing
+   *  is pinned yet. Clamped to the current hour — there are no future plans. */
+  private _shiftForecastPin(deltaHours: number): void {
+    const base = this._effectivePinDate() ?? new Date();
+    base.setMinutes(0, 0, 0);
+    base.setHours(base.getHours() + deltaHours);
+    const nowHour = new Date();
+    nowHour.setMinutes(0, 0, 0);
+    if (base.getTime() > nowHour.getTime()) base.setTime(nowHour.getTime());
+    this._forecastRunAt = base.toISOString();
+    this._ensurePinVisible(base);
+    this._refresh();
+  }
+
+  /** A pin outside the visible window would change nothing on screen — jump
+   *  the window (half-day aligned, matching the « / » stepping) so the pinned
+   *  moment and its coverage band are in view. */
+  private _ensurePinVisible(pin: Date): void {
+    const { start, end } = this._computeWindow();
+    if (pin.getTime() >= start.getTime() && pin.getTime() < end.getTime()) return;
+    const base = this._midnight(pin);
+    if (pin.getHours() >= 12) base.setHours(12);
+    this._anchor =
+      base.getTime() >= this._midnight(new Date()).getTime() ? null : base;
+  }
+
+  /** The exact-pin input value ("YYYY-MM-DDTHH:00") for the current state.
+   *  A lead preset shows the vintage it resolved to, so the field always
+   *  carries the hour the shown prognoza was made at. */
   private _forecastPinInputValue(): string {
-    if (!this._forecastRunAt) return "";
-    const d = new Date(this._forecastRunAt);
+    const d = this._effectivePinDate();
+    if (!d) return "";
     const pad = (n: number) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`;
+  }
+
+  /** date / datetime-local inputs only open their native picker from the tiny
+   *  calendar icon — open it from a click anywhere in the field instead. */
+  private _openPicker(ev: Event): void {
+    const input = ev.currentTarget as HTMLInputElement & { showPicker?: () => void };
+    try {
+      input.showPicker?.();
+    } catch {
+      // Not allowed outside a user gesture / unsupported browser — the icon
+      // and keyboard entry still work.
+    }
   }
 
   private async _loadForecasts(): Promise<void> {
@@ -997,15 +1052,16 @@ export class PowerPilotPanel extends LitElement {
     return html`
       <div class="card nav-card">
         <div class="nav-row">
-          <button class="nav-btn" @click=${() => this._shiftDay(-1)} title="Poprzedni dzień">«</button>
+          <button class="nav-btn" @click=${() => this._shiftDay(-1)} title="−12 h">«</button>
           <input
             type="date"
             class="nav-date"
             .value=${dayValue}
             max=${todayMax}
+            @click=${this._openPicker}
             @change=${this._onDatePick}
           />
-          <button class="nav-btn" @click=${() => this._shiftDay(1)} title="Następny dzień">»</button>
+          <button class="nav-btn" @click=${() => this._shiftDay(1)} title="+12 h">»</button>
           <button class="nav-btn ${isLive ? "active" : ""}" @click=${this._goLive} title="Na żywo">● teraz</button>
           <div class="nav-spacer"></div>
           ${(["24h", "3d", "7d"] as RangeMode[]).map(
@@ -1034,14 +1090,29 @@ export class PowerPilotPanel extends LitElement {
               </button>
             `
           )}
+          <button
+            class="nav-btn"
+            @click=${() => this._shiftForecastPin(-1)}
+            title="Prognoza godzinę wcześniej"
+          >
+            ‹
+          </button>
           <input
             type="datetime-local"
             class="nav-date ${this._forecastRunAt ? "active" : ""}"
             step="3600"
             .value=${this._forecastPinInputValue()}
+            @click=${this._openPicker}
             @change=${this._onForecastPinPick}
             title="Pokaż prognozę obowiązującą o wskazanej godzinie (na wykresie zaznaczony jej zakres)"
           />
+          <button
+            class="nav-btn"
+            @click=${() => this._shiftForecastPin(1)}
+            title="Prognoza godzinę później"
+          >
+            ›
+          </button>
           ${this._forecastRunAt
             ? html`<button
                 class="nav-btn"
@@ -1056,8 +1127,11 @@ export class PowerPilotPanel extends LitElement {
             : nothing}
         </div>
         <div class="nav-info">
-          Okno: <strong>${fmtDay(start)}</strong> →
-          <strong>${fmtDay(lastDay)}</strong>
+          Okno:
+          ${start.getHours() === 0
+            ? html`<strong>${fmtDay(start)}</strong> → <strong>${fmtDay(lastDay)}</strong>`
+            : html`<strong>${fmtDay(start)} ${pad(start.getHours())}:00</strong> →
+                <strong>${fmtDay(end)} ${pad(end.getHours())}:00</strong>`}
           ${isLive
             ? html`<span class="muted"> · tryb live</span>`
             : html`<span class="muted"> · wybrany dzień</span>`}
@@ -1974,17 +2048,22 @@ export class PowerPilotPanel extends LitElement {
     const gridCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].hour_cost) }));
     const batUseCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].battery_use_cost) }));
 
+    const dark = this._isDark();
     const series: any[] = [
       { name: "Cena pełna", type: "line", data: priceData, color: "#facc15" },
-      // Teal, not gray — the gray dashed line disappeared against the blue
-      // battery-cost columns it usually overlaps.
-      { name: "Cena w baterii", type: "line", data: batCostData, color: "#14b8a6" },
+      // Near-black (near-white in dark mode) — teal read as "blue" and sank
+      // into the blue battery-cost columns it usually overlaps.
+      {
+        name: "Cena w baterii",
+        type: "line",
+        data: batCostData,
+        color: dark ? "#e5e7eb" : "#111827",
+      },
       { name: "Koszt energii - sieć", type: "column", data: gridCostData, color: "#e67e22" },
       { name: "Koszt energii - bateria", type: "column", data: batUseCostData, color: "#3b82f6" },
     ];
 
     const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
-    const dark = this._isDark();
     const nowColor = dark ? "#ffffff" : "#333333";
     return {
       chart: {
@@ -2188,6 +2267,7 @@ export class PowerPilotPanel extends LitElement {
           type="date"
           class="nav-date"
           .value=${selectedDay}
+          @click=${this._openPicker}
           @change=${this._onPricesDatePick}
         />
         <button class="nav-btn" @click=${() => this._shiftPricesDay(1)} title="Następny dzień">»</button>

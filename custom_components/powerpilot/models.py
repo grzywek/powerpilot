@@ -76,7 +76,6 @@ class Decision:
     start: datetime
     inverter_mode: str = InverterMode.PASSTHROUGH
     charge_power: str = ChargePower.FULL
-    grid_connected: bool = True
     ev_charge: bool = False
     ev_charge_kwh: float = 0.0
     # Projected EV state-of-charge (%) at the end of the hour. ``None`` when the
@@ -124,7 +123,6 @@ class Decision:
             "start": self.start.isoformat(),
             "inverter_mode": self.inverter_mode,
             "charge_power": self.charge_power,
-            "grid_connected": self.grid_connected,
             "ev_charge": self.ev_charge,
             "ev_charge_kwh": round(self.ev_charge_kwh, 3),
             "ev_soc": round(self.ev_soc, 1) if self.ev_soc is not None else None,
@@ -155,7 +153,6 @@ class Decision:
             start=datetime.fromisoformat(data["start"]),
             inverter_mode=data.get("inverter_mode", InverterMode.PASSTHROUGH),
             charge_power=data.get("charge_power", ChargePower.FULL),
-            grid_connected=bool(data.get("grid_connected", True)),
             ev_charge=bool(data.get("ev_charge", False)),
             ev_charge_kwh=float(data.get("ev_charge_kwh") or 0.0),
             ev_soc=data.get("ev_soc"),

@@ -34,7 +34,6 @@ from .const import (
     CONF_DISCHARGE_EFFICIENCY,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_PRESENCE_ENTITIES,
-    CONF_GRID_DISCONNECT_SOC,
     CONF_GRID_VOLTAGE,
     CONF_INVERTER_MAX_CHARGE_KW,
     CONF_MIN_CHARGE_POWER_KW,
@@ -341,7 +340,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             OptimizerConfig(
                 inverter_max_charge_kw=float(self.config[CONF_INVERTER_MAX_CHARGE_KW]),
                 inverter_max_discharge_kw=float(self.config[CONF_INVERTER_MAX_DISCHARGE_KW]),
-                grid_disconnect_soc=float(self.config[CONF_GRID_DISCONNECT_SOC]),
                 charge_curve=curve,
                 connection_power_kw=connection_power_kw,
                 # Single-phase headroom for battery-charging alongside the EV.

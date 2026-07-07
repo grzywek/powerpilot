@@ -50,7 +50,6 @@ def _config(min_charge: float) -> OptimizerConfig:
     return OptimizerConfig(
         inverter_max_charge_kw=3.0,
         inverter_max_discharge_kw=3.0,
-        grid_disconnect_soc=15.0,
         charge_curve=ChargeCurve(default_kw=3.0),
         # High terminal value makes topping up the last sliver worthwhile.
         terminal_price=2.0,

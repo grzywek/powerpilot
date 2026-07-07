@@ -33,7 +33,6 @@ CONF_DISCHARGE_EFFICIENCY: Final = "discharge_efficiency"  # 0..1
 CONF_BATTERY_WEAR_COST: Final = "battery_wear_cost"  # PLN per kWh throughput
 CONF_MIN_SOC: Final = "min_soc"  # %
 CONF_MAX_SOC: Final = "max_soc"  # %
-CONF_GRID_DISCONNECT_SOC: Final = "grid_disconnect_soc"  # %
 # Charge curve: list of {"soc_from", "soc_to", "max_kw"} segments.
 CONF_CHARGE_CURVE: Final = "charge_curve"
 # Power-dependent charge efficiency: list of {"kw", "eff"} points (eff is a
@@ -244,7 +243,6 @@ DEFAULTS: Final = {
     CONF_BATTERY_WEAR_COST: 0.10,
     CONF_MIN_SOC: 10,
     CONF_MAX_SOC: 100,
-    CONF_GRID_DISCONNECT_SOC: 15,
     CONF_PRICE_SOURCE: PRICE_SOURCE_SENSOR,
     CONF_PRICE_MARKUP: 0.0,
     CONF_PRICE_VAT: 1.0,
@@ -320,7 +318,9 @@ SENSOR_CHARGE_POWER: Final = "charge_power"
 SENSOR_BATTERY_ENERGY_COST: Final = "battery_energy_cost"
 SENSOR_PLAN: Final = "plan"
 SENSOR_NEXT_ACTION: Final = "next_action"
-BINARY_GRID_CONNECTED: Final = "grid_connected"
+# When the ongoing-or-next planned charge / passthrough block starts — the
+# moment the ESS needs the grid (feed for a connect/disconnect automation).
+SENSOR_ESS_CHARGE_START: Final = "ess_charge_start"
 BINARY_EV_CHARGE: Final = "ev_charge"
 # EV control surface (the integration advises; an automation does the steering).
 SENSOR_EV_CHARGE_START: Final = "ev_charge_start"  # next planned charge start (timestamp)

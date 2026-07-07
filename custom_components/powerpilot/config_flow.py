@@ -45,7 +45,6 @@ from .const import (
     CONF_EV_PRESENCE_ENTITIES,
     CONF_EV_SOC_SENSOR,
     CONF_GMAPS_API_KEY,
-    CONF_GRID_DISCONNECT_SOC,
     CONF_GRID_IMPORT_SENSOR,
     CONF_INVERTER_MAX_CHARGE_KW,
     CONF_INVERTER_MAX_DISCHARGE_KW,
@@ -156,9 +155,6 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Required(CONF_MAX_SOC, default=d(CONF_MAX_SOC)): _NUMBER(
                 _NUM(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")
             ),
-            vol.Required(
-                CONF_GRID_DISCONNECT_SOC, default=d(CONF_GRID_DISCONNECT_SOC)
-            ): _NUMBER(_NUM(min=0, max=100, step=1, unit_of_measurement="%", mode="slider")),
             # Linked entities
             vol.Optional(CONF_SOC_SENSOR, default=d(CONF_SOC_SENSOR) or vol.UNDEFINED): _entity("sensor"),
             vol.Optional(

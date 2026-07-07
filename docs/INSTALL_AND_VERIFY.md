@@ -51,7 +51,7 @@ To realny dowód, że integracja „wstaje” i tworzy encje
   - `sensor.powerpilot_inverter_mode` (charge/discharge/passthrough)
   - `sensor.powerpilot_charge_power`, `sensor.powerpilot_battery_energy_cost`
   - `sensor.powerpilot_next_action`, `sensor.powerpilot_optimization_plan`
-  - `binary_sensor.powerpilot_grid_connected`, `binary_sensor.powerpilot_ev_charge`
+  - `sensor.powerpilot_ess_charge_or_passthrough_start`, `binary_sensor.powerpilot_ev_charge`
 - **Narzędzia deweloperskie → Stany** → wpisz `sensor.powerpilot_optimization_plan`
   i rozwiń atrybuty: zobaczysz `hours[]` (decyzje godzinowe), `forecast[]` (ceny,
   zużycie) oraz `price_archive_hours` / `consumption_base_profile`. Jeśli atrybuty

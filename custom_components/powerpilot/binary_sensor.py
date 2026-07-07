@@ -13,7 +13,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     BINARY_EV_CHARGE,
     BINARY_EV_CONNECT_CHARGER,
-    BINARY_GRID_CONNECTED,
     DOMAIN,
 )
 from .coordinator import PowerPilotCoordinator
@@ -26,26 +25,10 @@ async def async_setup_entry(
     coordinator: PowerPilotCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
         [
-            GridConnectedBinarySensor(coordinator, entry),
             EVChargeBinarySensor(coordinator, entry),
             EVConnectChargerBinarySensor(coordinator, entry),
         ]
     )
-
-
-class GridConnectedBinarySensor(PowerPilotEntity, BinarySensorEntity):
-    _attr_translation_key = BINARY_GRID_CONNECTED
-    _attr_icon = "mdi:transmission-tower-import"
-
-    def __init__(self, coordinator, entry) -> None:
-        super().__init__(coordinator, entry, BINARY_GRID_CONNECTED)
-
-    @property
-    def is_on(self) -> bool | None:
-        current = self.current_decision
-        if current:
-            return current.grid_connected
-        return None
 
 
 class EVChargeBinarySensor(PowerPilotEntity, BinarySensorEntity):

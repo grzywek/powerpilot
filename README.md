@@ -16,7 +16,7 @@ For every hour of the horizon (as far as price data reaches), PowerPilot decides
 |--------|--------|--------|
 | Inverter mode | charge / discharge / passthrough | `sensor.powerpilot_inverter_mode` |
 | Charge power | full / limited (limited while EV uses the shared phase) | `sensor.powerpilot_charge_power` |
-| Grid connected | on / off (off below the SoC floor) | `binary_sensor.powerpilot_grid_connected` |
+| ESS charge/passthrough start | timestamp of the ongoing-or-next hour needing the grid | `sensor.powerpilot_ess_charge_or_passthrough_start` |
 | EV charge | on / off | `binary_sensor.powerpilot_ev_charge` |
 | Battery energy cost | PLN/kWh after losses | `sensor.powerpilot_battery_energy_cost` |
 | Full plan (chart data) | per-hour forecast + decisions | `sensor.powerpilot_optimization_plan` |

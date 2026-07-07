@@ -62,7 +62,6 @@ def _config(**overrides) -> OptimizerConfig:
     kwargs = dict(
         inverter_max_charge_kw=3.0,
         inverter_max_discharge_kw=3.0,
-        grid_disconnect_soc=0.0,
         charge_curve=ChargeCurve(default_kw=3.0),
         terminal_price=2.0,  # high → filling the pack is always worthwhile
     )

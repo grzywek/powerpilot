@@ -104,7 +104,6 @@ Decision outputs per hour:
 |--------|------|---------|
 | `inverter_mode` | charge / discharge / passthrough | what the inverter should do |
 | `charge_power` | full / limited | limited when EV draws from the shared phase |
-| `grid_connected` | bool | false when SoC below the configured floor |
 | `ev_charge` | bool | whether to charge the EV this hour |
 | `reminders` | list | e.g. "plug in the car when you get home" |
 
@@ -137,7 +136,7 @@ custom_components/powerpilot/
   coordinator.py       DataUpdateCoordinator running the pipeline
   config_flow.py       config + options flow
   sensor.py            output + plan sensors
-  binary_sensor.py     grid_connected / ev_charge
+  binary_sensor.py     ev_charge / ev_connect_charger
   modules/
     base.py            PowerPilotModule + registry
     prices.py          dynamic-tariff price sources (confirmed > forecast)

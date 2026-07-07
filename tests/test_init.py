@@ -91,7 +91,7 @@ async def test_setup_creates_entities(hass: HomeAssistant) -> None:
         "sensor.powerpilot_charge_power",
         "sensor.powerpilot_battery_energy_cost",
         "sensor.powerpilot_optimization_plan",
-        "binary_sensor.powerpilot_grid_connected",
+        "sensor.powerpilot_ess_charge_or_passthrough_start",
         "binary_sensor.powerpilot_ev_charge",
     ):
         assert hass.states.get(entity_id) is not None, entity_id

@@ -131,7 +131,6 @@ class OptimizerConfig:
 
     inverter_max_charge_kw: float
     inverter_max_discharge_kw: float
-    grid_disconnect_soc: float
     charge_curve: ChargeCurve
     # Grid-side charge power floor (kW): each hour charges 0 *or* ≥ this. 0
     # disables it. Keeps the plan from forcing trivial sub-kW dribbles.
@@ -660,7 +659,6 @@ class Optimizer:
             decision.grid_buy_kwh = grid_buy
             decision.battery_soc = battery.soc
             decision.battery_energy_cost = battery.energy_cost
-            decision.grid_connected = battery.soc >= cfg.grid_disconnect_soc
             decision.energy_cost = grid_buy * energy_price[t]
             decision.distribution_cost = grid_buy * distribution[t]
             decision.hour_cost = decision.energy_cost + decision.distribution_cost

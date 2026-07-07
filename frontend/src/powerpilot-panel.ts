@@ -7,7 +7,6 @@ interface PlanHour {
   inverter_mode: string;
   charge_power: string;
   charge_power_kw: number;
-  grid_connected: boolean;
   ev_charge: boolean;
   ev_charge_kwh: number;
   battery_soc: number;
@@ -1001,7 +1000,6 @@ export class PowerPilotPanel extends LitElement {
           ${this._stat("Moc ładowania", (current.charge_power_kw ?? 0).toFixed(2) + " kW")}
           ${this._stat("SoC", current.battery_soc.toFixed(0) + " %")}
           ${this._stat("Cena w baterii", current.battery_energy_cost.toFixed(2))}
-          ${this._stat("Sieć", current.grid_connected ? "tak" : "nie")}
           ${this._stat("EV", current.ev_charge ? "ładuje" : "—")}
           ${this._stat("Koszt horyzontu", plan.total_cost.toFixed(2) + " PLN")}
         </div>

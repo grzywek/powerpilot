@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -19,11 +21,13 @@ from .const import (
     DOMAIN,
     SENSOR_BATTERY_ENERGY_COST,
     SENSOR_CHARGE_POWER,
+    SENSOR_ESS_CHARGE_START,
     SENSOR_EV_CHARGE_START,
     SENSOR_EV_SOC_LIMIT,
     SENSOR_INVERTER_MODE,
     SENSOR_NEXT_ACTION,
     SENSOR_PLAN,
+    InverterMode,
 )
 from .coordinator import PowerPilotCoordinator
 from .models import Plan
@@ -40,6 +44,7 @@ async def async_setup_entry(
             BatteryEnergyCostSensor(coordinator, entry),
             PlanSensor(coordinator, entry),
             NextActionSensor(coordinator, entry),
+            EssChargeStartSensor(coordinator, entry),
             EVChargeStartSensor(coordinator, entry),
             EVSocLimitSensor(coordinator, entry),
         ]
@@ -193,6 +198,40 @@ class NextActionSensor(PowerPilotEntity, SensorEntity):
         if not current:
             return {}
         return {"reminders": current.reminders}
+
+
+class EssChargeStartSensor(PowerPilotEntity, SensorEntity):
+    """When the ongoing-or-next planned charge/passthrough block starts.
+
+    The moment the ESS needs the grid: exposed as a timestamp so a user
+    automation can connect the grid ahead of it (and keep it disconnected
+    through pure battery-discharge stretches). While the current hour already
+    charges or passes through, the value is that hour's start — a value in the
+    past means "the grid should be connected right now".
+    """
+
+    _attr_translation_key = SENSOR_ESS_CHARGE_START
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:transmission-tower-import"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_ESS_CHARGE_START)
+
+    @property
+    def native_value(self):
+        plan = self.plan
+        if not plan:
+            return None
+        now = dt_util.now()
+        for decision in plan.decisions:
+            if decision.start + timedelta(hours=1) <= now:
+                continue  # hour already over
+            if decision.inverter_mode in (
+                InverterMode.CHARGE,
+                InverterMode.PASSTHROUGH,
+            ):
+                return decision.start
+        return None
 
 
 class EVChargeStartSensor(PowerPilotEntity, SensorEntity):

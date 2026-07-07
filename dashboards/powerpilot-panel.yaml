@@ -37,8 +37,8 @@ views:
             name: Tryb falownika
           - entity: sensor.powerpilot_charge_power
             name: Moc ładowania
-          - entity: binary_sensor.powerpilot_grid_connected
-            name: Połączenie z siecią
+          - entity: sensor.powerpilot_ess_charge_or_passthrough_start
+            name: ESS początek ładowania lub passthrough
           - entity: binary_sensor.powerpilot_ev_charge
             name: Ładowanie EV
           - entity: sensor.powerpilot_battery_energy_cost
@@ -206,7 +206,7 @@ views:
           - sensor.powerpilot_battery_energy_cost
           - sensor.powerpilot_next_action
           - sensor.powerpilot_optimization_plan
-          - binary_sensor.powerpilot_grid_connected
+          - sensor.powerpilot_ess_charge_or_passthrough_start
           - binary_sensor.powerpilot_ev_charge
 
       - type: markdown
@@ -238,7 +238,6 @@ views:
         entities:
           - sensor.powerpilot_inverter_mode
           - sensor.powerpilot_battery_energy_cost
-          - binary_sensor.powerpilot_grid_connected
           - binary_sensor.powerpilot_ev_charge
 
       - type: logbook
@@ -247,5 +246,4 @@ views:
         entities:
           - sensor.powerpilot_inverter_mode
           - sensor.powerpilot_next_action
-          - binary_sensor.powerpilot_grid_connected
           - binary_sensor.powerpilot_ev_charge

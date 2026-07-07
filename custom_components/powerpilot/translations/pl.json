@@ -21,7 +21,6 @@
           "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh netto)",
           "min_soc": "Minimalny SoC (%)",
           "max_soc": "Maksymalny SoC (%)",
-          "grid_disconnect_soc": "SoC odłączenia od sieci (%)",
           "soc_sensor": "Sensor SoC baterii",
           "battery_charge_sensor": "Sensor ładowania baterii (kW lub kWh)",
           "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
@@ -124,7 +123,6 @@
           "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh netto)",
           "min_soc": "Minimalny SoC (%)",
           "max_soc": "Maksymalny SoC (%)",
-          "grid_disconnect_soc": "SoC odłączenia od sieci (%)",
           "soc_sensor": "Sensor SoC baterii",
           "battery_charge_sensor": "Sensor ładowania baterii (kW lub kWh)",
           "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
@@ -279,6 +277,9 @@
       "next_action": {
         "name": "Następna akcja"
       },
+      "ess_charge_start": {
+        "name": "ESS początek ładowania lub passthrough"
+      },
       "ev_charge_start": {
         "name": "EV początek ładowania"
       },
@@ -287,9 +288,6 @@
       }
     },
     "binary_sensor": {
-      "grid_connected": {
-        "name": "Połączenie z siecią"
-      },
       "ev_charge": {
         "name": "Ładowanie EV"
       },

@@ -141,8 +141,9 @@ Validate JSON with the miniconda python (`/opt/miniconda3/bin/python`); the base
   the optional ApexCharts dashboards.
 - Consumption learning needs sensors with **long-term statistics** (`state_class`):
   energy `total_increasing`, power `measurement`.
-- `grid_connected = SoC ≥ grid_disconnect_soc` is implemented literally per the
-  brief ("false when SoC below XX%") — confirm this is the intended semantics.
+- The former `grid_connected` binary sensor (SoC ≥ grid_disconnect_soc) was
+  removed 2026-07 as unused; `sensor.powerpilot_ess_charge_or_passthrough_start`
+  (timestamp of the next hour needing the grid) replaced it for automations.
 
 ## 9. Suggested next steps (pick up here)
 

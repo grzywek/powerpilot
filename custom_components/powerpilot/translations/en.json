@@ -3,9 +3,6 @@
     "abort": {
       "single_instance_allowed": "PowerPilot is already configured."
     },
-    "error": {
-      "invalid_efficiency_curve": "Invalid efficiency curve — use comma-separated \"power:efficiency%\" pairs, e.g. \"1000:91, 2500:93\""
-    },
     "step": {
       "user": {
         "title": "PowerPilot – core setup",
@@ -79,10 +76,7 @@
           "ev_contiguous_max_extra_pct": "Contiguous block cost tolerance (% above cheapest split)",
           "ev_prefer_early": "Prefer early charging (finish as soon as possible)",
           "ev_early_max_extra_pct": "Early charging cost tolerance (% above cheapest)",
-          "ev_current_control": "Adjust charging current (off = always full charger power)",
-          "ev_min_current_a": "Minimum charging current (A)",
-          "ev_max_current_a": "Maximum charging current (A)",
-          "ev_efficiency_curve_text": "EV charging efficiency curve — \"power:efficiency%\" pairs (power in W or kW), e.g. \"1100:77, 3700:87, 6900:92.7, 11000:91\""
+          "ev_charge_efficiency": "EV charging efficiency at full power (e.g. 0.91 = 91%)"
         }
       }
     }
@@ -197,10 +191,7 @@
           "ev_contiguous_max_extra_pct": "Contiguous block cost tolerance (% above cheapest split)",
           "ev_prefer_early": "Prefer early charging (finish as soon as possible)",
           "ev_early_max_extra_pct": "Early charging cost tolerance (% above cheapest)",
-          "ev_current_control": "Adjust charging current (off = always full charger power)",
-          "ev_min_current_a": "Minimum charging current (A)",
-          "ev_max_current_a": "Maximum charging current (A)",
-          "ev_efficiency_curve_text": "EV charging efficiency curve — \"power:efficiency%\" pairs (power in W or kW), e.g. \"1100:77, 3700:87, 6900:92.7, 11000:91\""
+          "ev_charge_efficiency": "EV charging efficiency at full power (e.g. 0.91 = 91%)"
         }
       },
       "tariff_list": {
@@ -299,8 +290,8 @@
       "ev_soc_limit": {
         "name": "EV charge limit (SoC)"
       },
-      "ev_charge_amps": {
-        "name": "EV charging current"
+      "ev_charge_minutes": {
+        "name": "EV charging minutes this hour"
       }
     },
     "binary_sensor": {

@@ -471,6 +471,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "charge_pw": [_r(d.charge_power_kw, 3) for d in decisions],
             "dischg": [_r(d.battery_discharge_kwh, 3) for d in decisions],
             "ev": [_r(d.ev_charge_kwh, 3) for d in decisions],
+            # Planned charging minutes within each hour (full charger power),
+            # so past/pinned views can show how long the charger was meant to
+            # run. Captured from now on; older vintages leave it blank.
+            "ev_min": [d.ev_charge_minutes for d in decisions],
             "cost": [_r(d.hour_cost, 4) for d in decisions],
             # Realized battery energy cost (no sensor exists for it) so the chart
             # can show "Cena w baterii" for past hours by reading index 0 of the
@@ -1156,7 +1160,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "total_price_kwh": slot.total_price_kwh,
                         "ev_charge_kwh": round(decision.ev_charge_kwh, 3),
                         "ev_grid_kwh": round(decision.ev_grid_kwh, 3),
-                        "ev_amps": decision.ev_charge_amps,
+                        "ev_minutes": decision.ev_charge_minutes,
                         "ev_soc": decision.ev_soc,
                         "available": slot.start in available,
                         "forced": slot.start in forced,
@@ -1796,6 +1800,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         if h in ev_charge_real
                         else sn.run0_at(h, "ev")
                     ),
+                    # Planned charging minutes from the plan made at this hour
+                    # (tooltip context; blank for vintages predating capture).
+                    "ev_charge_minutes": _fc(h, "ev_min"),
                     "hour_cost": real_hour_cost,
                     "energy_cost": real_energy_cost,
                     "distribution_cost": real_dist_cost,
@@ -1950,10 +1957,20 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         else (round(cur_ev_soc, 1) if cur_ev_soc is not None else None)
                     ),
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
+                    # The in-progress hour shows the COMMITTED decision's mode
+                    # (what the inverter is actually steered to — the same value
+                    # the inverter-mode sensor reports). The measured flows lag
+                    # early in the hour: a few minutes of 5-minute statistics
+                    # sit under the noise threshold and read as "passthrough"
+                    # even while the battery is discharging.
                     "inverter_mode": (
                         _pin_mode(now)
                         if pin_requested and _pin_idx(now) is not None
-                        else _real_mode(cur_charge, cur_discharge)
+                        else (
+                            cur_dec.inverter_mode
+                            if cur_dec is not None
+                            else _real_mode(cur_charge, cur_discharge)
+                        )
                     ),
                     "battery_charge_kwh": round(cur_charge, 3) if cur_charge is not None else None,
                     "battery_discharge_kwh": round(cur_discharge, 3) if cur_discharge is not None else None,
@@ -1968,6 +1985,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         round(cur_ev, 3)
                         if cur_ev is not None
                         else (round(cur_dec.ev_charge_kwh, 3) if cur_dec is not None else None)
+                    ),
+                    "ev_charge_minutes": (
+                        cur_dec.ev_charge_minutes if cur_dec is not None else None
                     ),
                     # Realized-so-far costs for the in-progress hour (partial flows).
                     "hour_cost": (
@@ -2111,6 +2131,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "battery_energy_cost": round(decision.battery_energy_cost, 4),
                         "grid_buy_kwh": round(decision.grid_buy_kwh, 3),
                         "ev_charge_kwh": round(decision.ev_charge_kwh, 3),
+                        "ev_charge_minutes": (
+                            _pin_val(slot.start, "ev_min")
+                            if pin_requested
+                            else decision.ev_charge_minutes
+                        ),
                         "hour_cost": round(decision.hour_cost, 4),
                         "energy_cost": round(decision.energy_cost, 4),
                         "distribution_cost": round(decision.distribution_cost, 4),
@@ -2157,6 +2182,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "battery_charge_kwh": p("charge"),
                         "charge_power_kw": p("charge_pw"),
                         "ev_charge_kwh": p("ev"),
+                        "ev_charge_minutes": p("ev_min"),
                         # Bars fall back to the pinned plan's consumption
                         # forecast (the panel prefers real when present).
                         "consumption_real": None,
@@ -2270,12 +2296,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_CHARGE_EFFICIENCY,
             CONF_CHARGE_EFFICIENCY_CURVE,
             CONF_DISCHARGE_EFFICIENCY,
+            CONF_EV_CHARGE_EFFICIENCY,
             CONF_EV_CHARGE_METER_SENSOR,
-            CONF_EV_EFFICIENCY_CURVE,
             CONF_EV_ENERGY_ADDED_SENSOR,
             DEFAULTS,
         )
-        from .optimizer import _ev_efficiency_at
 
         now = dt_util.now().replace(minute=0, second=0, microsecond=0)
         start = now - timedelta(days=max(days, 1))
@@ -2293,7 +2318,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # ---- EV: charge meter (grid side) vs energy added (pack side) ----
         grid_eid, grid_series = await _series(CONF_EV_CHARGE_METER_SENSOR)
         added_eid, added_series = await _series(CONF_EV_ENERGY_ADDED_SENSOR)
-        ev_curve = list(self.config.get(CONF_EV_EFFICIENCY_CURVE) or [])
+        # Flat configured efficiency; 1.0 = unset (charging planned lossless).
+        ev_eff = float(self.config.get(CONF_EV_CHARGE_EFFICIENCY, 1.0) or 1.0)
+        ev_configured = _r(ev_eff, 4) if ev_eff < 1.0 - 1e-9 else None
         ev: dict = {
             "available": bool(grid_eid and added_eid),
             "grid_sensor": grid_eid,
@@ -2302,7 +2329,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "grid_kwh": None,
             "added_kwh": None,
             "measured_eff": None,
-            "configured_curve": ev_curve,
+            "configured_eff": ev_configured,
             "buckets": [],
         }
         if grid_series and added_series:
@@ -2337,11 +2364,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                             "grid_kwh": _r(g),
                             "added_kwh": _r(a),
                             "measured_eff": _r(a / g, 4) if g > 0 else None,
-                            "configured_eff": (
-                                _r(_ev_efficiency_at(ev_curve, key), 4)
-                                if ev_curve
-                                else None
-                            ),
+                            "configured_eff": ev_configured,
                         }
                         for key, (g, a, n) in sorted(buckets.items())
                     ],
@@ -2394,14 +2417,14 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "charge_start": None,
                 "soc_limit": None,
                 "soc": None,
-                "charge_amps": None,
+                "charge_minutes": None,
             }
 
         now = dt_util.now().replace(minute=0, second=0, microsecond=0)
         horizon_24h = now + timedelta(hours=24)
         plan = self.data
         charge_start: datetime | None = None
-        charge_start_amps: int | None = None
+        charge_start_minutes: int | None = None
         connect = False
         charging_now = False
         current = None
@@ -2411,7 +2434,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     continue
                 if charge_start is None or decision.start < charge_start:
                     charge_start = decision.start
-                    charge_start_amps = decision.ev_charge_amps
+                    charge_start_minutes = decision.ev_charge_minutes
                 if decision.start < horizon_24h:
                     connect = True
             current = self.current_decision(plan)
@@ -2419,11 +2442,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if charging_now:
             connect = True
 
-        # Planned charging current (A) for the automation to push to the
-        # charger: the active hour's amps while charging, else the amps of the
-        # next planned charge hour. None in the legacy full-power mode.
-        charge_amps = (
-            current.ev_charge_amps if charging_now and current else charge_start_amps
+        # Planned charging duration (minutes within the hour, full power) for
+        # the automation to time the charger: the active hour's while charging,
+        # else the next planned charge hour's.
+        charge_minutes = (
+            current.ev_charge_minutes
+            if charging_now and current
+            else charge_start_minutes
         )
 
         return {
@@ -2433,7 +2458,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "charge_start": charge_start.isoformat() if charge_start else None,
             "soc_limit": ev.soc_limit_now(),
             "soc": ev.soc,
-            "charge_amps": charge_amps,
+            "charge_minutes": charge_minutes,
         }
 
     def get_flow(self) -> dict:

@@ -79,12 +79,12 @@ class Decision:
     ev_charge: bool = False
     # Pack-side energy planned into the car this hour (what the energy-added
     # sensor will report). The grid-side draw — charging losses included — is
-    # ``ev_grid_kwh``; without an EV efficiency curve the two are equal.
+    # ``ev_grid_kwh``; with the EV charge efficiency at 1.0 the two are equal.
     ev_charge_kwh: float = 0.0
     ev_grid_kwh: float = 0.0
-    # Planned charging current (A) when current control is active; ``None`` in
-    # the legacy full-power mode.
-    ev_charge_amps: int | None = None
+    # Planned charging duration within the hour (minutes at full charger
+    # power); ``None`` when no charging is planned for the hour.
+    ev_charge_minutes: int | None = None
     # Projected EV state-of-charge (%) at the end of the hour. ``None`` when the
     # EV SoC sensor is unset so the trajectory can't be projected.
     ev_soc: float | None = None
@@ -133,7 +133,7 @@ class Decision:
             "ev_charge": self.ev_charge,
             "ev_charge_kwh": round(self.ev_charge_kwh, 3),
             "ev_grid_kwh": round(self.ev_grid_kwh, 3),
-            "ev_charge_amps": self.ev_charge_amps,
+            "ev_charge_minutes": self.ev_charge_minutes,
             "ev_soc": round(self.ev_soc, 1) if self.ev_soc is not None else None,
             "battery_soc": round(self.battery_soc, 1),
             "battery_energy_cost": round(self.battery_energy_cost, 4),
@@ -167,9 +167,9 @@ class Decision:
             ev_grid_kwh=float(
                 data.get("ev_grid_kwh") or data.get("ev_charge_kwh") or 0.0
             ),
-            ev_charge_amps=(
-                int(data["ev_charge_amps"])
-                if data.get("ev_charge_amps") is not None
+            ev_charge_minutes=(
+                int(data["ev_charge_minutes"])
+                if data.get("ev_charge_minutes") is not None
                 else None
             ),
             ev_soc=data.get("ev_soc"),

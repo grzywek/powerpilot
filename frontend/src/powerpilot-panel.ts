@@ -9,6 +9,7 @@ interface PlanHour {
   charge_power_kw: number;
   ev_charge: boolean;
   ev_charge_kwh: number;
+  ev_charge_minutes: number | null;
   battery_soc: number;
   battery_energy_cost: number;
   battery_charge_kwh: number;
@@ -63,9 +64,8 @@ interface EVPlan {
   drain_days: number;
   drain_next24_kwh: number | null;
   min_soc: number | null;
-  current_control: boolean;
-  min_current_a: number;
-  max_current_a: number;
+  /** Flat AC charging efficiency at full power (1.0 = planned lossless). */
+  charge_efficiency: number;
   targets: {
     deadline: string;
     target_soc: number;
@@ -83,7 +83,7 @@ interface EVPlan {
     charging_now: boolean;
     charge_start: string | null;
     soc_limit: number | null;
-    charge_amps: number | null;
+    charge_minutes: number | null;
   };
 }
 
@@ -186,6 +186,8 @@ interface SeriesHour {
   battery_energy_cost: number | null;
   grid_buy_kwh: number | null;
   ev_charge_kwh: number | null;
+  /** Planned charger runtime within the hour (minutes at full power). */
+  ev_charge_minutes: number | null;
   hour_cost: number | null;
   energy_cost: number | null;
   distribution_cost: number | null;
@@ -337,7 +339,8 @@ interface EfficiencyData {
     grid_kwh: number | null;
     added_kwh: number | null;
     measured_eff: number | null;
-    configured_curve: { kw: number; eff: number }[];
+    /** Flat configured efficiency; null when unset (planned lossless). */
+    configured_eff: number | null;
     buckets: EfficiencyBucket[];
   };
   battery: {
@@ -996,7 +999,15 @@ export class PowerPilotPanel extends LitElement {
           ${this._stat("Moc ładowania", (current.charge_power_kw ?? 0).toFixed(2) + " kW")}
           ${this._stat("SoC", current.battery_soc.toFixed(0) + " %")}
           ${this._stat("Cena w baterii", current.battery_energy_cost.toFixed(2))}
-          ${this._stat("EV", current.ev_charge ? "ładuje" : "—")}
+          ${this._stat(
+            "EV",
+            current.ev_charge
+              ? "ładuje" +
+                  (current.ev_charge_minutes != null
+                    ? ` (${current.ev_charge_minutes} min)`
+                    : "")
+              : "—"
+          )}
           ${this._stat("Koszt horyzontu", plan.total_cost.toFixed(2) + " PLN")}
         </div>
       </div>
@@ -1642,6 +1653,12 @@ export class PowerPilotPanel extends LitElement {
           });
           const modeMeta = h.inverter_mode ? INVERTER_MODE_META[h.inverter_mode] : null;
           const modeStr = modeMeta ? `  •  falownik: ${modeMeta.label}` : "";
+          // Planned charger runtime for hours with EV charging (full power,
+          // the automation stops the charger after this many minutes).
+          const evMinStr =
+            h.ev_charge_minutes != null && (h.ev_charge_kwh ?? 0) > 0.005
+              ? `  •  EV: ${h.ev_charge_minutes} min ładowania`
+              : "";
 
           // Trip away-windows covering this hour: the on-chart label is
           // truncated, so the tooltip carries the full event name + details
@@ -1807,7 +1824,7 @@ export class PowerPilotPanel extends LitElement {
 
           return `
             <div style="padding:8px 10px;color:${tt.fg};font-size:12px;line-height:1.45;min-width:240px">
-              <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}${tripRows}</div>
+              <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}${evMinStr}${tripRows}</div>
               <table style="border-collapse:collapse;width:100%">
                 ${header}
                 ${totalRow("↑ Źródła energii", upRows)}
@@ -2131,7 +2148,8 @@ export class PowerPilotPanel extends LitElement {
         id: "pp-prices",
         group: "pp-overview",
         type: "line",
-        height: 260,
+        height: 365, // ~40% taller than the original 260
+
         stacked: true,
         animations: { enabled: false },
         // No second toolbar — zooming/panning the energy panel syncs here.
@@ -2792,22 +2810,18 @@ export class PowerPilotPanel extends LitElement {
         <div class="check">
           Start ładowania:
           <b>${ev.control.charge_start ? this._fmtRun(ev.control.charge_start) : "—"}</b> ·
-          Limit SoC: <b>${ev.control.soc_limit !== null ? `${ev.control.soc_limit}%` : "—"}</b>
-          ${ev.current_control
-            ? html` · Prąd:
-                <b>${ev.control.charge_amps !== null ? `${ev.control.charge_amps} A` : "—"}</b>`
-            : nothing}
+          Limit SoC: <b>${ev.control.soc_limit !== null ? `${ev.control.soc_limit}%` : "—"}</b> ·
+          Minuty w godzinie:
+          <b>${ev.control.charge_minutes !== null ? `${ev.control.charge_minutes} min` : "—"}</b>
         </div>
-        ${ev.current_control
-          ? html`<div class="check muted">
-              Dobór prądu ładowania: ${ev.min_current_a}–${ev.max_current_a} A
-              (maks. ${ev.charger_power_kw ? ev.charger_power_kw.toFixed(1) : "—"} kW) —
-              pełne godziny na maksimum, godzina dopełniająca najmniejszym
-              wystarczającym prądem
-            </div>`
-          : ev.charger_power_kw
+        ${ev.charger_power_kw
           ? html`<div class="check muted">
               Ładowanie zawsze pełną mocą ładowarki: ${ev.charger_power_kw.toFixed(1)} kW
+              ${ev.charge_efficiency < 1
+                ? ` · sprawność ${(ev.charge_efficiency * 100).toFixed(0)}%`
+                : ""}
+              — godzina dopełniająca dostaje krótszy czas ładowania (sensor „EV minuty
+              ładowania w godzinie")
             </div>`
           : nothing}
       </div>
@@ -3006,9 +3020,6 @@ export class PowerPilotPanel extends LitElement {
 
     const ev = e.ev;
     const bat = e.battery;
-    const evConfiguredAtFull = ev.configured_curve.length
-      ? ev.configured_curve[ev.configured_curve.length - 1].eff
-      : null;
 
     return html`
       <div class="card">
@@ -3047,7 +3058,7 @@ export class PowerPilotPanel extends LitElement {
                             <th>Pobrano<br /><span class="muted">kWh</span></th>
                             <th>Dodano<br /><span class="muted">kWh</span></th>
                             <th>Zmierzona</th>
-                            <th>Z ustawień<br /><span class="muted">krzywa</span></th>
+                            <th>Z ustawień</th>
                             <th>Δ</th>
                           </tr>
                         </thead>
@@ -3067,11 +3078,11 @@ export class PowerPilotPanel extends LitElement {
                       </table>
                     </div>
                     <div class="muted sim-hint" style="margin-top:8px">
-                      Kubełki wg średniej mocy godziny (kWh/h). „Z ustawień” = krzywa
-                      sprawności EV interpolowana w mocy kubełka
-                      ${evConfiguredAtFull == null
-                        ? html` — <b>krzywa nieskonfigurowana</b> (plan liczy ładowanie bezstratnie)`
-                        : nothing}.
+                      Kubełki wg średniej mocy godziny (kWh/h). „Z ustawień” = płaska
+                      sprawność ładowania EV
+                      ${ev.configured_eff == null
+                        ? html` — <b>nieskonfigurowana</b> (plan liczy ładowanie bezstratnie)`
+                        : html` (${pct(ev.configured_eff)})`}.
                     </div>
                   `
                 : html`<div class="empty">Brak godzin ładowania w oknie pomiaru.</div>`}

@@ -22,7 +22,7 @@ from .const import (
     SENSOR_BATTERY_ENERGY_COST,
     SENSOR_CHARGE_POWER,
     SENSOR_ESS_CHARGE_START,
-    SENSOR_EV_CHARGE_AMPS,
+    SENSOR_EV_CHARGE_MINUTES,
     SENSOR_EV_CHARGE_START,
     SENSOR_EV_SOC_LIMIT,
     SENSOR_INVERTER_MODE,
@@ -48,7 +48,7 @@ async def async_setup_entry(
             EssChargeStartSensor(coordinator, entry),
             EVChargeStartSensor(coordinator, entry),
             EVSocLimitSensor(coordinator, entry),
-            EVChargeAmpsSensor(coordinator, entry),
+            EVChargeMinutesSensor(coordinator, entry),
         ]
     )
 
@@ -273,23 +273,23 @@ class EVSocLimitSensor(PowerPilotEntity, SensorEntity):
         return self.coordinator.ev_control().get("soc_limit")
 
 
-class EVChargeAmpsSensor(PowerPilotEntity, SensorEntity):
-    """Planned EV charging current (A) for the active/next charge hour.
+class EVChargeMinutesSensor(PowerPilotEntity, SensorEntity):
+    """Planned EV charging minutes within the active/next charge hour.
 
-    Populated only when current control is enabled — an automation pushes this
-    to the charger alongside the SoC limit. ``None`` in full-power mode or
-    when no charging is planned.
+    The charger runs at full power; hours that need less than a full hour's
+    worth of energy get a shorter duration — an automation starts the charger
+    at ``ev_charge_start`` and stops it after this many minutes. ``None`` when
+    no charging is planned.
     """
 
-    _attr_translation_key = SENSOR_EV_CHARGE_AMPS
-    _attr_native_unit_of_measurement = "A"
-    _attr_device_class = SensorDeviceClass.CURRENT
+    _attr_translation_key = SENSOR_EV_CHARGE_MINUTES
+    _attr_native_unit_of_measurement = "min"
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:current-ac"
+    _attr_icon = "mdi:timer-outline"
 
     def __init__(self, coordinator, entry) -> None:
-        super().__init__(coordinator, entry, SENSOR_EV_CHARGE_AMPS)
+        super().__init__(coordinator, entry, SENSOR_EV_CHARGE_MINUTES)
 
     @property
     def native_value(self) -> int | None:
-        return self.coordinator.ev_control().get("charge_amps")
+        return self.coordinator.ev_control().get("charge_minutes")

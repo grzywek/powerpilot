@@ -238,6 +238,30 @@ async def test_series_can_pin_exact_forecast_run_at(hass: HomeAssistant) -> None
     assert pin["end"] == (selected_start + timedelta(hours=14)).isoformat()
 
 
+async def test_series_current_hour_mode_follows_the_committed_decision(
+    hass: HomeAssistant,
+) -> None:
+    """The in-progress hour shows the plan's (committed) inverter mode.
+
+    Regression: the current hour derived its mode from the measured battery
+    flows — a few minutes into the hour the 5-minute statistics sit under the
+    noise threshold, so the chart said "passthrough" while the inverter-mode
+    sensor (the decision) said "discharge".
+    """
+    from custom_components.powerpilot.const import InverterMode
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+
+    plan = coordinator.data
+    assert plan is not None and plan.decisions
+    plan.decisions[0].inverter_mode = InverterMode.DISCHARGE
+
+    result = await coordinator.get_series(past_hours=1)
+    current = next(h for h in result["hours"] if h.get("partial"))
+    assert current["inverter_mode"] == InverterMode.DISCHARGE
+
+
 async def test_series_no_vintage_hides_forecast(hass: HomeAssistant) -> None:
     """A past hour with no backing plan shows no "prognoza" — only real data.
 

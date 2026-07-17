@@ -63,7 +63,18 @@ interface EVPlan {
   drain_days: number;
   drain_next24_kwh: number | null;
   min_soc: number | null;
-  targets: { deadline: string; target_soc: number; label: string; source?: string }[];
+  current_control: boolean;
+  min_current_a: number;
+  max_current_a: number;
+  targets: {
+    deadline: string;
+    target_soc: number;
+    label: string;
+    source?: string;
+    // Trip targets: the reserve (EV min-SoC entity) + round-trip split.
+    reserve_soc?: number | null;
+    trip_soc?: number | null;
+  }[];
   forced_hours: string[];
   trips: EVTrip[];
   planned_hours: { start: string; kwh: number }[];
@@ -72,6 +83,7 @@ interface EVPlan {
     charging_now: boolean;
     charge_start: string | null;
     soc_limit: number | null;
+    charge_amps: number | null;
   };
 }
 
@@ -296,11 +308,51 @@ type Tab =
   | "prices"
   | "simulations"
   | "flow"
+  | "efficiency"
   | "status"
   | "diagnostics"
   | "profiles"
   | "logs"
   | "debug";
+
+/** One power bucket of the measured EV charging efficiency. */
+interface EfficiencyBucket {
+  power_kw: number;
+  hours: number;
+  grid_kwh: number | null;
+  added_kwh: number | null;
+  measured_eff: number | null;
+  configured_eff: number | null;
+}
+
+/** Payload of powerpilot/efficiency — measured vs configured efficiencies. */
+interface EfficiencyData {
+  generated_at: string;
+  window_days: number;
+  ev: {
+    available: boolean;
+    grid_sensor: string | null;
+    added_sensor: string | null;
+    hours: number;
+    grid_kwh: number | null;
+    added_kwh: number | null;
+    measured_eff: number | null;
+    configured_curve: { kw: number; eff: number }[];
+    buckets: EfficiencyBucket[];
+  };
+  battery: {
+    available: boolean;
+    charge_sensor: string | null;
+    discharge_sensor: string | null;
+    charge_kwh: number | null;
+    discharge_kwh: number | null;
+    measured_roundtrip: number | null;
+    configured_charge_eff: number | null;
+    configured_discharge_eff: number | null;
+    configured_roundtrip: number | null;
+    charge_curve_points: number;
+  };
+}
 
 /** One live-read input entity on the "Przepływ" tab. */
 interface FlowEntity {
@@ -485,6 +537,10 @@ export class PowerPilotPanel extends LitElement {
   @state() private _flow: FlowData | null = null;
   @state() private _flowLoading = false;
 
+  /** "Sprawność" tab: measured vs configured efficiencies. */
+  @state() private _efficiency: EfficiencyData | null = null;
+  @state() private _efficiencyLoading = false;
+
   @state() private _debug: unknown = null;
   @state() private _debugLoading = false;
   @state() private _debugError: string | null = null;
@@ -595,6 +651,8 @@ export class PowerPilotPanel extends LitElement {
       if (this._tab === "simulations") this._loadSimulations();
       // Keep the pipeline snapshot live while it's on screen.
       if (this._tab === "flow") this._loadFlow();
+      // Refresh the measured efficiencies while on screen (new settled hours).
+      if (this._tab === "efficiency") this._loadEfficiency();
     } catch (err: any) {
       this._error = err?.message ?? String(err);
     }
@@ -738,6 +796,7 @@ export class PowerPilotPanel extends LitElement {
     if (tab === "simulations") this._loadSimulations();
     if (tab === "diagnostics") this._loadDiagnostics();
     if (tab === "flow") this._loadFlow();
+    if (tab === "efficiency") this._loadEfficiency();
   }
 
   private async _loadFlow(): Promise<void> {
@@ -750,6 +809,22 @@ export class PowerPilotPanel extends LitElement {
       this._error = err?.message ?? String(err);
     } finally {
       this._flowLoading = false;
+    }
+  }
+
+  private async _loadEfficiency(): Promise<void> {
+    if (!this.hass) return;
+    this._efficiencyLoading = true;
+    try {
+      this._efficiency = await this.hass.callWS({
+        type: "powerpilot/efficiency",
+        days: 30,
+      });
+      this._error = null;
+    } catch (err: any) {
+      this._error = err?.message ?? String(err);
+    } finally {
+      this._efficiencyLoading = false;
     }
   }
 
@@ -857,6 +932,7 @@ export class PowerPilotPanel extends LitElement {
         ${this._tabButton("prices", "Ceny")}
         ${this._tabButton("simulations", "Symulacje")}
         ${this._tabButton("flow", "Przepływ")}
+        ${this._tabButton("efficiency", "Sprawność")}
         ${this._tabButton("status", "Status")}
         ${this._tabButton("diagnostics", "Diagnostyka")}
         ${this._tabButton("profiles", "Profile")}
@@ -869,6 +945,7 @@ export class PowerPilotPanel extends LitElement {
         ${this._tab === "prices" ? this._renderPrices() : nothing}
         ${this._tab === "simulations" ? this._renderSimulations() : nothing}
         ${this._tab === "flow" ? this._renderFlow() : nothing}
+        ${this._tab === "efficiency" ? this._renderEfficiency() : nothing}
         ${this._tab === "status" ? this._renderStatus() : nothing}
         ${this._tab === "diagnostics" ? this._renderDiagnostics() : nothing}
         ${this._tab === "profiles" ? this._renderProfiles() : nothing}
@@ -2685,6 +2762,12 @@ export class PowerPilotPanel extends LitElement {
                   <span class="dot ok"></span>${t.source === "trip" ? "min " : ""}${t.target_soc.toFixed(0)}% do
                   <b>${this._fmtRun(t.deadline)}</b>
                   ${t.label ? html`<span class="muted">${t.label}</span>` : nothing}
+                  ${t.reserve_soc != null && t.trip_soc != null
+                    ? html`<span class="muted">
+                        = rezerwa EV ${t.reserve_soc.toFixed(0)}% (encja „EV minimalna
+                        rezerwa SoC”) + podróż ${t.trip_soc.toFixed(0)}%
+                      </span>`
+                    : nothing}
                 </div>`
               )}`
           : nothing}
@@ -2710,8 +2793,19 @@ export class PowerPilotPanel extends LitElement {
           Start ładowania:
           <b>${ev.control.charge_start ? this._fmtRun(ev.control.charge_start) : "—"}</b> ·
           Limit SoC: <b>${ev.control.soc_limit !== null ? `${ev.control.soc_limit}%` : "—"}</b>
+          ${ev.current_control
+            ? html` · Prąd:
+                <b>${ev.control.charge_amps !== null ? `${ev.control.charge_amps} A` : "—"}</b>`
+            : nothing}
         </div>
-        ${ev.charger_power_kw
+        ${ev.current_control
+          ? html`<div class="check muted">
+              Dobór prądu ładowania: ${ev.min_current_a}–${ev.max_current_a} A
+              (maks. ${ev.charger_power_kw ? ev.charger_power_kw.toFixed(1) : "—"} kW) —
+              pełne godziny na maksimum, godzina dopełniająca najmniejszym
+              wystarczającym prądem
+            </div>`
+          : ev.charger_power_kw
           ? html`<div class="check muted">
               Ładowanie zawsze pełną mocą ładowarki: ${ev.charger_power_kw.toFixed(1)} kW
             </div>`
@@ -2881,6 +2975,146 @@ export class PowerPilotPanel extends LitElement {
             zakładki „Symulacje" i porównania prognoz.
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  // ------------------------------------------------------------------
+  // "Sprawność" tab — measured charging efficiencies vs the configured ones
+  // ------------------------------------------------------------------
+  private _renderEfficiency(): TemplateResult {
+    const e = this._efficiency;
+    if (!e) {
+      return html`<div class="card empty">
+        ${this._efficiencyLoading ? "Ładowanie…" : "Brak danych sprawności."}
+      </div>`;
+    }
+    const pct = (v: number | null | undefined, d = 1) =>
+      v == null ? "—" : (v * 100).toFixed(d) + " %";
+    const kwh = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(1));
+    // Measured-vs-configured delta, colored: within 2 p.p. neutral, above
+    // configured green (better than assumed), below amber.
+    const delta = (measured: number | null, configured: number | null) => {
+      if (measured == null || configured == null) return nothing;
+      const d = (measured - configured) * 100;
+      if (Math.abs(d) < 0.05) return html`<span class="muted">=</span>`;
+      const color = Math.abs(d) < 2 ? "inherit" : d > 0 ? "#16a34a" : "#f59e0b";
+      return html`<span style=${"color:" + color}>
+        ${(d > 0 ? "+" : "−") + Math.abs(d).toFixed(1)} p.p.
+      </span>`;
+    };
+
+    const ev = e.ev;
+    const bat = e.battery;
+    const evConfiguredAtFull = ev.configured_curve.length
+      ? ev.configured_curve[ev.configured_curve.length - 1].eff
+      : null;
+
+    return html`
+      <div class="card">
+        <div class="card-title">Sprawność ładowania — pomiar z sensorów (${e.window_days} dni)</div>
+        <div class="muted sim-hint">
+          Wartości <b>z ustawień są nadrzędne</b> — plan liczy się na nich; pomiar z sensorów
+          jest informacyjny i służy do weryfikacji, czy wpisane sprawności nie są nieaktualne.
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🚗 Ładowanie EV — licznik ładowarki vs energia dodana do auta</div>
+        ${!ev.available
+          ? html`<div class="empty">
+              Potrzebne oba sensory: licznik energii ładowarki (sieć) i „energia dodana”
+              z auta — wskaż je w ustawieniach EV.
+            </div>`
+          : html`
+              <div class="check muted">
+                sieć: <b>${ev.grid_sensor}</b> · auto: <b>${ev.added_sensor}</b>
+              </div>
+              <div class="kpi-grid">
+                ${this._kpi("Godzin ładowania", `${ev.hours}`, null, `ostatnie ${e.window_days} dni`)}
+                ${this._kpi("Pobrano z sieci", `${kwh(ev.grid_kwh)} kWh`, null, "licznik ładowarki")}
+                ${this._kpi("Dodano do auta", `${kwh(ev.added_kwh)} kWh`, null, "sensor energy added")}
+                ${this._kpi("Sprawność zmierzona", pct(ev.measured_eff), null, "dodano ÷ pobrano")}
+              </div>
+              ${ev.buckets.length
+                ? html`
+                    <div class="prices-table-wrap">
+                      <table class="prices-table">
+                        <thead>
+                          <tr>
+                            <th>Moc (kW)</th>
+                            <th>Godzin</th>
+                            <th>Pobrano<br /><span class="muted">kWh</span></th>
+                            <th>Dodano<br /><span class="muted">kWh</span></th>
+                            <th>Zmierzona</th>
+                            <th>Z ustawień<br /><span class="muted">krzywa</span></th>
+                            <th>Δ</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          ${ev.buckets.map(
+                            (b) => html`<tr>
+                              <td>${b.power_kw.toFixed(1)}</td>
+                              <td class="muted">${b.hours}</td>
+                              <td>${kwh(b.grid_kwh)}</td>
+                              <td>${kwh(b.added_kwh)}</td>
+                              <td class="bold">${pct(b.measured_eff)}</td>
+                              <td class="muted">${pct(b.configured_eff)}</td>
+                              <td>${delta(b.measured_eff, b.configured_eff)}</td>
+                            </tr>`
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div class="muted sim-hint" style="margin-top:8px">
+                      Kubełki wg średniej mocy godziny (kWh/h). „Z ustawień” = krzywa
+                      sprawności EV interpolowana w mocy kubełka
+                      ${evConfiguredAtFull == null
+                        ? html` — <b>krzywa nieskonfigurowana</b> (plan liczy ładowanie bezstratnie)`
+                        : nothing}.
+                    </div>
+                  `
+                : html`<div class="empty">Brak godzin ładowania w oknie pomiaru.</div>`}
+            `}
+      </div>
+
+      <div class="card">
+        <div class="card-title">🔋 Bateria domowa — round-trip z liczników</div>
+        ${!bat.available
+          ? html`<div class="empty">
+              Potrzebne sensory ładowania i rozładowania baterii (ustawienia podstawowe).
+            </div>`
+          : html`
+              <div class="check muted">
+                ładowanie: <b>${bat.charge_sensor}</b> · rozładowanie:
+                <b>${bat.discharge_sensor}</b>
+              </div>
+              <div class="kpi-grid">
+                ${this._kpi("Załadowano", `${kwh(bat.charge_kwh)} kWh`, null, `ostatnie ${e.window_days} dni`)}
+                ${this._kpi("Rozładowano", `${kwh(bat.discharge_kwh)} kWh`, null, "oddane do domu")}
+                ${this._kpi("Round-trip zmierzony", pct(bat.measured_roundtrip), null, "rozładowano ÷ załadowano")}
+                ${this._kpi(
+                  "Round-trip z ustawień",
+                  pct(bat.configured_roundtrip),
+                  null,
+                  `η ład. ${pct(bat.configured_charge_eff, 0)} × η rozład. ${pct(bat.configured_discharge_eff, 0)}`
+                )}
+              </div>
+              <div class="check">
+                Różnica: ${delta(bat.measured_roundtrip, bat.configured_roundtrip)}
+                ${bat.charge_curve_points
+                  ? html`<span class="muted">
+                      · uwaga: skonfigurowana krzywa sprawności ładowania
+                      (${bat.charge_curve_points} pkt) — płaskie η z ustawień to tylko
+                      punkt odniesienia</span>`
+                  : nothing}
+              </div>
+              <div class="muted sim-hint">
+                Pomiar obejmuje przesunięcie SoC na krańcach okna (energia załadowana,
+                ale jeszcze nie oddana) — przy ${e.window_days} dniach cyklowania to
+                pomijalny szum.
+              </div>
+            `}
       </div>
     `;
   }

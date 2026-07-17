@@ -36,10 +36,14 @@ from .const import (
     CONF_EV_CHARGE_METER_SENSOR,
     CONF_EV_CHARGING_SENSOR,
     CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT,
+    CONF_EV_CURRENT_CONTROL,
     CONF_EV_EARLY_MAX_EXTRA_PCT,
+    CONF_EV_EFFICIENCY_CURVE,
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
+    CONF_EV_MAX_CURRENT_A,
+    CONF_EV_MIN_CURRENT_A,
     CONF_EV_ODOMETER_SENSOR,
     CONF_EV_PREFER_CONTIGUOUS,
     CONF_EV_PREFER_EARLY,
@@ -324,8 +328,47 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_EV_EARLY_MAX_EXTRA_PCT, default=d(CONF_EV_EARLY_MAX_EXTRA_PCT)
             ): _NUMBER(_NUM(min=0, max=100, step=1, unit_of_measurement="%", mode="box")),
+            # Per-hour charging-current control: off → always full charger
+            # power (the legacy behaviour).
+            vol.Optional(
+                CONF_EV_CURRENT_CONTROL, default=bool(d(CONF_EV_CURRENT_CONTROL))
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_EV_MIN_CURRENT_A, default=d(CONF_EV_MIN_CURRENT_A)
+            ): _NUMBER(_NUM(min=1, max=32, step=1, unit_of_measurement="A", mode="box")),
+            vol.Optional(
+                CONF_EV_MAX_CURRENT_A, default=d(CONF_EV_MAX_CURRENT_A)
+            ): _NUMBER(_NUM(min=1, max=32, step=1, unit_of_measurement="A", mode="box")),
+            # AC charging efficiency vs power, same "power:eff%" text format as
+            # the battery curve (power in W above 100, kW otherwise).
+            vol.Optional(
+                EV_EFFICIENCY_CURVE_FIELD,
+                default=_efficiency_curve_text(data.get(CONF_EV_EFFICIENCY_CURVE)),
+            ): selector.TextSelector(),
         }
     )
+
+
+# Transient form-field key for the EV efficiency-curve text (parsed into
+# CONF_EV_EFFICIENCY_CURVE points; never stored itself).
+EV_EFFICIENCY_CURVE_FIELD = "ev_efficiency_curve_text"
+
+
+def _apply_ev_input(data: dict[str, Any], user_input: dict[str, Any]) -> str | None:
+    """Fold the submitted EV form into ``data``.
+
+    Parses the efficiency-curve text into ``CONF_EV_EFFICIENCY_CURVE`` points
+    (the transient text field itself is never stored). Returns an error key
+    for the form, or ``None`` on success.
+    """
+    payload = dict(user_input)
+    text = payload.pop(EV_EFFICIENCY_CURVE_FIELD, "")
+    try:
+        payload[CONF_EV_EFFICIENCY_CURVE] = _parse_efficiency_curve(text or "")
+    except ValueError:
+        return "invalid_efficiency_curve"
+    data.update(payload)
+    return None
 
 
 def _charge_curve_schema(data: dict[str, Any]) -> vol.Schema:
@@ -440,7 +483,13 @@ class PowerPilotConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_ev(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            self._data.update(user_input)
+            error = _apply_ev_input(self._data, user_input)
+            if error is not None:
+                return self.async_show_form(
+                    step_id="ev",
+                    data_schema=_ev_schema(self._data),
+                    errors={"base": error},
+                )
             return self.async_create_entry(title="PowerPilot", data=self._data)
         return self.async_show_form(step_id="ev", data_schema=_ev_schema({}))
 
@@ -669,7 +718,13 @@ class PowerPilotOptionsFlow(OptionsFlow):
     async def async_step_ev(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._ensure_loaded()
         if user_input is not None:
-            self._data.update(user_input)
+            error = _apply_ev_input(self._data, user_input)
+            if error is not None:
+                return self.async_show_form(
+                    step_id="ev",
+                    data_schema=_ev_schema(self._data),
+                    errors={"base": error},
+                )
             return await self.async_step_init()
         return self.async_show_form(step_id="ev", data_schema=_ev_schema(self._data))
 

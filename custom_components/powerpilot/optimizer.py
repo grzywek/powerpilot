@@ -100,8 +100,91 @@ _CHARGE_PRICE_BUCKET = Decimal("0.01")
 
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
-# full-power-block allocator or a stale import.
-EV_ALLOCATOR_VERSION = "full-price-ceiling-2026-07"
+# allocator or a stale import.
+EV_ALLOCATOR_VERSION = "amp-fit-efficiency-2026-07"
+
+
+def _ev_efficiency_at(curve: list[dict], power_kw: float) -> float:
+    """AC charging efficiency at a total charging power (linear interpolation).
+
+    ``curve`` holds {"kw","eff"} samples from a measured chart; outside the
+    sampled range the nearest end value applies. No curve → lossless (1.0),
+    the legacy behaviour.
+    """
+    points = sorted(
+        (float(p["kw"]), min(max(float(p["eff"]), 0.01), 1.0))
+        for p in (curve or [])
+        if float(p.get("kw", 0.0)) > _EPS
+    )
+    if not points:
+        return 1.0
+    if power_kw <= points[0][0]:
+        return points[0][1]
+    if power_kw >= points[-1][0]:
+        return points[-1][1]
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        if x1 <= power_kw <= x2:
+            if x2 - x1 <= _EPS:
+                return y2
+            return y1 + (y2 - y1) * (power_kw - x1) / (x2 - x1)
+    return points[-1][1]
+
+
+@dataclass
+class EVAllocation:
+    """Per-hour EV charging schedule in both energy domains.
+
+    ``added`` is what lands in the pack (drives the SoC forecast and compares
+    against the car's energy-added sensor); ``grid`` is what flows through the
+    meter (drives cost and the LP's grid load) — they differ by the charging
+    efficiency at the hour's power. ``amps`` carries the planned charging
+    current when current control is active (None per hour otherwise).
+
+    The mapping interface exposes the primary (pack-side) schedule — an
+    ``EVAllocation`` reads like the ``{hour: added kWh}`` dict it replaced.
+    """
+
+    added: dict[datetime, float] = field(default_factory=dict)
+    grid: dict[datetime, float] = field(default_factory=dict)
+    amps: dict[datetime, int] = field(default_factory=dict)
+
+    def __getitem__(self, key: datetime) -> float:
+        return self.added[key]
+
+    def get(self, key: datetime, default=None):
+        return self.added.get(key, default)
+
+    def items(self):
+        return self.added.items()
+
+    def keys(self):
+        return self.added.keys()
+
+    def values(self):
+        return self.added.values()
+
+    def __iter__(self):
+        return iter(self.added)
+
+    def __len__(self) -> int:
+        return len(self.added)
+
+    def __bool__(self) -> bool:
+        return bool(self.added)
+
+    def __contains__(self, key: datetime) -> bool:
+        return key in self.added
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, dict):
+            return self.added == other
+        if isinstance(other, EVAllocation):
+            return (
+                self.added == other.added
+                and self.grid == other.grid
+                and self.amps == other.amps
+            )
+        return NotImplemented
 
 
 def _charge_order_price(price: float) -> float:
@@ -232,7 +315,7 @@ class Optimizer:
         if n == 0:
             return Plan(forecast=forecast, decisions=[], created_at=dt_util.now())
 
-        ev_hours = self._plan_ev(forecast, ev_request)
+        ev_alloc = self._plan_ev(forecast, ev_request)
         ev_charger_kw = ev_request.charger_kw if ev_request else 0.0
 
         # Per-hour prices and demand. Missing energy prices fall back to the
@@ -246,7 +329,9 @@ class Optimizer:
         total_price = [energy_price[t] + distribution[t] for t in range(n)]
         charge_order_price = [_charge_order_price(price) for price in total_price]
         demand = [max(0.0, s.total_consumption_kwh) for s in slots]
-        ev_kwh = [ev_hours.get(slots[t].start, 0.0) for t in range(n)]
+        # The LP and every cost see GRID energy; the pack-side ("added") energy
+        # and the fitted amps ride along into the plan for SoC/control.
+        ev_kwh = [ev_alloc.grid.get(slots[t].start, 0.0) for t in range(n)]
 
         charge, discharge, stored = self._solve_lp(
             battery=battery,
@@ -268,6 +353,7 @@ class Optimizer:
             total_price=total_price,
             demand=demand,
             ev_kwh=ev_kwh,
+            ev_alloc=ev_alloc,
             charge_order_price=charge_order_price,
             ev_request=ev_request,
             reminders=reminders,
@@ -559,6 +645,7 @@ class Optimizer:
         total_price: list[float],
         demand: list[float],
         ev_kwh: list[float],
+        ev_alloc: EVAllocation | None = None,
         charge_order_price: list[float] | None = None,
         ev_request: EVRequest | None = None,
         reminders: list[str] | None = None,
@@ -607,7 +694,14 @@ class Optimizer:
         for t, slot in enumerate(forecast.slots):
             c = charge[t] if charge[t] > _EPS else 0.0
             d = discharge[t] if discharge[t] > _EPS else 0.0
+            # ``ev`` (grid kWh) drives cost/grid load; ``ev_added`` (pack kWh,
+            # = grid × η at the hour's power) drives the SoC forecast and is
+            # what the car's energy-added sensor will report back.
             ev = ev_kwh[t]
+            ev_added = (
+                ev_alloc.added.get(slot.start, ev) if ev_alloc is not None else ev
+            )
+            ev_amps = ev_alloc.amps.get(slot.start) if ev_alloc is not None else None
             tp = total_price[t]
 
             soc_before = battery.soc
@@ -639,10 +733,18 @@ class Optimizer:
             decision = Decision(start=slot.start)
             decision.inverter_mode = mode
             decision.ev_charge = ev > 0
-            decision.ev_charge_kwh = ev
+            # Pack-side ("added") energy: what the car's energy-added sensor
+            # will report, what the chart bars/snapshots compare against and
+            # what the SoC forecast integrates. The grid-side draw (losses
+            # included) rides along for cost/grid accounting.
+            decision.ev_charge_kwh = ev_added
+            decision.ev_grid_kwh = ev
+            decision.ev_charge_amps = ev_amps
             if ev_soc_kwh is not None:
                 drain = ev_drain.get(slot.start, 0.0)
-                ev_soc_kwh = min(ev_ceiling_kwh, max(0.0, ev_soc_kwh + ev - drain))
+                ev_soc_kwh = min(
+                    ev_ceiling_kwh, max(0.0, ev_soc_kwh + ev_added - drain)
+                )
                 decision.ev_soc = round(ev_soc_kwh / ev_battery_kwh * 100.0, 1)
             decision.charge_power = (
                 ChargePower.LIMITED if ev > 0 else ChargePower.FULL
@@ -675,7 +777,9 @@ class Optimizer:
                 "charge_threshold": round(charge_threshold, 4),
                 "discharge_threshold": round(discharge_threshold, 4),
                 "demand_kwh": round(demand[t], 3),
-                "ev_kwh": round(ev, 3),
+                "ev_kwh": round(ev_added, 3),
+                "ev_grid_kwh": round(ev, 3),
+                "ev_amps": ev_amps,
                 "charge_kwh": round(stored_kwh, 3),
                 "charge_efficiency": round(eff_t, 4) if eff_t is not None else None,
                 "discharge_kwh": round(delivered, 3),
@@ -739,23 +843,26 @@ class Optimizer:
     # ------------------------------------------------------------------
     def _plan_ev(
         self, forecast: Forecast, ev_request: EVRequest | None
-    ) -> dict[datetime, float]:
+    ) -> EVAllocation:
         """Allocate EV charging across the horizon.
 
-        The charger is **on/off at full power** — it cannot dose a fraction of an
-        hour. So reaching a deficit of ``D`` kWh means turning the charger on for
-        ``K = ceil(D / P)`` hours (``P`` = full charge power); the car draws full
-        power in each and its BMS tops off — leaving an unavoidable partial of
-        ``D - (K-1)·P`` on whichever hour is **chronologically last** among the
-        chosen ones (that is where charging actually finishes).
+        The allocator sizes hours in **pack energy** ("added" kWh): a full
+        charge hour adds ``P·η(P)`` at full power, so reaching a deficit of
+        ``D`` kWh means ``K = ceil(D / (P·η))`` hours — full hours on the
+        cheapest slots and the unavoidable remainder on whichever chosen hour
+        is **chronologically last** (that is where charging actually
+        finishes). We try every candidate top-off hour, pick the cheapest full
+        blocks before it, and keep the globally cheapest combination (costs
+        are grid-side: added energy ÷ the efficiency at the hour's power).
 
-        Because that partial buys *less* energy, the cost-minimising choice is to
-        spend full hours on the cheapest slots and let the partial land on a
-        pricier slot — but only one that can legitimately be the top-off hour
-        (i.e. has enough earlier hours to hold the full blocks). We therefore try
-        every candidate top-off hour, pick the cheapest full blocks before it,
-        and keep the globally cheapest combination. This is what stops the plan
-        from e.g. wasting a whole expensive hour just to shave a few minutes.
+        The top-off hour depends on the current-control mode:
+
+        * **full power** (legacy) — the car draws full power and its BMS stops
+          mid-hour once the remainder is in;
+        * **current control** — the hour runs at the smallest configured
+          current whose full-hour yield covers the remainder, so a small
+          top-up charges gently across the hour instead of a full-power
+          burst; the chosen amps ship in the returned allocation.
 
         Three layers, never exceeding the request's SoC ceiling
         (``charge_ceiling_soc`` — the car is steered to stop there):
@@ -774,7 +881,7 @@ class Optimizer:
         out of the pack.
         """
         if ev_request is None or not ev_request.is_actionable:
-            return {}
+            return EVAllocation()
 
         slots_by_start = {
             s.start: s for s in forecast.slots if s.buy_price is not None
@@ -796,7 +903,37 @@ class Optimizer:
                 slot.buy_price + (slot.distribution_price_kwh or 0.0)
             )
 
-        charger_kw = max(ev_request.charger_power_kw, 0.1)
+        # Power/efficiency model. The allocator sizes hours in pack ("added")
+        # energy; grid energy = added ÷ η(P) at the hour's charging power.
+        eff_curve = ev_request.efficiency_curve
+        p_full = max(ev_request.charger_power_kw, 0.1)
+        eff_full = _ev_efficiency_at(eff_curve, p_full)
+        current_control = (
+            ev_request.current_control
+            and 1 <= ev_request.min_current_a <= ev_request.max_current_a
+        )
+
+        def fit_for_added(added: float) -> tuple[float, int | None]:
+            """(grid kWh, amps) to put ``added`` kWh into the pack in one hour.
+
+            With current control: the smallest whole-amp level whose full-hour
+            yield covers ``added`` (gentle top-off); the car's BMS still stops
+            once the energy is in, so a need below the minimum level's yield
+            simply ends mid-hour. Without: full power, mid-hour BMS stop.
+            """
+            if current_control:
+                for amps in range(
+                    ev_request.min_current_a, ev_request.max_current_a + 1
+                ):
+                    p = ev_request.power_at_amps(amps)
+                    eff = _ev_efficiency_at(eff_curve, p)
+                    if p * eff + _EPS >= added:
+                        return added / eff, amps
+                return added / eff_full, ev_request.max_current_a
+            return added / eff_full, None
+
+        # Full-hour yield (added kWh) — the per-hour allocation cap.
+        hour_cap_added = max(p_full * eff_full, 0.1)
         battery_kwh = max(ev_request.battery_kwh, 0.0)
         # Highest SoC the planner may intentionally buy to. The car/charger is
         # steered off ``soc_limit_now`` and stops there, so energy planned past
@@ -863,14 +1000,14 @@ class Optimizer:
                 (
                     s
                     for s in candidates
-                    if charger_kw - allocation.get(s.start, 0.0) > _EPS
+                    if hour_cap_added - allocation.get(s.start, 0.0) > _EPS
                 ),
                 key=lambda s: s.start,
             )
             if not slots:
                 return {}
             caps = {
-                s.start: charger_kw - allocation.get(s.start, 0.0) for s in slots
+                s.start: hour_cap_added - allocation.get(s.start, 0.0) for s in slots
             }
             # Every variant must deliver the same energy or it isn't comparable
             # by cost (an under-filled variant would win on price alone).
@@ -895,9 +1032,18 @@ class Optimizer:
             ) -> tuple[float, datetime, list[datetime], dict[datetime, float]]:
                 covered = sum(caps[s.start] for s in fulls)
                 rem = deliverable - covered  # in (0, cap(top_off)]
+                # Grid-side cost: full hours end at full power (÷ η_full); the
+                # top-off runs at the current fitted to the hour's final
+                # (existing + remainder) added energy, at that power's η.
+                total_top_added = allocation.get(top_off.start, 0.0) + rem
+                _grid, amps = fit_for_added(total_top_added)
+                p_top_kw = (
+                    ev_request.power_at_amps(amps) if amps is not None else p_full
+                )
+                eff_top = _ev_efficiency_at(eff_curve, p_top_kw)
                 cost = (
-                    sum(caps[s.start] * slot_price(s) for s in fulls)
-                    + rem * slot_price(top_off)
+                    sum(caps[s.start] / eff_full * slot_price(s) for s in fulls)
+                    + rem / eff_top * slot_price(top_off)
                 )
                 fill = {s.start: caps[s.start] for s in fulls}
                 fill[top_off.start] = rem
@@ -994,7 +1140,7 @@ class Optimizer:
         for start in sorted(ev_request.forced_hours):
             if start not in ev_request.available_hours or start not in slots_by_start:
                 continue
-            take = min(charger_kw, capacity_left())
+            take = min(hour_cap_added, capacity_left())
             if take <= _EPS:
                 break
             allocation[start] = take
@@ -1058,4 +1204,15 @@ class Optimizer:
             ]
             commit(select(ev_request.required_kwh, candidates))
 
-        return allocation
+        # Convert the added-energy schedule into the dual-domain allocation:
+        # grid energy (cost / LP load) and the fitted charging current.
+        out = EVAllocation()
+        for start, added in allocation.items():
+            if added <= _EPS:
+                continue
+            grid, amps = fit_for_added(added)
+            out.added[start] = added
+            out.grid[start] = grid
+            if amps is not None:
+                out.amps[start] = amps
+        return out

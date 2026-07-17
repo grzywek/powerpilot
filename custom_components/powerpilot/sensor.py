@@ -22,6 +22,7 @@ from .const import (
     SENSOR_BATTERY_ENERGY_COST,
     SENSOR_CHARGE_POWER,
     SENSOR_ESS_CHARGE_START,
+    SENSOR_EV_CHARGE_AMPS,
     SENSOR_EV_CHARGE_START,
     SENSOR_EV_SOC_LIMIT,
     SENSOR_INVERTER_MODE,
@@ -47,6 +48,7 @@ async def async_setup_entry(
             EssChargeStartSensor(coordinator, entry),
             EVChargeStartSensor(coordinator, entry),
             EVSocLimitSensor(coordinator, entry),
+            EVChargeAmpsSensor(coordinator, entry),
         ]
     )
 
@@ -269,3 +271,25 @@ class EVSocLimitSensor(PowerPilotEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         return self.coordinator.ev_control().get("soc_limit")
+
+
+class EVChargeAmpsSensor(PowerPilotEntity, SensorEntity):
+    """Planned EV charging current (A) for the active/next charge hour.
+
+    Populated only when current control is enabled — an automation pushes this
+    to the charger alongside the SoC limit. ``None`` in full-power mode or
+    when no charging is planned.
+    """
+
+    _attr_translation_key = SENSOR_EV_CHARGE_AMPS
+    _attr_native_unit_of_measurement = "A"
+    _attr_device_class = SensorDeviceClass.CURRENT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:current-ac"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_EV_CHARGE_AMPS)
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.ev_control().get("charge_amps")

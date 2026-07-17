@@ -3,6 +3,9 @@
     "abort": {
       "single_instance_allowed": "PowerPilot jest już skonfigurowany."
     },
+    "error": {
+      "invalid_efficiency_curve": "Niepoprawna krzywa sprawności — podaj pary \"moc:sprawność%\" po przecinku, np. \"1000:91, 2500:93\""
+    },
     "step": {
       "user": {
         "title": "PowerPilot – konfiguracja podstawowa",
@@ -75,7 +78,11 @@
           "ev_prefer_contiguous": "Preferuj ładowanie łączone (godziny w jednym bloku)",
           "ev_contiguous_max_extra_pct": "Tolerancja kosztu bloku łączonego (% ponad najtańszy wariant)",
           "ev_prefer_early": "Preferuj ładowanie wczesne (zakończ jak najszybciej)",
-          "ev_early_max_extra_pct": "Tolerancja kosztu ładowania wczesnego (% ponad najtańszy)"
+          "ev_early_max_extra_pct": "Tolerancja kosztu ładowania wczesnego (% ponad najtańszy)",
+          "ev_current_control": "Dobieraj prąd ładowania (wył. = zawsze pełna moc ładowarki)",
+          "ev_min_current_a": "Minimalny prąd ładowania (A)",
+          "ev_max_current_a": "Maksymalny prąd ładowania (A)",
+          "ev_efficiency_curve_text": "Krzywa sprawności ładowania EV — pary \"moc:sprawność%\" (moc w W lub kW), np. \"1100:77, 3700:87, 6900:92.7, 11000:91\""
         }
       }
     }
@@ -189,7 +196,11 @@
           "ev_prefer_contiguous": "Preferuj ładowanie łączone (godziny w jednym bloku)",
           "ev_contiguous_max_extra_pct": "Tolerancja kosztu bloku łączonego (% ponad najtańszy wariant)",
           "ev_prefer_early": "Preferuj ładowanie wczesne (zakończ jak najszybciej)",
-          "ev_early_max_extra_pct": "Tolerancja kosztu ładowania wczesnego (% ponad najtańszy)"
+          "ev_early_max_extra_pct": "Tolerancja kosztu ładowania wczesnego (% ponad najtańszy)",
+          "ev_current_control": "Dobieraj prąd ładowania (wył. = zawsze pełna moc ładowarki)",
+          "ev_min_current_a": "Minimalny prąd ładowania (A)",
+          "ev_max_current_a": "Maksymalny prąd ładowania (A)",
+          "ev_efficiency_curve_text": "Krzywa sprawności ładowania EV — pary \"moc:sprawność%\" (moc w W lub kW), np. \"1100:77, 3700:87, 6900:92.7, 11000:91\""
         }
       },
       "tariff_list": {
@@ -287,6 +298,9 @@
       },
       "ev_soc_limit": {
         "name": "EV limit ładowania (SoC)"
+      },
+      "ev_charge_amps": {
+        "name": "EV prąd ładowania"
       }
     },
     "binary_sensor": {

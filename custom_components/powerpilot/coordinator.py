@@ -1155,6 +1155,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "buy_price": slot.buy_price,
                         "total_price_kwh": slot.total_price_kwh,
                         "ev_charge_kwh": round(decision.ev_charge_kwh, 3),
+                        "ev_grid_kwh": round(decision.ev_grid_kwh, 3),
+                        "ev_amps": decision.ev_charge_amps,
                         "ev_soc": decision.ev_soc,
                         "available": slot.start in available,
                         "forced": slot.start in forced,
@@ -2251,6 +2253,132 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "forecast_pin": forecast_pin,
         }
 
+    async def async_charging_efficiency(self, days: int = 30) -> dict:
+        """Measured charging efficiencies from sensors, next to the configured ones.
+
+        Informational only — the configured values stay authoritative for
+        planning. EV: the grid-side charge-meter energy vs the car's
+        energy-added counter, overall and bucketed by average charging power
+        (so the measured points can be read against the configured efficiency
+        curve). Battery: round-trip Σ discharge / Σ charge over the window vs
+        the configured η_ch × η_dis (the SoC drift over a 30-day window is
+        noise next to the cycled energy).
+        """
+        from .const import (
+            CONF_BATTERY_CHARGE_SENSOR,
+            CONF_BATTERY_DISCHARGE_SENSOR,
+            CONF_CHARGE_EFFICIENCY,
+            CONF_CHARGE_EFFICIENCY_CURVE,
+            CONF_DISCHARGE_EFFICIENCY,
+            CONF_EV_CHARGE_METER_SENSOR,
+            CONF_EV_EFFICIENCY_CURVE,
+            CONF_EV_ENERGY_ADDED_SENSOR,
+            DEFAULTS,
+        )
+        from .optimizer import _ev_efficiency_at
+
+        now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        start = now - timedelta(days=max(days, 1))
+        _MIN_HOUR_KWH = 0.1  # ignore metering noise / idle hours
+
+        async def _series(conf_key: str) -> tuple[str | None, dict]:
+            eid = self.config.get(conf_key)
+            if not eid:
+                return None, {}
+            return eid, await self.consumption.async_range_kwh(eid, start, now)
+
+        def _r(value: float | None, nd: int = 3) -> float | None:
+            return round(value, nd) if value is not None else None
+
+        # ---- EV: charge meter (grid side) vs energy added (pack side) ----
+        grid_eid, grid_series = await _series(CONF_EV_CHARGE_METER_SENSOR)
+        added_eid, added_series = await _series(CONF_EV_ENERGY_ADDED_SENSOR)
+        ev_curve = list(self.config.get(CONF_EV_EFFICIENCY_CURVE) or [])
+        ev: dict = {
+            "available": bool(grid_eid and added_eid),
+            "grid_sensor": grid_eid,
+            "added_sensor": added_eid,
+            "hours": 0,
+            "grid_kwh": None,
+            "added_kwh": None,
+            "measured_eff": None,
+            "configured_curve": ev_curve,
+            "buckets": [],
+        }
+        if grid_series and added_series:
+            # Hourly kWh at 1-h slots == average kW → bucket by power (0.5 kW).
+            buckets: dict[float, list[float]] = {}
+            total_grid = total_added = 0.0
+            hours = 0
+            for hour, grid_kwh in grid_series.items():
+                if grid_kwh < _MIN_HOUR_KWH:
+                    continue
+                added_kwh = added_series.get(hour, 0.0)
+                hours += 1
+                total_grid += grid_kwh
+                total_added += added_kwh
+                key = round(grid_kwh * 2) / 2.0
+                agg = buckets.setdefault(key, [0.0, 0.0, 0])
+                agg[0] += grid_kwh
+                agg[1] += added_kwh
+                agg[2] += 1
+            ev.update(
+                {
+                    "hours": hours,
+                    "grid_kwh": _r(total_grid),
+                    "added_kwh": _r(total_added),
+                    "measured_eff": (
+                        _r(total_added / total_grid, 4) if total_grid > 0 else None
+                    ),
+                    "buckets": [
+                        {
+                            "power_kw": key,
+                            "hours": int(n),
+                            "grid_kwh": _r(g),
+                            "added_kwh": _r(a),
+                            "measured_eff": _r(a / g, 4) if g > 0 else None,
+                            "configured_eff": (
+                                _r(_ev_efficiency_at(ev_curve, key), 4)
+                                if ev_curve
+                                else None
+                            ),
+                        }
+                        for key, (g, a, n) in sorted(buckets.items())
+                    ],
+                }
+            )
+
+        # ---- Battery: round-trip from the charge/discharge meters ----
+        charge_eid, charge_series = await _series(CONF_BATTERY_CHARGE_SENSOR)
+        dis_eid, dis_series = await _series(CONF_BATTERY_DISCHARGE_SENSOR)
+        eta_c = float(self.config.get(CONF_CHARGE_EFFICIENCY, DEFAULTS[CONF_CHARGE_EFFICIENCY]))
+        eta_d = float(self.config.get(CONF_DISCHARGE_EFFICIENCY, DEFAULTS[CONF_DISCHARGE_EFFICIENCY]))
+        total_charge = sum(charge_series.values()) if charge_series else 0.0
+        total_dis = sum(dis_series.values()) if dis_series else 0.0
+        battery = {
+            "available": bool(charge_eid and dis_eid),
+            "charge_sensor": charge_eid,
+            "discharge_sensor": dis_eid,
+            "charge_kwh": _r(total_charge),
+            "discharge_kwh": _r(total_dis),
+            "measured_roundtrip": (
+                _r(total_dis / total_charge, 4) if total_charge > 1.0 else None
+            ),
+            "configured_charge_eff": _r(eta_c, 4),
+            "configured_discharge_eff": _r(eta_d, 4),
+            "configured_roundtrip": _r(eta_c * eta_d, 4),
+            "charge_curve_points": len(
+                self.config.get(CONF_CHARGE_EFFICIENCY_CURVE) or []
+            ),
+        }
+
+        return {
+            "generated_at": dt_util.now().isoformat(),
+            "window_days": days,
+            "ev": ev,
+            "battery": battery,
+        }
+
     def ev_control(self) -> dict:
         """Advisory EV control surface for automations.
 
@@ -2266,26 +2394,37 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "charge_start": None,
                 "soc_limit": None,
                 "soc": None,
+                "charge_amps": None,
             }
 
         now = dt_util.now().replace(minute=0, second=0, microsecond=0)
         horizon_24h = now + timedelta(hours=24)
         plan = self.data
         charge_start: datetime | None = None
+        charge_start_amps: int | None = None
         connect = False
         charging_now = False
+        current = None
         if plan:
             for decision in plan.decisions:
                 if decision.ev_charge_kwh <= 0 or decision.start < now:
                     continue
                 if charge_start is None or decision.start < charge_start:
                     charge_start = decision.start
+                    charge_start_amps = decision.ev_charge_amps
                 if decision.start < horizon_24h:
                     connect = True
             current = self.current_decision(plan)
             charging_now = bool(current and current.ev_charge)
         if charging_now:
             connect = True
+
+        # Planned charging current (A) for the automation to push to the
+        # charger: the active hour's amps while charging, else the amps of the
+        # next planned charge hour. None in the legacy full-power mode.
+        charge_amps = (
+            current.ev_charge_amps if charging_now and current else charge_start_amps
+        )
 
         return {
             "enabled": True,
@@ -2294,6 +2433,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "charge_start": charge_start.isoformat() if charge_start else None,
             "soc_limit": ev.soc_limit_now(),
             "soc": ev.soc,
+            "charge_amps": charge_amps,
         }
 
     def get_flow(self) -> dict:

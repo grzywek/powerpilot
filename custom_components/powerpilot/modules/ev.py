@@ -46,15 +46,20 @@ from ..const import (
     CONF_EV_CHARGER_PHASES,
     CONF_EV_CHARGING_SENSOR,
     CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT,
+    CONF_EV_CURRENT_CONTROL,
     CONF_EV_EARLY_MAX_EXTRA_PCT,
+    CONF_EV_EFFICIENCY_CURVE,
     CONF_EV_ENABLED,
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
+    CONF_EV_MAX_CURRENT_A,
+    CONF_EV_MIN_CURRENT_A,
     CONF_EV_ODOMETER_SENSOR,
     CONF_EV_PREFER_CONTIGUOUS,
     CONF_EV_PREFER_EARLY,
     CONF_EV_PRESENCE_ENTITIES,
     CONF_EV_SOC_SENSOR,
+    CONF_GRID_VOLTAGE,
     DEFAULTS,
     DOMAIN,
     DRAIN_HORIZON_HOURS,
@@ -231,6 +236,10 @@ class EVChargeTarget:
     target_soc: float
     label: str = ""
     source: str = "calendar"
+    # Trip targets only: the two components of ``target_soc`` (reserve floor +
+    # round-trip energy as % of the pack), so the UI can explain the number.
+    reserve_soc: float | None = None
+    trip_soc: float | None = None
 
 
 @dataclass
@@ -264,10 +273,30 @@ class EVRequest:
     contiguous_max_extra_pct: float = 15.0
     prefer_early: bool = False
     early_max_extra_pct: float = 10.0
+    # Per-hour charging-current control (see const.py CONF_EV_CURRENT_*): the
+    # allocator picks whole amps in [min, max] per hour; power = phases ×
+    # voltage × A. Off → the legacy always-full-power behaviour.
+    current_control: bool = False
+    min_current_a: int = 5
+    max_current_a: int = 16
+    voltage: float = 230.0
+    # AC charging efficiency vs total power: {"kw","eff"} points. Empty →
+    # charging treated as lossless.
+    efficiency_curve: list[dict] = field(default_factory=list)
+
+    def power_at_amps(self, amps: int) -> float:
+        """Total charger draw (kW) at a given per-phase current."""
+        return max(self.phases, 1) * max(self.voltage, 0.0) * max(amps, 0) / 1000.0
 
     @property
     def charger_power_kw(self) -> float:
-        """Total charger draw (kW) = per-phase power × number of phases."""
+        """Total charger draw (kW) at full power.
+
+        With current control the maximum configured current defines full power;
+        otherwise the legacy per-phase kW × phases applies.
+        """
+        if self.current_control and self.max_current_a > 0:
+            return self.power_at_amps(self.max_current_a)
         return max(self.charger_kw, 0.0) * max(self.phases, 1)
 
     @property
@@ -720,13 +749,19 @@ class EVModule(PowerPilotModule):
         # 3. Pre-departure target: reserve + round trip must be in the pack.
         if trip.depart <= now or not self._capacity:
             return
-        needed_soc = self.min_soc + (outbound_kwh + return_kwh) / self._capacity * 100.0
+        trip_soc = (outbound_kwh + return_kwh) / self._capacity * 100.0
+        needed_soc = self.min_soc + trip_soc
         self._trip_targets.append(
             EVChargeTarget(
                 deadline=trip.depart,
                 target_soc=min(100.0, needed_soc),
                 label=f"Wyjazd: {trip.label}",
                 source="trip",
+                # Kept separately so the UI can explain the sum: the reserve
+                # comes from the EV min-SoC number entity, not the battery's
+                # config-flow minimum.
+                reserve_soc=self.min_soc,
+                trip_soc=trip_soc,
             )
         )
 
@@ -793,6 +828,11 @@ class EVModule(PowerPilotModule):
             early_max_extra_pct=float(
                 self.config.get(CONF_EV_EARLY_MAX_EXTRA_PCT, 10.0) or 0.0
             ),
+            current_control=bool(self.config.get(CONF_EV_CURRENT_CONTROL)),
+            min_current_a=int(self.config.get(CONF_EV_MIN_CURRENT_A, 5) or 5),
+            max_current_a=int(self.config.get(CONF_EV_MAX_CURRENT_A, 16) or 16),
+            voltage=float(self.config.get(CONF_GRID_VOLTAGE, 230) or 230),
+            efficiency_curve=list(self.config.get(CONF_EV_EFFICIENCY_CURVE) or []),
         )
         return self._request
 
@@ -903,12 +943,19 @@ class EVModule(PowerPilotModule):
             "drain_days": self._drain_profile.observed_days,
             "drain_next24_kwh": self.predicted_drain_kwh(24),
             "min_soc": self.min_soc,
+            "current_control": bool(self.config.get(CONF_EV_CURRENT_CONTROL)),
+            "min_current_a": int(self.config.get(CONF_EV_MIN_CURRENT_A, 5) or 5),
+            "max_current_a": int(self.config.get(CONF_EV_MAX_CURRENT_A, 16) or 16),
             "targets": [
                 {
                     "deadline": target.deadline.isoformat(),
                     "target_soc": target.target_soc,
                     "label": target.label,
                     "source": target.source,
+                    # Trip targets: reserve (EV min-SoC entity) + round-trip
+                    # split, so the panel can explain where the % comes from.
+                    "reserve_soc": target.reserve_soc,
+                    "trip_soc": target.trip_soc,
                 }
                 for target in sorted(
                     [*self._targets, *self._trip_targets], key=lambda t: t.deadline
@@ -1027,9 +1074,12 @@ class EVModule(PowerPilotModule):
     @property
     def charger_power_kw(self) -> float:
         """Total charger draw (kW) at full power across all phases."""
-        per_phase = float(self.config.get(CONF_EV_CHARGER_KW, 3.5))
-        phases = int(self.config.get(CONF_EV_CHARGER_PHASES, 1) or 1)
-        return per_phase * max(phases, 1)
+        phases = max(int(self.config.get(CONF_EV_CHARGER_PHASES, 1) or 1), 1)
+        if self.config.get(CONF_EV_CURRENT_CONTROL):
+            voltage = float(self.config.get(CONF_GRID_VOLTAGE, 230) or 230)
+            max_a = int(self.config.get(CONF_EV_MAX_CURRENT_A, 16) or 16)
+            return phases * voltage * max_a / 1000.0
+        return float(self.config.get(CONF_EV_CHARGER_KW, 3.5)) * phases
 
     @property
     def soc(self) -> float | None:

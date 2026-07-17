@@ -1,0 +1,3 @@
+coś się miesza.. jest 16:39. patrzę na aktualną prognozę. o 17:00 pokazuje Soc EV 21->28% mimo że nie ma żadnego ładowania w tej godzinie
+
+oraz nadal nie bierze pod uwagę ev minimum soc (powerpilot_minimalny_soc_ev_rezerwa mam ustawione jako 10%) więc nie wiem skąd te min 28% przy soc ev potem..

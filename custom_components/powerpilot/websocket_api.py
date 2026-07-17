@@ -54,19 +54,6 @@ def ws_profiles(hass: HomeAssistant, connection, msg) -> None:
 
 
 @websocket_api.websocket_command(
-    {vol.Required("type"): "powerpilot/forecasts", vol.Optional("date"): str}
-)
-@websocket_api.async_response
-async def ws_forecasts(hass: HomeAssistant, connection, msg) -> None:
-    coordinator = _coordinator(hass)
-    if not coordinator:
-        connection.send_result(msg["id"], {})
-        return
-    result = await coordinator.get_forecasts(msg.get("date"))
-    connection.send_result(msg["id"], result)
-
-
-@websocket_api.websocket_command(
     {
         vol.Required("type"): "powerpilot/series",
         vol.Optional("past_hours", default=24): int,
@@ -102,27 +89,6 @@ def ws_prices(hass: HomeAssistant, connection, msg) -> None:
         connection.send_result(msg["id"], {"hours": []})
         return
     connection.send_result(msg["id"], coordinator.get_price_archive(msg.get("date")))
-
-
-@websocket_api.websocket_command({vol.Required("type"): "powerpilot/snapshots"})
-@callback
-def ws_snapshots(hass: HomeAssistant, connection, msg) -> None:
-    coordinator = _coordinator(hass)
-    connection.send_result(
-        msg["id"], coordinator.get_snapshots() if coordinator else {"runs": []}
-    )
-
-
-@websocket_api.websocket_command(
-    {vol.Required("type"): "powerpilot/snapshot", vol.Optional("run_at"): str}
-)
-@callback
-def ws_snapshot(hass: HomeAssistant, connection, msg) -> None:
-    coordinator = _coordinator(hass)
-    if not coordinator:
-        connection.send_result(msg["id"], {"run_at": None, "hours": []})
-        return
-    connection.send_result(msg["id"], coordinator.get_snapshot(msg.get("run_at")))
 
 
 @websocket_api.websocket_command(
@@ -193,11 +159,8 @@ def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_status)
     websocket_api.async_register_command(hass, ws_log)
     websocket_api.async_register_command(hass, ws_profiles)
-    websocket_api.async_register_command(hass, ws_forecasts)
     websocket_api.async_register_command(hass, ws_series)
     websocket_api.async_register_command(hass, ws_prices)
-    websocket_api.async_register_command(hass, ws_snapshots)
-    websocket_api.async_register_command(hass, ws_snapshot)
     websocket_api.async_register_command(hass, ws_accuracy)
     websocket_api.async_register_command(hass, ws_flow)
     websocket_api.async_register_command(hass, ws_debug)

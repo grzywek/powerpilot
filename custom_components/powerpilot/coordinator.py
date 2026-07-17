@@ -487,61 +487,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self._last_snapshot_hour = hour
         await self._async_save_snapshots()
 
-    def get_snapshots(self) -> dict:
-        """Available vintages for the picker."""
-        return {"runs": self.snapshots.runs()}
-
-    def get_snapshot(self, run_at: str | None) -> dict:
-        """Decode one vintage into per-hour rows the chart can render."""
-        rec = self.snapshots.get(run_at) if run_at else None
-        if rec is None:
-            runs = self.snapshots.runs()
-            rec = self.snapshots.get(runs[0]["run_at"]) if runs else None
-        if rec is None:
-            return {"run_at": None, "hours": []}
-
-        start = dt_util.parse_datetime(rec["start"])
-        n = rec.get("n", 0)
-        horizon = rec.get("horizon_hours", 0)
-
-        def _at(key, idx, default=None):
-            seq = rec.get(key) or []
-            return seq[idx] if idx < len(seq) else default
-
-        hours: list[dict] = []
-        for i in range(n):
-            hour_start = (start + timedelta(hours=i)) if start else None
-            buy = _at("buy", i)
-            dist = _at("dist", i)
-            # Per-kWh price excludes the fixed monthly charge (billed separately).
-            total = (
-                buy + dist
-                if (buy is not None and dist is not None)
-                else None
-            )
-            hours.append(
-                {
-                    "start": hour_start.isoformat() if hour_start else None,
-                    "buy_price": buy,
-                    "distribution_price_kwh": dist,
-                    "total_price_kwh": total,
-                    "price_type": PTYPE_CODE_INV.get(_at("ptype", i)),
-                    "consumption_forecast": _at("cons_fc", i),
-                    "base_consumption_forecast": _at("base_fc", i),
-                    "inverter_mode": MODE_CODE_INV.get(_at("mode", i)) if i < horizon else None,
-                    "battery_soc": _at("soc", i) if i < horizon else None,
-                    "soc": _at("soc", i) if i < horizon else None,
-                    "grid_buy_kwh": _at("grid", i) if i < horizon else None,
-                    "hour_cost": _at("cost", i) if i < horizon else None,
-                }
-            )
-        return {
-            "run_at": rec["run_at"],
-            "start": rec.get("start"),
-            "total_cost": rec.get("total_cost"),
-            "hours": hours,
-        }
-
     async def get_accuracy(self, lead_hours: int = 24, days: int = 7) -> dict:
         """Forecast-vs-actual error for past hours, at a given lead time.
 
@@ -585,31 +530,48 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         hours: list[dict] = []
         errors: list[float] = []
+        price_errors: list[float] = []
         bias_sum = [0.0] * 24
         bias_cnt = [0] * 24
         h = window_start
         while h < now:
             pred = _pred_for(h)
             act_c = actual_cons.get(h)
-            act_p = (self.prices.archive.get(h) or {}).get("energy")
+            # Price truth = the settled (certain) archive entry; comparing a
+            # prediction against another forecast would understate the error.
+            arch = self.prices.archive.get(h) or {}
+            act_p = (
+                arch.get("energy")
+                if arch.get("type") == PRICE_TYPE_CERTAIN
+                else None
+            )
             pred_c = pred["cons"] if pred else None
+            pred_p = pred["buy"] if pred else None
             err = (
                 round(pred_c - act_c, 3)
                 if (pred_c is not None and act_c is not None)
+                else None
+            )
+            price_err = (
+                round(pred_p - act_p, 4)
+                if (pred_p is not None and act_p is not None)
                 else None
             )
             if err is not None:
                 errors.append(err)
                 bias_sum[h.hour] += err
                 bias_cnt[h.hour] += 1
+            if price_err is not None:
+                price_errors.append(price_err)
             hours.append(
                 {
                     "start": h.isoformat(),
                     "predicted_cons": round(pred_c, 3) if pred_c is not None else None,
                     "actual_cons": round(act_c, 3) if act_c is not None else None,
                     "error": err,
-                    "predicted_price": pred["buy"] if pred else None,
+                    "predicted_price": pred_p,
                     "actual_price": round(act_p, 4) if act_p is not None else None,
+                    "price_error": price_err,
                 }
             )
             h += timedelta(hours=1)
@@ -620,12 +582,23 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         ]
         mae = round(sum(abs(e) for e in errors) / len(errors), 3) if errors else None
         bias = round(sum(errors) / len(errors), 3) if errors else None
+        price_mae = (
+            round(sum(abs(e) for e in price_errors) / len(price_errors), 4)
+            if price_errors
+            else None
+        )
+        price_bias = (
+            round(sum(price_errors) / len(price_errors), 4) if price_errors else None
+        )
         return {
             "lead_hours": lead_hours,
             "days": days,
             "samples": len(errors),
             "mae": mae,
             "bias": bias,
+            "price_samples": len(price_errors),
+            "price_mae": price_mae,
+            "price_bias": price_bias,
             "bias_by_hour": bias_by_hour,
             "hours": hours,
         }
@@ -1004,11 +977,44 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     ),
                 }
             )
-        optional_items.append(
-            await _sensor_item(
-                "weather", "Encja pogody", CONF_WEATHER_ENTITY, required=False, raw=True
-            )
-        )
+        # Weather entities keep no recorder statistics (their state is a
+        # condition string) — the readiness check is "does it serve an hourly
+        # forecast via weather.get_forecasts", not the sensor stats probe.
+        weather_item: dict = {
+            "key": "weather",
+            "label": "Encja pogody",
+            "required": False,
+            "entity_id": self.config.get(CONF_WEATHER_ENTITY),
+            "detail": None,
+        }
+        weather_eid = self.config.get(CONF_WEATHER_ENTITY)
+        if not weather_eid:
+            weather_item["status"] = "skip"
+            weather_item["message"] = "Pominięty (opcjonalny)"
+        else:
+            weather_state = self.hass.states.get(weather_eid)
+            if weather_state is None:
+                weather_item["status"] = "error"
+                weather_item["message"] = "Encja niedostępna w HA"
+            else:
+                fc_hours = len(await self.weather.async_hourly_forecast(weather_eid))
+                temp_now = weather_state.attributes.get("temperature")
+                weather_item["detail"] = {
+                    "temperature_now": temp_now,
+                    "forecast_hours": fc_hours,
+                }
+                if fc_hours > 0:
+                    weather_item["status"] = "ok"
+                    weather_item["message"] = (
+                        f"Prognoza godzinowa: {fc_hours} h"
+                        + (f" · temperatura teraz: {temp_now} °C" if temp_now is not None else "")
+                    )
+                else:
+                    weather_item["status"] = "error"
+                    weather_item["message"] = (
+                        "Brak prognozy godzinowej (weather.get_forecasts type=hourly)"
+                    )
+        optional_items.append(weather_item)
         if self.config.get(CONF_EV_ENABLED):
             optional_items.append(
                 await _sensor_item(
@@ -1148,21 +1154,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "hours": hours,
         }
 
-    async def get_forecasts(self, date_str: str | None) -> dict:
-        """Horizon-indexed price forecasts (D+1..D+3) for a target date."""
-        from datetime import date as _date, timedelta as _td
-
-        if date_str:
-            try:
-                target = _date.fromisoformat(date_str)
-            except ValueError:
-                target = dt_util.now().date() + _td(days=1)
-        else:
-            target = dt_util.now().date() + _td(days=1)
-
-        horizons = await self.prices.async_fetch_forecasts(target)
-        return {"date": target.isoformat(), "horizons": horizons}
-
     def get_price_archive(self, date_str: str | None) -> dict:
         """Hourly price archive for a single day (the "Ceny" tab).
 
@@ -1192,6 +1183,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             entry = self.prices.archive.get(hour)
             breakdown = None
             p10 = p90 = None
+            fc_energy = fc_fetched_at = None
             if entry is not None:
                 energy = entry["energy"]
                 price_type = entry["type"]
@@ -1199,6 +1191,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 fetched_at = entry["fetched_at"]
                 p10 = entry.get("p10")
                 p90 = entry.get("p90")
+                # Last forecast the source published before this hour settled
+                # (stashed by the archive when certain replaced forecast).
+                fc_energy = entry.get("fc_energy")
+                fc_fetched_at = entry.get("fc_fetched_at")
             else:
                 energy, samples = self.prices.archive.estimate(hour)
                 if energy is None:
@@ -1215,6 +1211,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             dist = self.tariff.distribution_for(hour)  # gross PLN/kWh
             formula = entry.get("formula") if entry is not None else None
 
+            # Comparison columns for the accuracy view: what the (weekly-model)
+            # estimate says for this hour, and — for settled hours — the last
+            # source forecast before RDN settlement. The estimate is derived
+            # from 1/2/3-weeks-earlier archive entries, which are certain long
+            # before this hour, so computing it on read is deterministic.
+            est_energy: float | None = None
+            if price_type != PRICE_TYPE_ESTIMATED:
+                est_energy, _est_bd = self.prices.archive.estimate(hour)
+
             row = {
                 "start": hour.isoformat(),
                 "type": price_type,
@@ -1223,6 +1228,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "p10": _r(p10),
                 "p90": _r(p90),
                 "estimate_breakdown": breakdown,
+                # Energy-side (gross PLN/kWh) comparators, same basis as the
+                # archived value the optimizer consumed.
+                "forecast_energy_kwh": _r(fc_energy),
+                "forecast_fetched_at": fc_fetched_at,
+                "estimate_energy_kwh": _r(est_energy),
             }
 
             if formula is not None and dist is not None:
@@ -1340,6 +1350,23 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 out[boundary - timedelta(hours=1)] = last_val
             boundary += timedelta(hours=1)
         return out
+
+    def _device_forecast_kwh(self, eid: str, hour: datetime) -> float | None:
+        """Per-device forecast for the chart series.
+
+        The climate-owned device reads its temperature model (matching what the
+        optimizer plans); every other device uses the learned weekly average.
+        """
+        if self.climate.handles(eid):
+            value = self.climate.forecast_kwh(hour)
+            if value is not None:
+                return round(value, 3)
+        if eid in self.consumption.devices:
+            return round(
+                self.consumption.devices[eid].value(hour.weekday(), hour.hour) or 0.0,
+                3,
+            )
+        return None
 
     async def get_series(
         self,
@@ -1605,12 +1632,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             wd, hr = h.weekday(), h.hour
             base_fc = self.consumption.base_value(wd, hr) if learned else None
             dev_forecast = {
-                eid: round(
-                    self.consumption.devices[eid].value(wd, hr) or 0.0, 3
-                )
-                if eid in self.consumption.devices
-                else None
-                for eid in device_ids
+                eid: self._device_forecast_kwh(eid, h) for eid in device_ids
             }
             dev_real_h = {
                 eid: round(device_real[eid][h], 3) if h in device_real.get(eid, {}) else None
@@ -1717,6 +1739,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
                     "price_confirmed": self.prices.is_confirmed(h),
+                    "price_type": self.prices.price_type_at(h),
                     "consumption_real": round(main_real[h], 3) if h in main_real else None,
                     # Consumption forecast (learned profile) is only meaningful for
                     # hours a plan actually backs — otherwise it would show a
@@ -1731,10 +1754,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "ev_soc": round(ev_soc_real[h], 1) if h in ev_soc_real else None,
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                     # At a pinned forecast the mode band follows that plan's
-                    # schedule; otherwise it shows the realized mode.
+                    # schedule for the hours it covered; outside its coverage
+                    # (and without a pin) it shows the realized mode.
                     "inverter_mode": (
                         _pin_mode(h)
-                        if pin_requested
+                        if pin_requested and _pin_idx(h) is not None
                         else _real_mode(bat_charge_real.get(h), bat_discharge_real.get(h))
                     ),
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
@@ -1808,10 +1832,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             live_soc = self._read_soc()
             wd, hr = now.weekday(), now.hour
             dev_forecast = {
-                eid: round(self.consumption.devices[eid].value(wd, hr) or 0.0, 3)
-                if eid in self.consumption.devices
-                else None
-                for eid in device_ids
+                eid: self._device_forecast_kwh(eid, now) for eid in device_ids
             }
             buy_price = self.prices.price_at(now)
             dist_price = self.tariff.distribution_for(now)
@@ -1901,6 +1922,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
                     "price_confirmed": self.prices.is_confirmed(now),
+                    "price_type": self.prices.price_type_at(now),
                     "consumption_real": round(cur_main, 3) if cur_main is not None else None,
                     "consumption_forecast": None,
                     "base_consumption_forecast": None,
@@ -1913,7 +1935,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                     "inverter_mode": (
                         _pin_mode(now)
-                        if pin_requested
+                        if pin_requested and _pin_idx(now) is not None
                         else _real_mode(cur_charge, cur_discharge)
                     ),
                     "battery_charge_kwh": round(cur_charge, 3) if cur_charge is not None else None,
@@ -1997,13 +2019,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if slot.start < forecast_cutoff:
                     # Plan slot already covered by past / current-partial → skip.
                     continue
-                wd, hr = slot.start.weekday(), slot.start.hour
                 dev_forecast = {
-                    eid: round(
-                        self.consumption.devices[eid].value(wd, hr) or 0.0, 3
-                    )
-                    if eid in self.consumption.devices
-                    else None
+                    eid: self._device_forecast_kwh(eid, slot.start)
                     for eid in device_ids
                 }
                 if pin_requested:
@@ -2055,6 +2072,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "distribution_price_kwh": slot.distribution_price_kwh,
                         "total_price_kwh": slot.total_price_kwh,
                         "price_confirmed": slot.price_confirmed,
+                        "price_type": self._slot_ptype(slot),
                         "consumption_real": None,
                         "consumption_forecast": round(slot.total_consumption_kwh, 3),
                         "base_consumption_forecast": round(slot.base_consumption_kwh, 3),
@@ -2067,7 +2085,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "battery_soc_start": round(prev_soc, 1) if prev_soc is not None else None,
                         "inverter_mode": (
                             _pin_mode(slot.start)
-                            if pin_requested
+                            if pin_requested and _pin_idx(slot.start) is not None
                             else decision.inverter_mode
                         ),
                         "battery_charge_kwh": round(decision.battery_charge_kwh, 3),
@@ -2089,19 +2107,22 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if decision.ev_soc is not None:
                     prev_ev_soc = decision.ev_soc
 
-        # At a pinned forecast the whole chart is pinned to the selected
-        # vintage: bars, costs and prices come from THAT plan, not from
-        # realized data — otherwise switching the pin only moved the tooltip /
-        # dashed lines and the view mixed "reality" bars with a past plan's
-        # context. The solid realized SoC lines and the tooltip's "realne"
-        # column stay untouched as the comparison anchor.
+        # At a pinned forecast the hours the vintage covered are pinned to it:
+        # bars, costs and prices come from THAT plan, not from realized data —
+        # otherwise switching the pin only moved the tooltip / dashed lines and
+        # the view mixed "reality" bars with a past plan's context. Hours the
+        # plan never covered (before it was made / past its horizon) KEEP their
+        # realized / live values — blanking them wiped all history left of the
+        # pin marker off the chart. The solid realized SoC lines and the
+        # tooltip's "realne" column stay untouched as the comparison anchor.
         if pin_requested:
             for hour_dict in hours:
                 hstart = dt_util.parse_datetime(hour_dict["start"])
-                covered = hstart is not None and _pin_idx(hstart) is not None
+                if hstart is None or _pin_idx(hstart) is None:
+                    continue
 
-                def p(key: str, _h=hstart, _c=covered):
-                    return _pin_val(_h, key) if _c else None
+                def p(key: str, _h=hstart):
+                    return _pin_val(_h, key)
 
                 buy, dist = p("buy"), p("dist")
                 grid, dischg, bcost = p("grid"), p("dischg"), p("bcost")
@@ -2113,6 +2134,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                             buy + dist if buy is not None and dist is not None else None
                         ),
                         "price_confirmed": p("ptype") == "c",
+                        "price_type": PTYPE_CODE_INV.get(p("ptype")),
                         "grid_buy_kwh": grid,
                         "battery_discharge_kwh": dischg,
                         "battery_charge_kwh": p("charge"),

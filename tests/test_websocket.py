@@ -60,12 +60,6 @@ async def test_ws_plan_status_log(hass: HomeAssistant, hass_ws_client) -> None:
     assert msg["success"]
     assert "consumption" in msg["result"]
 
-    await client.send_json({"id": 5, "type": "powerpilot/forecasts"})
-    msg = await client.receive_json()
-    assert msg["success"]
-    assert "horizons" in msg["result"]
-    assert "date" in msg["result"]
-
     await client.send_json({"id": 6, "type": "powerpilot/series", "past_hours": 12})
     msg = await client.receive_json()
     assert msg["success"]
@@ -183,10 +177,11 @@ async def test_series_lead_uses_single_pinned_vintage(hass: HomeAssistant) -> No
         assert h["inverter_mode"] == "charge"
 
     # An hour before the pinned plan was made is not covered → no prognoza, and
-    # the mode band is blank there too.
+    # the hour keeps its realized view (mode falls back to the measured flows —
+    # passthrough here, with no battery sensors in the fixture).
     before = past.get((pin_start - timedelta(hours=1)).isoformat())
     assert before is not None and before["forecast"] is None
-    assert before["inverter_mode"] is None
+    assert before["inverter_mode"] == "passthrough"
 
 
 async def test_series_can_pin_exact_forecast_run_at(hass: HomeAssistant) -> None:
@@ -309,31 +304,12 @@ async def test_ws_prices_archive(hass: HomeAssistant, hass_ws_client) -> None:
     assert len(msg["result"]["hours"]) == 24
 
 
-async def test_ws_snapshots_and_accuracy(hass: HomeAssistant, hass_ws_client) -> None:
+async def test_ws_accuracy(hass: HomeAssistant, hass_ws_client) -> None:
     await _setup(hass)
     client = await hass_ws_client(hass)
 
-    # The first optimization run records one vintage.
-    await client.send_json({"id": 1, "type": "powerpilot/snapshots"})
-    msg = await client.receive_json()
-    assert msg["success"]
-    assert "runs" in msg["result"]
-    assert len(msg["result"]["runs"]) >= 1
-    run_at = msg["result"]["runs"][0]["run_at"]
-
     await client.send_json(
-        {"id": 2, "type": "powerpilot/snapshot", "run_at": run_at}
-    )
-    msg = await client.receive_json()
-    assert msg["success"]
-    assert msg["result"]["run_at"]
-    assert "hours" in msg["result"]
-    if msg["result"]["hours"]:
-        for key in ("start", "buy_price", "consumption_forecast", "inverter_mode"):
-            assert key in msg["result"]["hours"][0]
-
-    await client.send_json(
-        {"id": 3, "type": "powerpilot/accuracy", "lead_hours": 24, "days": 3}
+        {"id": 1, "type": "powerpilot/accuracy", "lead_hours": 24, "days": 3}
     )
     msg = await client.receive_json()
     assert msg["success"]
@@ -342,6 +318,10 @@ async def test_ws_snapshots_and_accuracy(hass: HomeAssistant, hass_ws_client) ->
     assert len(result["bias_by_hour"]) == 24
     assert "mae" in result
     assert "bias" in result
+    # Price-forecast accuracy (vs settled certain prices) ships alongside.
+    assert "price_mae" in result
+    assert "price_bias" in result
+    assert "price_samples" in result
     assert "hours" in result
 
 

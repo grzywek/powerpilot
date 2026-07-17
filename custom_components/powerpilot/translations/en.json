@@ -26,7 +26,8 @@
           "battery_discharge_sensor": "Battery discharge sensor (kW or kWh)",
           "grid_import_sensor": "Grid import sensor (kW or kWh)",
           "consumption_sensor": "Main sensor (inverter / output)",
-          "weather_entity": "Weather entity"
+          "weather_entity": "Weather entity",
+          "climate_sensor": "Weather-dependent consumption sensor (e.g. AC) — profile learned from temperature"
         }
       },
       "prices": {
@@ -128,7 +129,8 @@
           "battery_discharge_sensor": "Battery discharge sensor (kW or kWh)",
           "grid_import_sensor": "Grid import sensor (kW or kWh)",
           "consumption_sensor": "Main sensor (inverter / output)",
-          "weather_entity": "Weather entity"
+          "weather_entity": "Weather entity",
+          "climate_sensor": "Weather-dependent consumption sensor (e.g. AC) — profile learned from temperature"
         }
       },
       "charge_curve": {

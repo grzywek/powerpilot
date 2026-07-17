@@ -129,18 +129,6 @@ interface ConsumptionStats {
   profiles: StatProfile[];
 }
 
-interface ForecastPoint {
-  hour: number;
-  buy: number | null;
-  p10: number | null;
-  p90: number | null;
-}
-
-interface Forecasts {
-  date: string;
-  horizons: Record<string, ForecastPoint[]>;
-}
-
 interface SeriesHour {
   start: string;
   is_past: boolean;
@@ -148,6 +136,7 @@ interface SeriesHour {
   distribution_price_kwh: number | null;
   total_price_kwh: number | null;
   price_confirmed: boolean;
+  price_type: PriceType | null;
   consumption_real: number | null;
   consumption_forecast: number | null;
   base_consumption_forecast: number | null;
@@ -228,6 +217,11 @@ interface PriceArchiveHour {
   p10: number | null;
   p90: number | null;
   estimate_breakdown: EstimateSample[] | null;
+  // Accuracy comparators (energy side, gross PLN/kWh): the last source
+  // forecast before the hour settled, and the weekly-model estimate.
+  forecast_energy_kwh: number | null;
+  forecast_fetched_at: string | null;
+  estimate_energy_kwh: number | null;
   // Seller-style net breakdown (present only for hours fetched under the new
   // pricing model; legacy/estimated rows leave these null).
   tge_kwh?: number | null;
@@ -256,35 +250,6 @@ const PRICE_SOURCE_LABEL: Record<string, string> = {
   estimate: "szacowanie",
 };
 
-interface SnapshotRun {
-  run_at: string;
-  start: string | null;
-  horizon_hours: number | null;
-  total_cost: number | null;
-}
-
-interface SnapshotHour {
-  start: string | null;
-  buy_price: number | null;
-  distribution_price_kwh: number | null;
-  total_price_kwh: number | null;
-  price_type: PriceType | null;
-  consumption_forecast: number | null;
-  base_consumption_forecast: number | null;
-  inverter_mode: string | null;
-  battery_soc: number | null;
-  soc: number | null;
-  grid_buy_kwh: number | null;
-  hour_cost: number | null;
-}
-
-interface SnapshotPayload {
-  run_at: string | null;
-  start?: string;
-  total_cost?: number | null;
-  hours: SnapshotHour[];
-}
-
 interface AccuracyHour {
   start: string;
   predicted_cons: number | null;
@@ -292,6 +257,7 @@ interface AccuracyHour {
   error: number | null;
   predicted_price: number | null;
   actual_price: number | null;
+  price_error: number | null;
 }
 
 interface Accuracy {
@@ -300,6 +266,9 @@ interface Accuracy {
   samples: number;
   mae: number | null;
   bias: number | null;
+  price_samples: number;
+  price_mae: number | null;
+  price_bias: number | null;
   bias_by_hour: (number | null)[];
   hours: AccuracyHour[];
 }
@@ -431,12 +400,6 @@ const WEEKDAY_PL: Record<string, string> = {
   sat: "Sob",
   sun: "Nd",
 };
-const HORIZON_COLORS: Record<string, string> = {
-  "D+1": "#2ec4b6",
-  "D+2": "#7b6cf6",
-  "D+3": "#c98a3a",
-};
-
 const DEVICE_PALETTE = [
   "#7b6cf6",
   "#43a047",
@@ -493,7 +456,6 @@ export class PowerPilotPanel extends LitElement {
   @state() private _stats: ConsumptionStats | null = null;
   @state() private _statsLoading = false;
   @state() private _statsKey: string | null = null;
-  @state() private _forecasts: Forecasts | null = null;
   @state() private _series: Series | null = null;
   @state() private _error: string | null = null;
 
@@ -527,12 +489,7 @@ export class PowerPilotPanel extends LitElement {
   @state() private _pricesData: PriceArchive | null = null;
   @state() private _pricesLoading = false;
 
-  /** Simulations tab: available vintages, the two compared snapshots, accuracy. */
-  @state() private _snapshotRuns: SnapshotRun[] = [];
-  @state() private _snapA: string | null = null;
-  @state() private _snapB: string | null = null;
-  @state() private _snapDataA: SnapshotPayload | null = null;
-  @state() private _snapDataB: SnapshotPayload | null = null;
+  /** Simulations tab: forecast accuracy (consumption + price) at a lead. */
   @state() private _accuracy: Accuracy | null = null;
   @state() private _accuracyLead = 24;
   @state() private _simLoading = false;
@@ -540,8 +497,8 @@ export class PowerPilotPanel extends LitElement {
   private _timer?: number;
   private _energyChart?: ApexCharts;
   private _priceChart?: ApexCharts;
-  private _compareChart?: ApexCharts;
   private _accuracyChart?: ApexCharts;
+  private _priceAccuracyChart?: ApexCharts;
   private _biasChart?: ApexCharts;
   /** Reference to the last Series payload mounted into the charts. Used to
    *  short-circuit Lit updates that don't actually change the data, so user
@@ -616,7 +573,7 @@ export class PowerPilotPanel extends LitElement {
       // Keep the price archive fresh while it's on screen (today's rows pick up
       // newly confirmed / re-forecast prices between source fetches).
       if (this._tab === "prices") this._loadPrices();
-      // Pick up newly recorded vintages + fresh actuals; A/B selection is kept.
+      // Pick up newly recorded vintages + fresh actuals for the accuracy view.
       if (this._tab === "simulations") this._loadSimulations();
       // Keep the pipeline snapshot live while it's on screen.
       if (this._tab === "flow") this._loadFlow();
@@ -737,15 +694,6 @@ export class PowerPilotPanel extends LitElement {
     }
   }
 
-  private async _loadForecasts(): Promise<void> {
-    if (this._forecasts || !this.hass) return;
-    try {
-      this._forecasts = await this.hass.callWS({ type: "powerpilot/forecasts" });
-    } catch (err: any) {
-      this._error = err?.message ?? String(err);
-    }
-  }
-
   private async _loadStats(): Promise<void> {
     if (!this.hass) return;
     this._statsLoading = true;
@@ -766,7 +714,6 @@ export class PowerPilotPanel extends LitElement {
   private _selectTab(tab: Tab): void {
     this._tab = tab;
     if (tab === "profiles") {
-      this._loadForecasts();
       this._loadStats();
     }
     if (tab === "prices") this._loadPrices();
@@ -802,39 +749,12 @@ export class PowerPilotPanel extends LitElement {
   }
 
   // ------------------------------------------------------------------
-  // Simulations: snapshot list + A/B payloads + accuracy
+  // Simulations: forecast accuracy (consumption + price)
   // ------------------------------------------------------------------
   private async _loadSimulations(): Promise<void> {
     if (!this.hass) return;
     this._simLoading = true;
     try {
-      const list = await this.hass.callWS({ type: "powerpilot/snapshots" });
-      const runs: SnapshotRun[] = list?.runs ?? [];
-      this._snapshotRuns = runs;
-      if (runs.length) {
-        // A = newest vintage; B = one from ~24 h earlier (else the oldest).
-        if (!this._snapA || !runs.some((r) => r.run_at === this._snapA)) {
-          this._snapA = runs[0].run_at;
-        }
-        if (!this._snapB || !runs.some((r) => r.run_at === this._snapB)) {
-          const aTime = new Date(this._snapA!).getTime();
-          const target = aTime - 24 * 3600 * 1000;
-          let best = runs[runs.length - 1];
-          for (const r of runs) {
-            if (r.run_at === this._snapA) continue;
-            if (
-              Math.abs(new Date(r.run_at).getTime() - target) <
-              Math.abs(new Date(best.run_at).getTime() - target)
-            )
-              best = r;
-          }
-          this._snapB = best.run_at;
-        }
-        await Promise.all([
-          this._loadSnapshotData("A"),
-          this._loadSnapshotData("B"),
-        ]);
-      }
       await this._loadAccuracy();
       this._error = null;
     } catch (err: any) {
@@ -844,18 +764,6 @@ export class PowerPilotPanel extends LitElement {
     }
   }
 
-  private async _loadSnapshotData(which: "A" | "B"): Promise<void> {
-    if (!this.hass) return;
-    const runAt = which === "A" ? this._snapA : this._snapB;
-    if (!runAt) return;
-    const data: SnapshotPayload = await this.hass.callWS({
-      type: "powerpilot/snapshot",
-      run_at: runAt,
-    });
-    if (which === "A") this._snapDataA = data;
-    else this._snapDataB = data;
-  }
-
   private async _loadAccuracy(): Promise<void> {
     if (!this.hass) return;
     this._accuracy = await this.hass.callWS({
@@ -863,13 +771,6 @@ export class PowerPilotPanel extends LitElement {
       lead_hours: this._accuracyLead,
       days: 7,
     });
-  }
-
-  private _onSnapPick(which: "A" | "B", ev: Event): void {
-    const value = (ev.target as HTMLSelectElement).value;
-    if (which === "A") this._snapA = value;
-    else this._snapB = value;
-    this._loadSnapshotData(which);
   }
 
   private _setAccuracyLead(lead: number): void {
@@ -1164,27 +1065,17 @@ export class PowerPilotPanel extends LitElement {
   }
 
   private _destroySimCharts(): void {
-    if (this._compareChart || this._accuracyChart || this._biasChart) {
-      this._compareChart?.destroy();
+    if (this._accuracyChart || this._priceAccuracyChart || this._biasChart) {
       this._accuracyChart?.destroy();
+      this._priceAccuracyChart?.destroy();
       this._biasChart?.destroy();
-      this._compareChart = undefined;
       this._accuracyChart = undefined;
+      this._priceAccuracyChart = undefined;
       this._biasChart = undefined;
     }
   }
 
   private _mountSimCharts(): void {
-    const compareEl = this.renderRoot.querySelector("#pp-chart-compare") as HTMLElement | null;
-    if (compareEl && (this._snapDataA || this._snapDataB)) {
-      const opts = this._buildCompareOptions(this._snapDataA, this._snapDataB);
-      if (this._compareChart) this._compareChart.updateOptions(opts, false, false);
-      else {
-        this._compareChart = new ApexCharts(compareEl, opts);
-        this._compareChart.render();
-      }
-    }
-
     const acc = this._accuracy;
     const accEl = this.renderRoot.querySelector("#pp-chart-accuracy") as HTMLElement | null;
     if (accEl && acc) {
@@ -1193,6 +1084,16 @@ export class PowerPilotPanel extends LitElement {
       else {
         this._accuracyChart = new ApexCharts(accEl, opts);
         this._accuracyChart.render();
+      }
+    }
+
+    const priceEl = this.renderRoot.querySelector("#pp-chart-price-accuracy") as HTMLElement | null;
+    if (priceEl && acc) {
+      const opts = this._buildPriceAccuracyOptions(acc);
+      if (this._priceAccuracyChart) this._priceAccuracyChart.updateOptions(opts, false, false);
+      else {
+        this._priceAccuracyChart = new ApexCharts(priceEl, opts);
+        this._priceAccuracyChart.render();
       }
     }
 
@@ -2019,16 +1920,49 @@ export class PowerPilotPanel extends LitElement {
     const HOUR = 3600 * 1000;
     const HALF_HOUR = 1800 * 1000;
 
-    // Single stepline for total price (energy + distribution): the hour's
-    // price holds flat across the whole hour. An extra point extends the last
-    // step to the end of its hour. Tooltip shows the breakdown + indicator.
-    const stepLine = (get: (h: SeriesHour) => number | null) => {
-      const data = ts.map((t, i) => ({ x: t, y: get(hrs[i]) }));
-      if (hrs.length) data.push({ x: ts[ts.length - 1] + HOUR, y: get(hrs[hrs.length - 1]) });
+    // The PLN/kWh axis is √-compressed (like the kWh axis on the energy panel):
+    // the decisive differences live in the 0.2–0.8 range where the price lines
+    // cross "Cena w baterii", while rare 2–3 PLN spikes would flatten them.
+    // Signed so occasional negative RDN prices keep working; axis labels square
+    // back to real PLN/kWh and the tooltip reads raw row values.
+    const sqrtP = (v: number | null): number | null =>
+      v == null ? null : Math.sign(v) * Math.sqrt(Math.abs(v));
+
+    // The total-price stepline is split into 3 series by price provenance
+    // (pewna/prognoza/szacowana — same colors as the Ceny tab). Each hour's
+    // point lands on the matching series; a segment's last hour also bridges
+    // its value onto the boundary point of the next (differently-typed) hour,
+    // so every hour keeps a full-width plateau and segments touch.
+    const typeOf = (h: SeriesHour): PriceType =>
+      h.price_type ?? (h.price_confirmed ? "certain" : "forecast");
+    const typedStep = (type: PriceType) => {
+      const data: { x: number; y: number | null }[] = [];
+      hrs.forEach((h, i) => {
+        const cur = typeOf(h) === type ? h.total_price_kwh : null;
+        const prev =
+          i > 0 && typeOf(hrs[i - 1]) === type ? hrs[i - 1].total_price_kwh : null;
+        data.push({ x: ts[i], y: sqrtP(cur ?? prev) });
+      });
+      if (hrs.length) {
+        const last = hrs[hrs.length - 1];
+        data.push({
+          x: ts[ts.length - 1] + HOUR,
+          y: typeOf(last) === type ? sqrtP(last.total_price_kwh) : null,
+        });
+      }
       return data;
     };
-    const priceData = stepLine((h) => h.total_price_kwh);
-    const batCostData = stepLine((h) => h.battery_energy_cost);
+    // Battery-cost stepline: the hour's value holds flat across the whole hour,
+    // with an extra point extending the last step to the end of its hour.
+    const batCostData = (() => {
+      const data = ts.map((t, i) => ({ x: t, y: sqrtP(hrs[i].battery_energy_cost) }));
+      if (hrs.length)
+        data.push({
+          x: ts[ts.length - 1] + HOUR,
+          y: sqrtP(hrs[hrs.length - 1].battery_energy_cost),
+        });
+      return data;
+    })();
 
     // Two PLN/h stacked columns: cost served from the grid vs cost served
     // from the battery. Sum = total cost of meeting demand this hour.
@@ -2047,8 +1981,19 @@ export class PowerPilotPanel extends LitElement {
     const batUseCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].battery_use_cost) }));
 
     const dark = this._isDark();
+    const priceSeriesNames: string[] = [];
     const series: any[] = [
-      { name: "Cena pełna", type: "line", data: priceData, color: "#facc15" },
+      // One stepline per price provenance, colored like the Ceny tab badges.
+      ...(["certain", "forecast", "estimated"] as PriceType[]).map((t) => {
+        const name = `Cena ${PRICE_TYPE_META[t].label}`;
+        priceSeriesNames.push(name);
+        return {
+          name,
+          type: "line",
+          data: typedStep(t),
+          color: PRICE_TYPE_META[t].color,
+        };
+      }),
       // Near-black (near-white in dark mode) — teal read as "blue" and sank
       // into the blue battery-cost columns it usually overlaps.
       {
@@ -2080,15 +2025,16 @@ export class PowerPilotPanel extends LitElement {
       },
       theme: { mode: dark ? "dark" : "light" },
       stroke: {
-        // 2 lines + 2 columns = 4 series total. Steplines: the price holds
-        // flat for its whole hour instead of ramping between hour starts.
-        width: [3, 2, 0, 0],
-        curve: ["stepline", "stepline", "straight", "straight"],
-        dashArray: [0, 3, 0, 0],
+        // 3 typed price lines + battery-cost line + 2 columns. Steplines: the
+        // price holds flat for its whole hour instead of ramping between
+        // hour starts.
+        width: [3, 3, 3, 2, 0, 0],
+        curve: ["stepline", "stepline", "stepline", "stepline", "straight", "straight"],
+        dashArray: [0, 0, 0, 3, 0, 0],
       },
       plotOptions: { bar: { columnWidth: "95%", borderRadius: 0 } },
       dataLabels: { enabled: false },
-      fill: { opacity: [1, 1, 0.75, 0.7] },
+      fill: { opacity: [1, 1, 1, 1, 0.75, 0.7] },
       series,
       xaxis: {
         type: "datetime",
@@ -2101,12 +2047,14 @@ export class PowerPilotPanel extends LitElement {
       },
       yaxis: [
         {
-          // Keep both PLN/kWh lines on one scale so equal values align visually.
-          seriesName: ["Cena pełna", "Cena w baterii"],
-          title: { text: "PLN/kWh" },
+          // Every PLN/kWh line shares one scale so equal values align visually.
+          // Values live in √-space (see sqrtP) — square ticks back to PLN/kWh.
+          seriesName: [...priceSeriesNames, "Cena w baterii"],
+          title: { text: "PLN/kWh, skala √" },
           labels: {
             minWidth: 48,
-            formatter: (v: number) => (v != null ? v.toFixed(2) : ""),
+            formatter: (v: number) =>
+              v != null ? (Math.sign(v) * v * v).toFixed(2) : "",
           },
           forceNiceScale: true,
           decimalsInFloat: 2,
@@ -2147,7 +2095,13 @@ export class PowerPilotPanel extends LitElement {
             hour: "2-digit",
             minute: "2-digit",
           });
-          const confirmed = row.price_confirmed ? "(pewne)" : "(prognoza)";
+          // Price provenance badge (pewna/prognoza/szacowana), colored like
+          // the line series and the Ceny tab.
+          const ptMeta =
+            PRICE_TYPE_META[
+              row.price_type ?? (row.price_confirmed ? "certain" : "forecast")
+            ];
+          const typeBadge = `<span style="display:inline-block;padding:0 5px;border-radius:3px;background:${ptMeta.color};color:#fff;font-size:11px">${ptMeta.label}</span>`;
           const tt = this._isDark()
             ? { bg: "#1f2937", fg: "#f3f4f6", border: "#374151" }
             : { bg: "#ffffff", fg: "#1f2937", border: "#d1d5db" };
@@ -2155,7 +2109,7 @@ export class PowerPilotPanel extends LitElement {
             <div style="padding:8px 10px;color:${tt.fg};font-size:12px;line-height:1.4;min-width:240px">
               <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}</div>
               <table style="border-collapse:collapse;width:100%">
-                <tr><td style="padding:1px 0">Cena całkowita ${confirmed}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.total_price_kwh)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0">Cena całkowita ${typeBadge}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.total_price_kwh)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· energia</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.buy_price)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· dystrybucja (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.distribution_price_kwh)} PLN/kWh</td></tr>
                 ${row.fixed_cost ? `<tr><td style="padding:1px 0 1px 10px;opacity:0.8">· koszt stały (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.fixed_cost)} PLN/h</td></tr>` : ""}
@@ -2191,31 +2145,6 @@ export class PowerPilotPanel extends LitElement {
         ],
       },
     };
-  }
-
-  // ------------------------------------------------------------------
-  // Chart engine (for Profiles tab overlay — legacy SVG)
-  // ------------------------------------------------------------------
-  /** Simple index-based polyline used by the forecast overlay. */
-  private _linePath(values: number[], min: number, max: number, w: number, h: number): string {
-    const n = values.length;
-    if (n < 2) return "";
-    const span = max - min || 1;
-    const pad = 6;
-    const innerH = h - pad * 2;
-    let d = "";
-    let started = false;
-    values.forEach((v, i) => {
-      if (isNaN(v)) {
-        started = false;
-        return;
-      }
-      const x = (i / (n - 1)) * w;
-      const yy = pad + innerH - ((v - min) / span) * innerH;
-      d += `${started ? "L" : "M"}${x.toFixed(1)},${yy.toFixed(1)} `;
-      started = true;
-    });
-    return d.trim();
   }
 
   // ------------------------------------------------------------------
@@ -2286,6 +2215,22 @@ export class PowerPilotPanel extends LitElement {
         ? { min: Math.min(...fullPrices), max: Math.max(...fullPrices) }
         : null;
 
+    // Day-level accuracy vs the settled (certain) rows: how far off the last
+    // pre-settlement forecast and the weekly-model estimate were on average.
+    const mae = (get: (h: PriceArchiveHour) => number | null): number | null => {
+      const errs = rows
+        .filter((h) => h.type === "certain" && h.energy_price_kwh != null)
+        .map((h) => {
+          const v = get(h);
+          return v == null ? null : Math.abs(v - (h.energy_price_kwh as number));
+        })
+        .filter((v): v is number => v != null);
+      if (!errs.length) return null;
+      return errs.reduce((a, b) => a + b, 0) / errs.length;
+    };
+    const maeForecast = mae((h) => h.forecast_energy_kwh);
+    const maeEstimate = mae((h) => h.estimate_energy_kwh);
+
     const body = !data
       ? html`<div class="empty">${this._pricesLoading ? "Ładowanie…" : "Brak danych."}</div>`
       : !hasAny
@@ -2299,6 +2244,8 @@ export class PowerPilotPanel extends LitElement {
                   <th>Typ</th>
                   <th>Źródło</th>
                   <th>Pobrano</th>
+                  <th>Prognoza<br /><span class="muted">energia + błąd</span></th>
+                  <th>Szacowana<br /><span class="muted">energia + błąd</span></th>
                   <th>TGE<br /><span class="muted">netto</span></th>
                   <th>Marża<br /><span class="muted">netto</span></th>
                   <th>Dystrybucja<br /><span class="muted">netto</span></th>
@@ -2318,6 +2265,19 @@ export class PowerPilotPanel extends LitElement {
               (t) => html`<span class="badge" style=${"background:" + PRICE_TYPE_META[t].color}>${PRICE_TYPE_META[t].label}</span>`
             )}
             <span class="muted">TGE / marża / dystrybucja są netto; „podatki” = akcyza + VAT, „cena pełna” = brutto. Opłata stała (abonamentowa) rozliczana osobno, poza ceną/kWh. „szacowana” = średnia ważona z 3 ostatnich tygodni — najedź na typ, by zobaczyć obliczenie.</span>
+          </div>
+          <div class="prices-legend">
+            <span class="muted">
+              Kolumny „Prognoza” i „Szacowana” pokazują cenę energii (brutto), jaką dawał dany
+              model, z błędem względem wiersza: dla godzin pewnych — ostatnia prognoza źródła
+              sprzed publikacji RDN (zwykle z D−1 rano) oraz szacunek tygodniowy; dla godzin
+              prognozowanych — tylko szacunek (Δ vs bieżąca prognoza).
+              ${maeForecast != null || maeEstimate != null
+                ? html`Średni błąd dnia vs ceny pewne: prognoza
+                    <b>${maeForecast != null ? maeForecast.toFixed(3) : "—"}</b>, szacunek
+                    <b>${maeEstimate != null ? maeEstimate.toFixed(3) : "—"}</b> PLN/kWh.`
+                : nothing}
+            </span>
           </div>
         `;
 
@@ -2354,12 +2314,44 @@ export class PowerPilotPanel extends LitElement {
       fullPriceHeat && h.total_price_kwh != null
         ? this._priceHeatStyle(h.total_price_kwh, fullPriceHeat.min, fullPriceHeat.max)
         : "";
+
+    // "Prognoza" / "Szacowana" comparators: the model's energy price with its
+    // signed error vs this row's energy price. A certain row compares both
+    // models; a forecast row only the estimate (it *is* the forecast itself).
+    const comparator = (value: number | null | undefined, title = "") => {
+      if (value == null || h.energy_price_kwh == null)
+        return html`<span class="muted">—</span>`;
+      const d = value - h.energy_price_kwh;
+      const deltaStr =
+        Math.abs(d) < 0.0005
+          ? html`<span class="muted">=</span>`
+          : html`<span style=${"color:" + (d > 0 ? "#f59e0b" : "#3b82f6")}>
+              ${(d > 0 ? "+" : "−") + Math.abs(d).toFixed(3)}
+            </span>`;
+      return html`<span title=${title}>${value.toFixed(3)} ${deltaStr}</span>`;
+    };
+    const forecastCell =
+      h.type === "certain"
+        ? comparator(
+            h.forecast_energy_kwh,
+            h.forecast_fetched_at
+              ? `ostatnia prognoza przed RDN, pobrana ${fmtStamp(h.forecast_fetched_at)}`
+              : "ostatnia prognoza przed RDN"
+          )
+        : html`<span class="muted">—</span>`;
+    const estimateCell =
+      h.type === "certain" || h.type === "forecast"
+        ? comparator(h.estimate_energy_kwh, "szacunek: średnia ważona z 3 tygodni")
+        : html`<span class="muted">—</span>`;
+
     return html`
       <tr>
         <td>${fmtHour(h.start)}</td>
         <td>${badge}</td>
         <td class="muted">${sourceLabel}</td>
         <td class="muted">${fmtStamp(h.fetched_at)}</td>
+        <td>${forecastCell}</td>
+        <td>${estimateCell}</td>
         <td>${hasBreakdown ? fmtNet(h.tge_kwh) : html`<span class="muted">—</span>`}</td>
         <td>${hasBreakdown ? fmtNet(h.markup_kwh) : html`<span class="muted">—</span>`}</td>
         <td>${fmtNet(hasBreakdown ? h.distribution_net_kwh : h.distribution_price_kwh)}</td>
@@ -2400,7 +2392,7 @@ export class PowerPilotPanel extends LitElement {
   }
 
   // ------------------------------------------------------------------
-  // Simulations (snapshot compare + forecast accuracy)
+  // Simulations (forecast accuracy: consumption + price)
   // ------------------------------------------------------------------
   private _fmtRun(iso: string | null): string {
     if (!iso) return "—";
@@ -2415,53 +2407,22 @@ export class PowerPilotPanel extends LitElement {
   }
 
   private _renderSimulations(): TemplateResult {
-    const runs = this._snapshotRuns;
-    if (!runs.length) {
+    const acc = this._accuracy;
+    if (!acc) {
       return html`<div class="card empty">
         ${this._simLoading
           ? "Ładowanie…"
-          : "Brak zapisanych wersji. Optymalizator zapisuje jeden snapshot na godzinę — wróć tu za jakiś czas."}
+          : "Brak danych trafności. Optymalizator zapisuje jeden snapshot planu na godzinę — wróć tu za jakiś czas."}
       </div>`;
     }
-
-    const runOption = (sel: string | null) => (r: SnapshotRun) => html`
-      <option value=${r.run_at} ?selected=${r.run_at === sel}>
-        ${this._fmtRun(r.run_at)}${r.total_cost != null ? ` · ${r.total_cost.toFixed(2)} PLN` : ""}
-      </option>
-    `;
-
-    const acc = this._accuracy;
     const fmt = (v: number | null, d = 3) => (v == null ? "—" : v.toFixed(d));
 
     return html`
       <div class="card">
-        <div class="card-title">Porównanie wersji planu (A vs B)</div>
-        <div class="sim-picker">
-          <label class="sim-pick">
-            <span class="sim-tag sim-a">A</span>
-            <select @change=${(e: Event) => this._onSnapPick("A", e)}>
-              ${runs.map(runOption(this._snapA))}
-            </select>
-          </label>
-          <label class="sim-pick">
-            <span class="sim-tag sim-b">B</span>
-            <select @change=${(e: Event) => this._onSnapPick("B", e)}>
-              ${runs.map(runOption(this._snapB))}
-            </select>
-          </label>
-        </div>
-        <div class="muted sim-hint">
-          A pełna linia, B przerywana. Te same godziny docelowe — widać, jak prognoza zużycia i
-          trajektoria SoC zmieniły się między przeliczeniami.
-        </div>
-        <div id="pp-chart-compare" class="apex-chart"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Trafność prognozy — przewidywanie vs rzeczywistość</div>
+        <div class="card-title">Trafność prognoz — przewidywanie vs rzeczywistość</div>
         <div class="sim-lead">
           <span class="muted">Wyprzedzenie:</span>
-          ${[24, 48, 72].map(
+          ${[6, 12, 24, 48, 72].map(
             (l) => html`<button
               class="nav-btn ${this._accuracyLead === l ? "active" : ""}"
               @click=${() => this._setAccuracyLead(l)}
@@ -2469,58 +2430,64 @@ export class PowerPilotPanel extends LitElement {
               ${l} h
             </button>`
           )}
-          ${acc
-            ? html`<span class="nav-spacer"></span>
-                <span class="muted">próbki: <b>${acc.samples}</b></span>
-                <span class="muted">MAE: <b>${fmt(acc.mae)}</b> kWh</span>
-                <span class="muted">bias: <b>${fmt(acc.bias)}</b> kWh</span>`
-            : nothing}
         </div>
         <div class="muted sim-hint">
-          Co przewidywaliśmy ${this._accuracyLead} h wcześniej kontra realne zużycie. Ujemny bias =
-          systematyczne <b>niedoszacowanie</b>.
+          „Wyprzedzenie ${this._accuracyLead} h" = dla każdej minionej godziny bierzemy plan
+          zapisany ${this._accuracyLead} h przed nią i porównujemy jego przewidywania z tym, co
+          faktycznie się stało (ostatnie 7 dni). Prognoza zużycia opiera się na profilu
+          tygodniowym i zmienia się powoli — różnice między wyprzedzeniami widać głównie w
+          cenach, które po drodze przechodzą z szacowanych przez prognozowane do pewnych.
         </div>
+        <div class="kpi-grid">
+          ${this._kpi("Zużycie — próbki", `${acc.samples}`, null, "godzin z parą prognoza+realne")}
+          ${this._kpi("Zużycie — MAE", `${fmt(acc.mae)} kWh`, null, "średni błąd bezwzględny")}
+          ${this._kpi(
+            "Zużycie — bias",
+            `${fmt(acc.bias)} kWh`,
+            null,
+            "ujemny = niedoszacowanie"
+          )}
+          ${this._kpi("Cena — próbki", `${acc.price_samples}`, null, "vs ceny pewne (RDN)")}
+          ${this._kpi("Cena — MAE", `${fmt(acc.price_mae, 3)} PLN/kWh`, null, "średni błąd bezwzględny")}
+          ${this._kpi(
+            "Cena — bias",
+            `${fmt(acc.price_bias, 3)} PLN/kWh`,
+            null,
+            "ujemny = prognoza za niska"
+          )}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Zużycie: prognoza (sprzed ${this._accuracyLead} h) vs realne</div>
         <div id="pp-chart-accuracy" class="apex-chart"></div>
+        <div class="card-title" style="margin-top:8px;">
+          Cena energii: prognoza (sprzed ${this._accuracyLead} h) vs pewna
+        </div>
+        <div id="pp-chart-price-accuracy" class="apex-chart"></div>
         <div class="card-title" style="margin-top:8px;">Błąd zużycia wg godziny doby (kWh)</div>
         <div id="pp-chart-bias" class="apex-chart apex-chart-short"></div>
       </div>
     `;
   }
 
-  /** Map snapshot hours to {x: ms, y} points for a numeric field. */
-  private _snapPoints(
-    data: SnapshotPayload | null,
-    get: (h: SnapshotHour) => number | null
-  ): { x: number; y: number | null }[] {
-    if (!data?.hours?.length) return [];
-    return data.hours
-      .filter((h) => h.start)
-      .map((h) => ({ x: new Date(h.start as string).getTime(), y: get(h) }));
-  }
-
-  private _buildCompareOptions(a: SnapshotPayload | null, b: SnapshotPayload | null): any {
+  private _buildPriceAccuracyOptions(acc: Accuracy): any {
     const dark = this._isDark();
     const grid = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
     const fg = dark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.7)";
-    const series = [
-      { name: "Zużycie A", type: "line", color: "#1d9e75", data: this._snapPoints(a, (h) => h.consumption_forecast) },
-      { name: "Zużycie B", type: "line", color: "#1d9e75", data: this._snapPoints(b, (h) => h.consumption_forecast) },
-      { name: "SoC A", type: "line", color: "#ba7517", data: this._snapPoints(a, (h) => h.soc) },
-      { name: "SoC B", type: "line", color: "#ba7517", data: this._snapPoints(b, (h) => h.soc) },
-    ];
+    const pts = (get: (h: AccuracyHour) => number | null) =>
+      acc.hours.map((h) => ({ x: new Date(h.start).getTime(), y: get(h) }));
     return {
       chart: { type: "line", height: 280, background: "transparent", toolbar: { show: false }, animations: { enabled: false } },
       theme: { mode: dark ? "dark" : "light" },
-      series,
-      stroke: { width: [2, 2, 2, 2], dashArray: [0, 5, 0, 5], curve: "smooth" },
-      colors: ["#1d9e75", "#1d9e75", "#ba7517", "#ba7517"],
-      xaxis: { type: "datetime", labels: { datetimeUTC: false, style: { colors: fg } } },
-      yaxis: [
-        { seriesName: "Zużycie A", title: { text: "kWh", style: { color: fg } }, labels: { style: { colors: fg } }, decimalsInFloat: 2 },
-        { seriesName: "Zużycie A", show: false },
-        { seriesName: "SoC A", opposite: true, min: 0, max: 100, title: { text: "SoC %", style: { color: fg } }, labels: { style: { colors: fg } } },
-        { seriesName: "SoC A", show: false, opposite: true, min: 0, max: 100 },
+      series: [
+        { name: "Cena — prognoza", color: "#3498db", data: pts((h) => h.predicted_price) },
+        { name: "Cena — pewna (RDN)", color: "#43a047", data: pts((h) => h.actual_price) },
       ],
+      stroke: { width: [2, 2], dashArray: [5, 0], curve: "stepline" },
+      colors: ["#3498db", "#43a047"],
+      xaxis: { type: "datetime", labels: { datetimeUTC: false, style: { colors: fg } } },
+      yaxis: { title: { text: "PLN/kWh", style: { color: fg } }, labels: { style: { colors: fg } }, decimalsInFloat: 2 },
       legend: { labels: { colors: fg } },
       grid: { borderColor: grid },
       tooltip: { theme: dark ? "dark" : "light", x: { format: "dd.MM HH:mm" } },
@@ -3047,13 +3014,6 @@ export class PowerPilotPanel extends LitElement {
       </div>
 
       ${this._heatmapForKey(sel.key)}
-
-      <div class="card">
-        <div class="card-title">
-          Prognozy cen D+1..D+3 ${this._forecasts ? "— " + this._forecasts.date : ""}
-        </div>
-        ${this._renderForecastOverlay()}
-      </div>
     `;
   }
 
@@ -3207,44 +3167,6 @@ export class PowerPilotPanel extends LitElement {
     const t = max > min ? (v - min) / (max - min) : 0.5;
     const hue = (1 - t) * 160; // teal (low) → red (high)
     return `hsl(${hue}, 70%, 45%)`;
-  }
-
-  private _renderForecastOverlay(): TemplateResult {
-    const f = this._forecasts;
-    if (!f) return html`<div class="empty">Ładowanie prognoz…</div>`;
-    const horizons = Object.keys(f.horizons || {});
-    if (!horizons.length)
-      return html`<div class="empty">Brak prognoz (wymaga źródła Pradcast z kluczem API).</div>`;
-
-    const toArray = (pts: ForecastPoint[]): number[] => {
-      const arr = new Array(24).fill(NaN);
-      pts.forEach((p) => {
-        if (p.buy !== null && p.hour >= 0 && p.hour < 24) arr[p.hour] = p.buy;
-      });
-      return arr;
-    };
-    const series = horizons.map((h) => ({ h, vals: toArray(f.horizons[h]) }));
-    const all = series.flatMap((s) => s.vals).filter((v) => !isNaN(v));
-    const min = Math.min(0, ...all);
-    const max = Math.max(0.1, ...all);
-    const w = 760;
-    const ht = 180;
-    return html`
-      <svg viewBox="0 0 ${w} ${ht}" class="chart">
-        ${series.map(
-          (s) =>
-            svg`<path d=${this._linePath(s.vals, min, max, w, ht)} fill="none"
-              stroke=${HORIZON_COLORS[s.h] ?? "#888"} stroke-width="2" />`
-        )}
-      </svg>
-      <div class="fc-legend">
-        ${series.map(
-          (s) => html`<span class="fc-key">
-            <span class="swatch" style=${"background:" + (HORIZON_COLORS[s.h] ?? "#888")}></span>${s.h}
-          </span>`
-        )}
-      </div>
-    `;
   }
 
   // ------------------------------------------------------------------
@@ -3937,23 +3859,6 @@ export class PowerPilotPanel extends LitElement {
         hsl(0, 70%, 45%)
       );
     }
-    .fc-legend {
-      display: flex;
-      gap: 16px;
-      margin-top: 8px;
-      font-size: 13px;
-    }
-    .fc-key {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .swatch {
-      width: 12px;
-      height: 12px;
-      border-radius: 3px;
-      display: inline-block;
-    }
     /* Date navigation bar */
     .nav-card {
       padding: 10px 14px;
@@ -4119,42 +4024,6 @@ export class PowerPilotPanel extends LitElement {
       gap: 8px;
       margin-top: 10px;
       font-size: 12px;
-    }
-    .sim-picker {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-bottom: 8px;
-    }
-    .sim-pick {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .sim-pick select {
-      padding: 5px 8px;
-      border-radius: 6px;
-      background: var(--secondary-background-color, rgba(127, 127, 127, 0.12));
-      border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.3));
-      color: inherit;
-      font-size: 13px;
-    }
-    .sim-tag {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      color: #fff;
-      font-size: 12px;
-      font-weight: 600;
-    }
-    .sim-a {
-      background: #1d9e75;
-    }
-    .sim-b {
-      background: #7b6cf6;
     }
     .sim-hint {
       font-size: 12px;

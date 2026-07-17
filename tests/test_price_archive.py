@@ -42,6 +42,28 @@ def test_layering_estimated_forecast_certain() -> None:
     assert archive.get(h)["type"] == PRICE_TYPE_CERTAIN
 
 
+def test_certain_stashes_last_forecast_for_error_column() -> None:
+    archive = PriceArchive()
+    h = _hour()
+    archive.record(h, 1.0, PRICE_TYPE_FORECAST, "pradcast", "t1")
+    archive.record(h, 1.2, PRICE_TYPE_FORECAST, "pradcast", "t2")
+    archive.record(h, 1.3, PRICE_TYPE_CERTAIN, "pradcast", "t3")
+
+    entry = archive.get(h)
+    assert entry["type"] == PRICE_TYPE_CERTAIN
+    # The LAST forecast before settlement survives, with its fetch time.
+    assert entry["fc_energy"] == 1.2
+    assert entry["fc_fetched_at"] == "t2"
+
+    # A later certain-value correction keeps the stashed forecast.
+    archive.record(h, 1.4, PRICE_TYPE_CERTAIN, "pradcast", "t4")
+    assert archive.get(h)["fc_energy"] == 1.2
+
+    # Roundtrip keeps the stash.
+    restored = PriceArchive.from_dict(archive.to_dict())
+    assert restored.get(h)["fc_energy"] == 1.2
+
+
 def test_record_is_noop_when_identical() -> None:
     archive = PriceArchive()
     h = _hour()

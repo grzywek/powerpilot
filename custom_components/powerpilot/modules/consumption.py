@@ -77,6 +77,12 @@ class ConsumptionModule(PowerPilotModule):
         self.devices: dict[str, WeeklyAccumulator] = {}
         self._store: Store | None = None
         self._last_learn_day: date | None = None
+        # Meter-tree fingerprint the stored profile was learned under. When the
+        # configuration changes (a sub-meter added/removed or re-parented) the
+        # already-folded days attribute energy to the OLD tree — e.g. the washer's
+        # kWh still sit inside the apartment profile — so the profile is reset
+        # and relearned from history instead of mixing two attributions forever.
+        self._topology: list | None = None
         self._default_profile = self._build_default_profile()
 
     # ------------------------------------------------------------------
@@ -97,6 +103,7 @@ class ConsumptionModule(PowerPilotModule):
             }
             last = stored.get("last_learn_day")
             self._last_learn_day = date.fromisoformat(last) if last else None
+            self._topology = stored.get("topology")
         await self._maybe_learn()
 
     async def async_update(self) -> None:
@@ -224,6 +231,7 @@ class ConsumptionModule(PowerPilotModule):
                 "last_learn_day": self._last_learn_day.isoformat()
                 if self._last_learn_day
                 else None,
+                "topology": self._topology,
             }
         )
 
@@ -238,10 +246,41 @@ class ConsumptionModule(PowerPilotModule):
     # ------------------------------------------------------------------
     # Learning
     # ------------------------------------------------------------------
+    def _current_topology(self) -> list:
+        """JSON-friendly fingerprint of the meter tree the profile learns under."""
+        main_sensor = self.config.get(CONF_CONSUMPTION_SENSOR)
+        device_sensors = list(self.config.get(CONF_DEVICE_SENSORS) or [])
+        ev_meter = self.config.get(CONF_EV_CHARGE_METER_SENSOR)
+        if ev_meter and ev_meter not in device_sensors:
+            device_sensors.append(ev_meter)
+        parents = self.config.get(CONF_SENSOR_PARENTS) or {}
+        return [
+            main_sensor,
+            sorted(device_sensors),
+            sorted((str(k), str(v)) for k, v in parents.items()),
+        ]
+
     async def _maybe_learn(self) -> None:
         main_sensor = self.config.get(CONF_CONSUMPTION_SENSOR)
         if not main_sensor:
             return
+
+        # A changed meter tree invalidates every already-folded day (their kWh
+        # were attributed under the old hierarchy) → drop the profile and relearn
+        # the whole window below under the new tree. Days already observed would
+        # otherwise be skipped by the per-date dedup and never corrected.
+        topology = self._current_topology()
+        topology_changed = self._topology is not None and topology != self._topology
+        if topology_changed:
+            self.base = WeeklyAccumulator()
+            self.devices = {}
+            self._last_learn_day = None
+            self.log_info(
+                "Zmiana hierarchii liczników — profil zużycia uczony od nowa.",
+                extra={"topology": topology},
+            )
+        self._topology = topology
+
         today = dt_util.now().date()
         if self._last_learn_day == today and self.base.observed_days > 0:
             return
@@ -271,7 +310,7 @@ class ConsumptionModule(PowerPilotModule):
         base_excl = exclusive.get(main_sensor, {})
         device_excl = {eid: exclusive.get(eid, {}) for eid in device_sensors}
 
-        changed = False
+        changed = topology_changed  # a reset must persist even with nothing to fold
         day = start.date()
         while day < today:
             if not self.base.is_date_observed(day):
@@ -405,12 +444,15 @@ class ConsumptionModule(PowerPilotModule):
     def device_value(self, weekday: int, hour: int) -> float:
         # The EV charge meter is learned (so it can be subtracted from the base)
         # but never added back to demand — EV charging is planned by the EV module,
-        # not part of the household background load.
+        # not part of the household background load. Likewise the climate sensor
+        # once its temperature model is ready: the climate module forecasts that
+        # device from the outside temperature instead of the weekly average.
         ev_meter = self.config.get(CONF_EV_CHARGE_METER_SENSOR)
+        climate = self.coordinator.climate
         return sum(
             acc.value(weekday, hour) or 0.0
             for eid, acc in self.devices.items()
-            if eid != ev_meter
+            if eid != ev_meter and not climate.handles(eid)
         )
 
     def contribute(self, forecast: Forecast) -> None:

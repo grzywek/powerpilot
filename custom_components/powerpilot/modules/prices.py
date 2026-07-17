@@ -135,6 +135,20 @@ class PriceArchive:
             "p10": p10,
             "p90": p90,
         }
+        # Keep the last published forecast when the binding (certain) price
+        # replaces it, so the "Ceny" tab can show forecast-vs-certain error.
+        # A certain price only publishes once (D-1 ~14:00 on RDN), so this is
+        # the freshest forecast the source managed before settlement.
+        if (
+            price_type == PRICE_TYPE_CERTAIN
+            and existing is not None
+            and existing.get("type") == PRICE_TYPE_FORECAST
+        ):
+            entry["fc_energy"] = existing.get("energy")
+            entry["fc_fetched_at"] = existing.get("fetched_at")
+        elif existing is not None and existing.get("fc_energy") is not None:
+            entry["fc_energy"] = existing.get("fc_energy")
+            entry["fc_fetched_at"] = existing.get("fc_fetched_at")
         if formula is not None:
             entry["formula"] = formula
         elif existing is not None and existing.get("formula") is not None:
@@ -321,13 +335,6 @@ class PriceModule(PowerPilotModule):
             },
         )
 
-    async def async_fetch_forecasts(self, target_date) -> dict:
-        """Horizon-indexed forecasts (D+1..D+3) for the overlay, if supported."""
-        source = self._build_source()
-        if isinstance(source, PradcastPriceSource):
-            return await source.async_fetch_forecasts(target_date)
-        return {}
-
     def price_at(self, hour) -> float | None:
         # The live fetch window (``_data.buy``) only covers today→D+N; past hours
         # roll out of it on the next fetch. The permanent archive retains them
@@ -346,6 +353,22 @@ class PriceModule(PowerPilotModule):
             return True
         archived = self.archive.get(hour)
         return archived is not None and archived["type"] == PRICE_TYPE_CERTAIN
+
+    def price_type_at(self, hour) -> str | None:
+        """Provenance of the price :meth:`price_at` returns for ``hour``.
+
+        Mirrors the same live-fetch → archive resolution order, so the chart can
+        colour each hour by how trustworthy its price is. ``None`` when no price
+        is known at all.
+        """
+        if hour in self._data.confirmed_hours:
+            return PRICE_TYPE_CERTAIN
+        if hour in self._data.buy:
+            return PRICE_TYPE_FORECAST
+        archived = self.archive.get(hour)
+        if archived is not None:
+            return archived["type"]
+        return None
 
     async def _ensure_initial_backfill(self) -> None:
         """One-time maximal historical backfill, run once at provider setup.

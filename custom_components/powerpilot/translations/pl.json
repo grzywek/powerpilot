@@ -26,7 +26,8 @@
           "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
           "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
           "consumption_sensor": "Sensor główny (falownik / wyjście)",
-          "weather_entity": "Encja pogody"
+          "weather_entity": "Encja pogody",
+          "climate_sensor": "Sensor zużycia zależny od pogody (np. klimatyzacja) — profil uczony z temperatury"
         }
       },
       "prices": {
@@ -128,7 +129,8 @@
           "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
           "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
           "consumption_sensor": "Sensor główny (falownik / wyjście)",
-          "weather_entity": "Encja pogody"
+          "weather_entity": "Encja pogody",
+          "climate_sensor": "Sensor zużycia zależny od pogody (np. klimatyzacja) — profil uczony z temperatury"
         }
       },
       "charge_curve": {

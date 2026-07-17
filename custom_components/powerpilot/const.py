@@ -57,6 +57,13 @@ CONF_SENSOR_PARENTS: Final = "sensor_parents"
 CONF_CONSUMPTION_LEARN_DAYS: Final = "consumption_learn_days"  # history window
 CONF_BUY_PRICE_SENSOR: Final = "buy_price_sensor"
 CONF_WEATHER_ENTITY: Final = "weather_entity"
+# Which consumption sensor's load depends on the weather (e.g. the AC meter).
+# That device's hourly profile is then learned as a function of the outside
+# temperature (climate module) instead of the weekday+hour weekly average.
+CONF_CLIMATE_SENSOR: Final = "climate_sensor"
+
+# Storage version for the per-entry climate (temperature-profile) store.
+STORAGE_VERSION_CLIMATE: Final = 1
 
 # --- Price source ---
 CONF_PRICE_SOURCE: Final = "price_source"  # "sensor" | "pradcast"

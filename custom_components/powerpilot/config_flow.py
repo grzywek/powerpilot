@@ -25,7 +25,7 @@ from .const import (
     CONF_CHARGE_CURVE,
     CONF_CHARGE_EFFICIENCY,
     CONF_CHARGE_EFFICIENCY_CURVE,
-    CONF_CLIMATE_SENSOR,
+    CONF_CLIMATE_SENSORS,
     CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
@@ -181,11 +181,13 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_WEATHER_ENTITY, default=d(CONF_WEATHER_ENTITY) or vol.UNDEFINED
             ): _entity("weather"),
-            # Which of the consumption sensors is weather-dependent (e.g. AC) —
-            # its profile is learned from the outside temperature.
+            # Which consumption sensors are weather-dependent (AC, heat pump…) —
+            # each of their profiles is learned from the outside temperature.
             vol.Optional(
-                CONF_CLIMATE_SENSOR, default=d(CONF_CLIMATE_SENSOR) or vol.UNDEFINED
-            ): _entity("sensor"),
+                CONF_CLIMATE_SENSORS, default=list(d(CONF_CLIMATE_SENSORS) or [])
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", multiple=True)
+            ),
         }
     )
 

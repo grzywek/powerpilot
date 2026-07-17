@@ -27,7 +27,7 @@
           "grid_import_sensor": "Grid import sensor (kW or kWh)",
           "consumption_sensor": "Main sensor (inverter / output)",
           "weather_entity": "Weather entity",
-          "climate_sensor": "Weather-dependent consumption sensor (e.g. AC) — profile learned from temperature"
+          "climate_sensors": "Weather-dependent consumption sensors (AC, heat pump…) — profiles learned from temperature"
         }
       },
       "prices": {
@@ -130,7 +130,7 @@
           "grid_import_sensor": "Grid import sensor (kW or kWh)",
           "consumption_sensor": "Main sensor (inverter / output)",
           "weather_entity": "Weather entity",
-          "climate_sensor": "Weather-dependent consumption sensor (e.g. AC) — profile learned from temperature"
+          "climate_sensors": "Weather-dependent consumption sensors (AC, heat pump…) — profiles learned from temperature"
         }
       },
       "charge_curve": {

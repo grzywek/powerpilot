@@ -13,6 +13,8 @@ from .const import (
     CONF_BATTERY_DISCHARGE_SENSOR,
     CONF_BUY_PRICE_SENSOR,
     CONF_CALENDARS,
+    CONF_CLIMATE_SENSOR,
+    CONF_CLIMATE_SENSORS,
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
     CONF_EV_CALENDAR,
@@ -60,7 +62,7 @@ _ENTITY_CONFIG_KEYS = (
     CONF_EV_CHARGE_METER_SENSOR,
     CONF_EV_LOCATION_SENSOR,
 )
-_ENTITY_LIST_CONFIG_KEYS = (CONF_DEVICE_SENSORS, CONF_CALENDARS)
+_ENTITY_LIST_CONFIG_KEYS = (CONF_DEVICE_SENSORS, CONF_CALENDARS, CONF_CLIMATE_SENSORS)
 
 
 def _uses_day_sensor(entry: ConfigEntry) -> bool:
@@ -134,9 +136,29 @@ def _migrate_calendar_option(hass: HomeAssistant, entry: ConfigEntry) -> None:
         )
 
 
+def _migrate_climate_option(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """One-time upgrade: seed CONF_CLIMATE_SENSORS from the legacy single key.
+
+    The weather-dependent load picker became a list (several AC/heat-pump
+    meters can depend on the temperature). Runs before the update listener is
+    registered, so it never triggers a reload loop.
+    """
+    cfg = {**entry.data, **entry.options}
+    legacy = cfg.get(CONF_CLIMATE_SENSOR)
+    if legacy and not cfg.get(CONF_CLIMATE_SENSORS):
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_CLIMATE_SENSORS: [legacy]}
+        )
+        _LOGGER.info(
+            "Zmigrowano sensor klimatyzacji %s do listy sensorów zależnych od pogody.",
+            legacy,
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerPilot from a config entry."""
     _migrate_calendar_option(hass, entry)
+    _migrate_climate_option(hass, entry)
     # Day-of-week tariff periods classify future days (weekends/holidays) via
     # ``workday.check_date``. That service is a hard requirement — we never
     # second-guess it. If it isn't registered yet (workday still loading, or the

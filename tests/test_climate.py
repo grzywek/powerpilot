@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from custom_components.powerpilot.const import CONF_CLIMATE_SENSOR
+from custom_components.powerpilot.const import CONF_CLIMATE_SENSORS
 from custom_components.powerpilot.modules.climate import (
     MIN_LEARN_DAYS,
+    TEMP_BIN_C,
     ClimateModule,
     TemperatureProfile,
 )
 
 AC = "sensor.ac_energy"
+HEAT_PUMP = "sensor.heat_pump_energy"
 
 
 def test_predict_same_bin_and_hour() -> None:
@@ -57,19 +59,40 @@ def test_profile_serialisation_roundtrip() -> None:
     assert restored.samples == 3
 
 
-def _module(config: dict, observed_days: int = 0) -> ClimateModule:
+def test_as_matrix_reports_observed_bins() -> None:
+    profile = TemperatureProfile()
+    profile.observe(30.0, 14, 1.5)
+    profile.observe(30.0, 14, 2.5)
+    profile.observe(24.0, 9, 0.5)
+
+    rows = profile.as_matrix()
+    assert [r["temp_from"] for r in rows] == [24.0, 30.0]
+    assert rows[0]["temp_to"] == 24.0 + TEMP_BIN_C
+    assert rows[1]["values"][14] == 2.0  # per-cell average
+    assert rows[1]["values"][15] is None  # unobserved hour
+    assert rows[1]["samples"] == 2
+
+
+def _module(config: dict, observed: dict[str, int] | None = None) -> ClimateModule:
     module = object.__new__(ClimateModule)
     module.config = config
-    module.profile = TemperatureProfile()
-    for i in range(observed_days):
-        module.profile.mark_date_observed(date(2026, 6, 1) + timedelta(days=i))
+    module.profiles = {}
+    for eid, days in (observed or {}).items():
+        profile = module.profiles.setdefault(eid, TemperatureProfile())
+        for i in range(days):
+            profile.mark_date_observed(date(2026, 6, 1) + timedelta(days=i))
     return module
 
 
 def test_handles_requires_config_and_enough_learning() -> None:
     assert not _module({}).handles(AC)
     # Configured but still learning → the weekly profile keeps the device.
-    assert not _module({CONF_CLIMATE_SENSOR: AC}).handles(AC)
-    ready = _module({CONF_CLIMATE_SENSOR: AC}, observed_days=MIN_LEARN_DAYS)
-    assert ready.handles(AC)
-    assert not ready.handles("sensor.other")
+    assert not _module({CONF_CLIMATE_SENSORS: [AC]}).handles(AC)
+    # Readiness is per sensor: each device earns its own takeover.
+    module = _module(
+        {CONF_CLIMATE_SENSORS: [AC, HEAT_PUMP]},
+        observed={AC: MIN_LEARN_DAYS, HEAT_PUMP: MIN_LEARN_DAYS - 1},
+    )
+    assert module.handles(AC)
+    assert not module.handles(HEAT_PUMP)
+    assert not module.handles("sensor.other")

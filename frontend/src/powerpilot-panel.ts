@@ -104,10 +104,28 @@ interface LogEvent {
 
 type Matrix = Record<string, (number | null)[]>;
 
+/** One temperature bin of a climate profile: 24 hourly kWh averages. */
+interface ClimateProfileRow {
+  temp_from: number;
+  temp_to: number;
+  samples: number;
+  values: (number | null)[];
+}
+
+interface ClimateProfileInfo {
+  observed_days: number;
+  samples: number;
+  ready: boolean;
+  min_learn_days: number;
+  matrix: ClimateProfileRow[];
+}
+
 interface Profiles {
   consumption: Matrix;
   consumption_days: number;
   devices: Record<string, Matrix>;
+  /** Temperature profiles of the weather-dependent loads, keyed by sensor. */
+  climate?: Record<string, ClimateProfileInfo>;
 }
 
 interface StatProfile {
@@ -1980,6 +1998,27 @@ export class PowerPilotPanel extends LitElement {
     const gridCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].hour_cost) }));
     const batUseCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].battery_use_cost) }));
 
+    // Explicit axis bounds computed from the data, in √-space. Apex's
+    // forceNiceScale rounds the √ maximum up to a "nice" number (e.g. 1.4 → 3),
+    // which squares back to a 9 PLN/kWh axis for 2 PLN data and flattens
+    // everything into the bottom quarter of the panel.
+    let priceSqMax = 0;
+    let priceSqMin = 0;
+    let costMax = 0;
+    for (const h of hrs) {
+      for (const v of [h.total_price_kwh, h.battery_energy_cost]) {
+        const s = sqrtP(v);
+        if (s != null) {
+          priceSqMax = Math.max(priceSqMax, s);
+          priceSqMin = Math.min(priceSqMin, s);
+        }
+      }
+      costMax = Math.max(costMax, costTotalOf(h));
+    }
+    const priceAxMax = priceSqMax > 0 ? priceSqMax * 1.06 : 1;
+    const priceAxMin = priceSqMin < 0 ? priceSqMin * 1.06 : 0;
+    const costAxMax = costMax > 0 ? Math.sqrt(costMax) * 1.08 : 1;
+
     const dark = this._isDark();
     const priceSeriesNames: string[] = [];
     const series: any[] = [
@@ -2049,14 +2088,19 @@ export class PowerPilotPanel extends LitElement {
         {
           // Every PLN/kWh line shares one scale so equal values align visually.
           // Values live in √-space (see sqrtP) — square ticks back to PLN/kWh.
+          // Bounds are explicit (data max + 6%): forceNiceScale would round the
+          // √ max up and waste most of the panel above the lines.
           seriesName: [...priceSeriesNames, "Cena w baterii"],
           title: { text: "PLN/kWh, skala √" },
+          min: priceAxMin,
+          max: priceAxMax,
+          tickAmount: 6,
+          forceNiceScale: false,
           labels: {
             minWidth: 48,
             formatter: (v: number) =>
               v != null ? (Math.sign(v) * v * v).toFixed(2) : "",
           },
-          forceNiceScale: true,
           decimalsInFloat: 2,
         },
         {
@@ -2064,12 +2108,15 @@ export class PowerPilotPanel extends LitElement {
           opposite: true,
           title: { text: "PLN/h, skala √" },
           // Column heights live in √-space — square tick values back to PLN.
+          // Same explicit-bounds treatment as the price axis.
+          min: 0,
+          max: costAxMax,
+          tickAmount: 6,
+          forceNiceScale: false,
           labels: {
             minWidth: 48,
             formatter: (v: number) => (v != null ? (v * v).toFixed(2) : ""),
           },
-          forceNiceScale: true,
-          min: 0,
         },
       ],
       tooltip: {
@@ -3014,6 +3061,78 @@ export class PowerPilotPanel extends LitElement {
       </div>
 
       ${this._heatmapForKey(sel.key)}
+      ${this._climateProfileCard(sel.key)}
+    `;
+  }
+
+  /** Learned temperature profile of a weather-dependent load (AC, heat pump):
+   *  a temperature-bin × hour heatmap plus the learning/takeover status. */
+  private _climateProfileCard(key: string): TemplateResult | typeof nothing {
+    const info = this._profiles?.climate?.[key];
+    if (!info) return nothing;
+    const status = info.ready
+      ? html`<b>model aktywny</b> — prognoza tego urządzenia liczona z temperatury
+          (zamiast profilu tygodniowego)`
+      : html`uczy się: <b>${info.observed_days}/${info.min_learn_days}</b> dni —
+          do tego czasu urządzenie planowane z profilu tygodniowego`;
+    return html`
+      <div class="card">
+        <div class="card-title">Profil temperaturowy — kWh/h wg temperatury × godziny</div>
+        <div class="check">
+          ${status}
+          <span class="muted">· ${info.samples} próbek godzinowych</span>
+        </div>
+        ${info.matrix.length
+          ? this._tempHeatmap(info.matrix)
+          : html`<div class="empty">
+              Brak zebranych par temperatura×zużycie — profil zacznie się budować po
+              pierwszej pełnej dobie z zapisaną temperaturą.
+            </div>`}
+      </div>
+    `;
+  }
+
+  /** Heatmap of a climate profile: rows = 2 °C bins (warmest on top), columns
+   *  = hours of day. Mirrors the weekly heatmap's look, wider row labels. */
+  private _tempHeatmap(rows: ClimateProfileRow[]): TemplateResult {
+    const values: number[] = [];
+    rows.forEach((r) =>
+      r.values.forEach((v) => {
+        if (v !== null && v !== undefined) values.push(v);
+      })
+    );
+    if (!values.length)
+      return html`<div class="empty">Brak danych — profil jeszcze się uczy.</div>`;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const sorted = [...rows].sort((a, b) => b.temp_from - a.temp_from);
+    const label = (r: ClimateProfileRow) =>
+      `${r.temp_from.toFixed(0)}–${r.temp_to.toFixed(0)}°`;
+    return html`
+      <div class="heatmap">
+        <div class="hm-row hm-head">
+          <div class="hm-label hm-label-temp"></div>
+          ${Array.from({ length: 24 }, (_, h) => html`<div class="hm-h">${h}</div>`)}
+        </div>
+        ${sorted.map(
+          (r) => html`
+            <div class="hm-row">
+              <div class="hm-label hm-label-temp" title="${r.samples} próbek">${label(r)}</div>
+              ${r.values.map((v) => {
+                const color =
+                  v === null || v === undefined ? "transparent" : this._heatColor(v, min, max);
+                const title = v === null || v === undefined ? "—" : `${v.toFixed(3)} kWh`;
+                return html`<div class="hm-cell" style=${"background:" + color} title=${title}></div>`;
+              })}
+            </div>
+          `
+        )}
+      </div>
+      <div class="legend">
+        <span>${min.toFixed(2)}</span>
+        <div class="legend-bar"></div>
+        <span>${max.toFixed(2)} kWh</span>
+      </div>
     `;
   }
 
@@ -3669,6 +3788,10 @@ export class PowerPilotPanel extends LitElement {
       font-size: 12px;
       color: var(--secondary-text-color);
       flex: 0 0 auto;
+    }
+    /* Temperature-bin rows need room for "24–26°". */
+    .hm-label-temp {
+      width: 52px;
     }
     .hm-h {
       width: 22px;

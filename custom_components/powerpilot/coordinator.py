@@ -653,11 +653,26 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
     def get_profiles(self) -> dict:
         """7×24 learned consumption profiles for the panel heatmaps."""
+        from .modules.climate import MIN_LEARN_DAYS
+
         return {
             "consumption": self.consumption.base.as_matrix(),
             "consumption_days": self.consumption.base.observed_days,
             "devices": {
                 eid: acc.as_matrix() for eid, acc in self.consumption.devices.items()
+            },
+            # Temperature profiles of the weather-dependent loads (bin × hour),
+            # keyed by sensor — includes still-learning ones so the panel can
+            # show progress toward the takeover threshold.
+            "climate": {
+                eid: {
+                    "observed_days": self.climate.profile_for(eid).observed_days,
+                    "samples": self.climate.profile_for(eid).samples,
+                    "ready": self.climate.is_ready(eid),
+                    "min_learn_days": MIN_LEARN_DAYS,
+                    "matrix": self.climate.profile_for(eid).as_matrix(),
+                }
+                for eid in self.climate.sensors
             },
         }
 
@@ -1354,11 +1369,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
     def _device_forecast_kwh(self, eid: str, hour: datetime) -> float | None:
         """Per-device forecast for the chart series.
 
-        The climate-owned device reads its temperature model (matching what the
-        optimizer plans); every other device uses the learned weekly average.
+        The climate-owned devices read their temperature models (matching what
+        the optimizer plans); every other device uses the learned weekly average.
         """
         if self.climate.handles(eid):
-            value = self.climate.forecast_kwh(hour)
+            value = self.climate.forecast_kwh(eid, hour)
             if value is not None:
                 return round(value, 3)
         if eid in self.consumption.devices:

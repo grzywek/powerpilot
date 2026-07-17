@@ -1,23 +1,24 @@
 """Climate module.
 
-Learns how the configured weather-dependent load (``CONF_CLIMATE_SENSOR``, e.g.
-the AC meter) consumes energy as a function of the outside temperature, and
-forecasts it from the weather entity's hourly temperature forecast instead of
-the weekday+hour weekly average.
+Learns how the configured weather-dependent loads (``CONF_CLIMATE_SENSORS``,
+e.g. AC or heat-pump meters) consume energy as a function of the outside
+temperature, and forecasts each of them from the weather entity's hourly
+temperature forecast instead of the weekday+hour weekly average.
 
-Data model: hourly ``(temperature, kWh)`` pairs, folded once per settled day.
-Temperatures come from the module's own history store — the current temperature
-of the weather entity is recorded every update (weather entities keep no
-recorder statistics), seeded once from the recorder's short state history.
-The kWh side reads the device's long-term statistics, so the profile keeps
-growing beyond the consumption module's learn window (capped at a year).
+Data model: hourly ``(temperature, kWh)`` pairs per sensor, folded once per
+settled day. Temperatures come from the module's own history store — the
+current temperature of the weather entity is recorded every update (weather
+entities keep no recorder statistics), seeded once from the recorder's short
+state history. The kWh side reads each device's long-term statistics, so the
+profiles keep growing beyond the consumption module's learn window (capped at
+a year).
 
-The profile is a (temperature-bin × hour-of-day) average with neighbour-bin
-smoothing. Once enough days are observed the module takes over the device from
-the consumption module (see ``handles``): the weekly profile stops contributing
-for that sensor and this model adds the temperature-driven expectation to each
-slot; hours beyond the temperature forecast fall back to the device's weekly
-average so the plan horizon keeps its full demand.
+Each profile is a (temperature-bin × hour-of-day) average with neighbour-bin
+smoothing. Once a sensor's profile has enough days observed the module takes
+that device over from the consumption module (see ``handles``): the weekly
+profile stops contributing for it and this model adds the temperature-driven
+expectation to each slot; hours beyond the temperature forecast fall back to
+the device's weekly average so the plan horizon keeps its full demand.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import (
-    CONF_CLIMATE_SENSOR,
+    CONF_CLIMATE_SENSORS,
     CONF_WEATHER_ENTITY,
     DOMAIN,
     STORAGE_VERSION_CLIMATE,
@@ -109,6 +110,36 @@ class TemperatureProfile:
             return total / weight
         return None
 
+    def as_matrix(self) -> list[dict]:
+        """Panel heatmap rows: one per observed temperature bin, 24 hour cells.
+
+        Cells are raw per-cell averages (no smoothing) so the panel shows what
+        was actually measured; ``None`` where a (bin, hour) has no samples.
+        """
+        rows: list[dict] = []
+        for b in sorted({b for (b, _h) in self._cells}):
+            values: list[float | None] = []
+            for hour in range(24):
+                cell = self._cells.get((b, hour))
+                values.append(
+                    round(cell[0] / cell[1], 3) if cell and cell[1] else None
+                )
+            rows.append(
+                {
+                    "temp_from": b * TEMP_BIN_C,
+                    "temp_to": (b + 1) * TEMP_BIN_C,
+                    "samples": int(
+                        sum(
+                            c[1]
+                            for (cb, _h), c in self._cells.items()
+                            if cb == b
+                        )
+                    ),
+                    "values": values,
+                }
+            )
+        return rows
+
     def to_dict(self) -> dict:
         return {
             "cells": {f"{b}:{h}": [s, c] for (b, h), (s, c) in self._cells.items()},
@@ -128,13 +159,14 @@ class TemperatureProfile:
 
 
 class ClimateModule(PowerPilotModule):
-    """Temperature-driven consumption model for the configured climate load."""
+    """Temperature-driven consumption model for the configured climate loads."""
 
     domain = "climate"
 
     def __init__(self, hass, coordinator) -> None:
         super().__init__(hass, coordinator)
-        self.profile = TemperatureProfile()
+        # {device entity_id: its temperature profile}
+        self.profiles: dict[str, TemperatureProfile] = {}
         # {local iso hour: °C} — own history, since weather entities have no
         # recorder statistics to read back from.
         self._temps: dict[str, float] = {}
@@ -146,19 +178,19 @@ class ClimateModule(PowerPilotModule):
     # Wiring
     # ------------------------------------------------------------------
     @property
-    def sensor(self) -> str | None:
-        return self.config.get(CONF_CLIMATE_SENSOR)
+    def sensors(self) -> list[str]:
+        return list(self.config.get(CONF_CLIMATE_SENSORS) or [])
 
-    @property
-    def ready(self) -> bool:
-        return (
-            bool(self.sensor)
-            and self.profile.observed_days >= MIN_LEARN_DAYS
-        )
+    def profile_for(self, entity_id: str) -> TemperatureProfile:
+        return self.profiles.setdefault(entity_id, TemperatureProfile())
+
+    def is_ready(self, entity_id: str) -> bool:
+        profile = self.profiles.get(entity_id)
+        return profile is not None and profile.observed_days >= MIN_LEARN_DAYS
 
     def handles(self, entity_id: str) -> bool:
         """Whether this module owns the demand forecast for ``entity_id``."""
-        return bool(self.sensor) and entity_id == self.sensor and self.ready
+        return entity_id in self.sensors and self.is_ready(entity_id)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -171,7 +203,10 @@ class ClimateModule(PowerPilotModule):
         )
         stored = await self._store.async_load()
         if stored:
-            self.profile = TemperatureProfile.from_dict(stored.get("profile"))
+            self.profiles = {
+                eid: TemperatureProfile.from_dict(payload)
+                for eid, payload in (stored.get("profiles") or {}).items()
+            }
             self._temps = {
                 k: float(v) for k, v in (stored.get("temps") or {}).items()
             }
@@ -184,7 +219,9 @@ class ClimateModule(PowerPilotModule):
             return
         await self._store.async_save(
             {
-                "profile": self.profile.to_dict(),
+                "profiles": {
+                    eid: profile.to_dict() for eid, profile in self.profiles.items()
+                },
                 "temps": self._temps,
                 "temps_backfilled": self._temps_backfilled,
                 "last_learn_day": (
@@ -196,7 +233,7 @@ class ClimateModule(PowerPilotModule):
     async def async_clear_data(self) -> None:
         if self._store is not None:
             await self._store.async_remove()
-        self.profile = TemperatureProfile()
+        self.profiles = {}
         self._temps = {}
         self._temps_backfilled = False
         self._last_learn_day = None
@@ -224,32 +261,46 @@ class ClimateModule(PowerPilotModule):
         )
 
     async def async_update(self) -> None:
-        if not self.sensor:
+        sensors = self.sensors
+        if not sensors:
             return
         if not self.config.get(CONF_WEATHER_ENTITY):
             self.log_warning(
-                "Sensor klimatyzacji wskazany, ale brak encji pogody — profil "
-                "temperaturowy nie może się uczyć."
+                "Sensory klimatyzacji wskazane, ale brak encji pogody — profile "
+                "temperaturowe nie mogą się uczyć."
             )
             return
 
-        changed = self._record_current_temperature()
+        # Drop profiles of sensors removed from the configuration.
+        stale = [eid for eid in self.profiles if eid not in sensors]
+        changed = bool(stale)
+        for eid in stale:
+            del self.profiles[eid]
+
+        changed = self._record_current_temperature() or changed
         if not self._temps_backfilled:
             changed = await self._backfill_temperatures() or changed
         changed = await self._maybe_learn() or changed
         if changed:
             await self._async_save()
 
+        summary = " · ".join(
+            f"{eid.split('.')[-1]}: {self.profile_for(eid).observed_days} dni"
+            + ("" if self.is_ready(eid) else f" (aktywny od {MIN_LEARN_DAYS})")
+            for eid in sensors
+        )
         self.log_info(
-            f"Profil temperaturowy ({self.sensor}): {self.profile.observed_days} dni / "
-            f"{self.profile.samples} próbek, temperatura zapisana dla "
-            f"{len(self._temps)} godzin"
-            + ("." if self.ready else f" — model aktywny od {MIN_LEARN_DAYS} dni nauki."),
+            f"Profile temperaturowe — {summary}; temperatura zapisana dla "
+            f"{len(self._temps)} godzin.",
             extra={
-                "sensor": self.sensor,
-                "observed_days": self.profile.observed_days,
-                "samples": self.profile.samples,
-                "ready": self.ready,
+                "sensors": {
+                    eid: {
+                        "observed_days": self.profile_for(eid).observed_days,
+                        "samples": self.profile_for(eid).samples,
+                        "ready": self.is_ready(eid),
+                    }
+                    for eid in sensors
+                },
             },
         )
 
@@ -313,97 +364,113 @@ class ClimateModule(PowerPilotModule):
         return True
 
     async def _maybe_learn(self) -> bool:
-        """Fold settled days of (temperature, device kWh) into the profile."""
+        """Fold settled days of (temperature, device kWh) into the profiles.
+
+        Runs once per day — and immediately when a sensor was just added to
+        the configuration (its profile is empty), so a new device does not
+        wait for the next day boundary to start learning.
+        """
         today = dt_util.now().date()
-        if self._last_learn_day == today:
+        new_sensor = any(eid not in self.profiles for eid in self.sensors)
+        if self._last_learn_day == today and not new_sensor:
             return False
 
-        # Days with recorded temperatures that are not folded yet, oldest first.
-        candidate_days = sorted(
-            {
-                d
-                for k in self._temps
-                if (d := date.fromisoformat(k[:10])) < today
-                and not self.profile.is_date_observed(d)
-            }
-        )
-        if not candidate_days:
-            self._last_learn_day = today
-            return True  # persist the cursor
+        for eid in self.sensors:
+            profile = self.profile_for(eid)
+            candidate_days = sorted(
+                {
+                    d
+                    for k in self._temps
+                    if (d := date.fromisoformat(k[:10])) < today
+                    and not profile.is_date_observed(d)
+                }
+            )
+            if not candidate_days:
+                continue
 
-        start = dt_util.start_of_local_day(candidate_days[0])
-        end = dt_util.start_of_local_day(today)
-        kwh = await self.coordinator.consumption.async_range_kwh(
-            self.sensor, start, end
-        )
+            start = dt_util.start_of_local_day(candidate_days[0])
+            end = dt_util.start_of_local_day(today)
+            kwh = await self.coordinator.consumption.async_range_kwh(eid, start, end)
 
-        folded = 0
-        for day in candidate_days:
-            day_start = dt_util.start_of_local_day(day)
-            pairs: list[tuple[float, int, float]] = []
-            for h in range(24):
-                hour = day_start + timedelta(hours=h)
-                temp = self._temps.get(self._hour_key(hour))
-                energy = kwh.get(hour)
-                if temp is not None and energy is not None:
-                    pairs.append((temp, h, energy))
-            if len(pairs) < MIN_DAY_HOURS:
-                continue  # retried next learn pass once more data lands
-            for temp, h, energy in pairs:
-                self.profile.observe(temp, h, energy)
-            self.profile.mark_date_observed(day)
-            folded += 1
+            folded = 0
+            for day in candidate_days:
+                day_start = dt_util.start_of_local_day(day)
+                pairs: list[tuple[float, int, float]] = []
+                for h in range(24):
+                    hour = day_start + timedelta(hours=h)
+                    temp = self._temps.get(self._hour_key(hour))
+                    energy = kwh.get(hour)
+                    if temp is not None and energy is not None:
+                        pairs.append((temp, h, energy))
+                if len(pairs) < MIN_DAY_HOURS:
+                    continue  # retried next learn pass once more data lands
+                for temp, h, energy in pairs:
+                    profile.observe(temp, h, energy)
+                profile.mark_date_observed(day)
+                folded += 1
+
+            if folded:
+                self.log_info(
+                    f"Profil temperaturowy {eid}: dodano {folded} dni "
+                    f"(łącznie {profile.observed_days}).",
+                    extra={"sensor": eid, "folded_days": folded},
+                )
 
         self._last_learn_day = today
-        if folded:
-            self.log_info(
-                f"Profil temperaturowy: dodano {folded} dni "
-                f"(łącznie {self.profile.observed_days}).",
-                extra={"folded_days": folded},
-            )
-        return True
+        return True  # the learn cursor (and any folded days) must persist
 
     # ------------------------------------------------------------------
     # Forecast contribution
     # ------------------------------------------------------------------
-    def forecast_kwh(self, hour: datetime) -> float | None:
-        """Expected climate-load kWh for an hour, once the model is ready.
+    def forecast_kwh(self, entity_id: str, hour: datetime) -> float | None:
+        """Expected kWh of one climate load for an hour, once its model is ready.
 
         Temperature-driven when a temperature is known for the hour; the
         device's weekly average otherwise (hours beyond the weather forecast
         horizon), so the plan's demand never silently loses the climate load.
         """
-        if not self.ready:
+        if not self.is_ready(entity_id):
             return None
         temp = self.temperature_for(hour)
         if temp is not None:
-            predicted = self.profile.predict(temp, hour.hour)
+            predicted = self.profiles[entity_id].predict(temp, hour.hour)
             if predicted is not None:
                 return predicted
-        weekly = self.coordinator.consumption.devices.get(self.sensor)
+        weekly = self.coordinator.consumption.devices.get(entity_id)
         return weekly.value(hour.weekday(), hour.hour) if weekly else None
 
     def contribute(self, forecast: Forecast) -> None:
-        if not self.sensor:
+        sensors = self.sensors
+        if not sensors:
             return
-        if not self.ready:
+        active = [eid for eid in sensors if self.handles(eid)]
+        learning = [eid for eid in sensors if eid not in active]
+        if learning:
             self.log_info(
-                f"Profil temperaturowy uczy się: {self.profile.observed_days}/"
-                f"{MIN_LEARN_DAYS} dni — urządzenie na razie planowane z profilu "
-                "tygodniowego."
+                "Profil temperaturowy uczy się: "
+                + ", ".join(
+                    f"{eid.split('.')[-1]} {self.profile_for(eid).observed_days}/{MIN_LEARN_DAYS} dni"
+                    for eid in learning
+                )
+                + " — te urządzenia na razie planowane z profilu tygodniowego."
             )
+        if not active:
             return
         total = 0.0
         hits = 0
         for slot in forecast.slots:
-            energy = self.forecast_kwh(slot.start)
-            if energy and energy > 0:
-                slot.extra_load_kwh += energy
+            slot_energy = 0.0
+            for eid in active:
+                energy = self.forecast_kwh(eid, slot.start)
+                if energy and energy > 0:
+                    slot_energy += energy
+            if slot_energy > 0:
+                slot.extra_load_kwh += slot_energy
                 slot.tags.append("climate")
-                total += energy
+                total += slot_energy
                 hits += 1
         self.log_info(
-            f"Klimat ({self.sensor}): {total:.1f} kWh na {hits}h horyzontu "
-            "(model temperaturowy).",
+            f"Klimat ({', '.join(e.split('.')[-1] for e in active)}): "
+            f"{total:.1f} kWh na {hits}h horyzontu (model temperaturowy).",
             extra={"hours": hits, "total_kwh": round(total, 2)},
         )

@@ -2019,10 +2019,23 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 }
             )
             emitted_current = True
-            if live_soc:
-                prev_soc = live_soc
-            if cur_ev_soc is not None:
-                prev_ev_soc = cur_ev_soc
+            # Seed the FUTURE forecast rows from the current decision's planned
+            # end-of-hour state, not the live reading: energy planned for the
+            # rest of this hour (e.g. EV charging that hasn't started yet) is
+            # in the decision's end state, and seeding from the live value made
+            # the whole delta appear as a phantom jump on the NEXT hour's
+            # tooltip ("21 → 28 %" with no charging in that hour).
+            if cur_dec is not None and not pin_requested:
+                prev_soc = cur_dec.battery_soc
+                if cur_dec.ev_soc is not None:
+                    prev_ev_soc = cur_dec.ev_soc
+                elif cur_ev_soc is not None:
+                    prev_ev_soc = cur_ev_soc
+            else:
+                if live_soc:
+                    prev_soc = live_soc
+                if cur_ev_soc is not None:
+                    prev_ev_soc = cur_ev_soc
 
         # ----- Future hours from plan -----
         plan = self.data

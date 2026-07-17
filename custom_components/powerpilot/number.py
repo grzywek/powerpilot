@@ -61,6 +61,10 @@ class EVTargetSocNumber(PowerPilotEntity, RestoreNumber):
         if self._attr_native_value is None:
             self._attr_native_value = EV_TARGET_SOC_DEFAULT
         self.coordinator.ev.target_soc_entity = self
+        # The entry's first refresh runs BEFORE the number platform is set up,
+        # so that plan was built with the built-in default instead of the
+        # restored value — re-plan now that the real target is wired.
+        await self.coordinator.async_request_refresh()
 
     async def async_will_remove_from_hass(self) -> None:
         if self.coordinator.ev.target_soc_entity is self:
@@ -70,6 +74,9 @@ class EVTargetSocNumber(PowerPilotEntity, RestoreNumber):
     async def async_set_native_value(self, value: float) -> None:
         self._attr_native_value = value
         self.async_write_ha_state()
+        # A changed target must reshape the plan immediately, not at the next
+        # hourly boundary.
+        await self.coordinator.async_request_refresh()
 
 
 class EVMinSocNumber(PowerPilotEntity, RestoreNumber):
@@ -97,6 +104,10 @@ class EVMinSocNumber(PowerPilotEntity, RestoreNumber):
         if self._attr_native_value is None:
             self._attr_native_value = EV_MIN_SOC_DEFAULT
         self.coordinator.ev.min_soc_entity = self
+        # The entry's first refresh runs BEFORE the number platform is set up,
+        # so that plan (and its trip targets) used the built-in 20 % default
+        # instead of the restored reserve — re-plan with the real value.
+        await self.coordinator.async_request_refresh()
 
     async def async_will_remove_from_hass(self) -> None:
         if self.coordinator.ev.min_soc_entity is self:
@@ -106,3 +117,6 @@ class EVMinSocNumber(PowerPilotEntity, RestoreNumber):
     async def async_set_native_value(self, value: float) -> None:
         self._attr_native_value = value
         self.async_write_ha_state()
+        # A changed reserve must reshape the plan (trip targets are built from
+        # it) immediately, not at the next hourly boundary.
+        await self.coordinator.async_request_refresh()

@@ -262,6 +262,31 @@ async def test_series_current_hour_mode_follows_the_committed_decision(
     assert current["inverter_mode"] == InverterMode.DISCHARGE
 
 
+async def test_series_future_forecast_chains_from_current_decision(
+    hass: HomeAssistant,
+) -> None:
+    """The first FUTURE hour's forecast starts at the plan's end-of-current-hour.
+
+    Regression: it seeded from the live SoC readings instead — energy planned
+    for the remainder of the running hour (e.g. EV charging that hasn't
+    started yet) then surfaced as a phantom "21 → 28 %" jump on the next
+    hour's tooltip although that hour had no charging planned at all.
+    """
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+
+    plan = coordinator.data
+    assert plan is not None and plan.decisions
+    plan.decisions[0].battery_soc = 77.7  # planned end of the current hour
+
+    result = await coordinator.get_series(past_hours=1)
+    future = next(
+        h for h in result["hours"] if not h["is_past"] and h.get("forecast")
+    )
+    assert future["forecast"]["soc_start"] == 77.7
+    assert future["battery_soc_start"] == 77.7
+
+
 async def test_series_no_vintage_hides_forecast(hass: HomeAssistant) -> None:
     """A past hour with no backing plan shows no "prognoza" — only real data.
 

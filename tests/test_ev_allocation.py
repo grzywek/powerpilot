@@ -118,6 +118,120 @@ def test_early_over_tolerance_stays_cheapest() -> None:
     assert _hours(alloc) == {0, 2}
 
 
+# ---------------------------------------------------------------------------
+# Earliness outranks contiguity, day before hour ("charge Saturday before
+# Sunday"). Two-day forecasts anchored to a real local-midnight boundary.
+# ---------------------------------------------------------------------------
+
+BASE = dt_util.start_of_local_day(dt_util.now()) + timedelta(days=1, hours=8)
+
+
+def _two_day_forecast(day_a: list[float], day_b: list[float]) -> Forecast:
+    """Consecutive hours from BASE (day A) and from BASE+1 day (day B)."""
+    slots = [
+        HourSlot(
+            start=BASE + timedelta(hours=i),
+            buy_price=p,
+            distribution_price_kwh=0.0,
+            base_consumption_kwh=0.0,
+        )
+        for i, p in enumerate(day_a)
+    ]
+    slots += [
+        HourSlot(
+            start=BASE + timedelta(days=1, hours=i),
+            buy_price=p,
+            distribution_price_kwh=0.0,
+            base_consumption_kwh=0.0,
+        )
+        for i, p in enumerate(day_b)
+    ]
+    return Forecast(slots=slots)
+
+
+def _two_day_request(forecast: Forecast, **prefs) -> EVRequest:
+    return EVRequest(
+        enabled=True,
+        required_kwh=2.0,
+        charger_kw=1.0,
+        phases=1,
+        battery_kwh=10.0,
+        current_soc=0.0,
+        available_hours={s.start for s in forecast.slots},
+        **prefs,
+    )
+
+
+def _two_day_hours(allocation: dict) -> set[int]:
+    return {
+        int((start - BASE).total_seconds() // 3600) for start in allocation
+    }
+
+
+def test_early_before_contiguous_keeps_todays_cheap_hour() -> None:
+    """Regression: a contiguous block on the NEXT day must not outbid a
+    still-cheap hour today (the 2026-07-18 "plan jumped to tomorrow" bug).
+
+    Day A has one cheap hour (0.21) then an expensive evening; day B has a
+    contiguous 0.24/0.24 block. The scattered optimum {A0, B0} costs 0.45,
+    the all-B block 0.48 (+6.7 % — inside the old 15 % contiguity budget,
+    which used to move ALL charging to day B). With earliness applied first
+    at a 0 % budget, only cost-optimal placements survive, so the cheap
+    hour today stays in the plan.
+    """
+    forecast = _two_day_forecast([0.21, 0.60], [0.24, 0.24])
+    alloc = _optimizer()._plan_ev(
+        forecast,
+        _two_day_request(
+            forecast,
+            prefer_contiguous=True,
+            contiguous_max_extra_pct=15.0,
+            prefer_early=True,
+            early_max_extra_pct=0.0,
+        ),
+    )
+    assert _two_day_hours(alloc) == {0, 24}
+
+
+def test_early_day_outranks_cheaper_next_day_within_budget() -> None:
+    # Day A costs 0.22, day B 0.20 — within the 15 % early budget the plan
+    # finishes a whole day sooner ("Saturday before Sunday").
+    forecast = _two_day_forecast([0.11, 0.11], [0.10, 0.10])
+    alloc = _optimizer()._plan_ev(
+        forecast,
+        _two_day_request(forecast, prefer_early=True, early_max_extra_pct=15.0),
+    )
+    assert _two_day_hours(alloc) == {0, 1}
+
+
+def test_early_day_yields_when_next_day_is_cheaper_beyond_budget() -> None:
+    # Day A is 3× the price of day B — far over the 10 % early budget, so
+    # the genuinely cheaper day wins despite being later.
+    forecast = _two_day_forecast([0.30, 0.30], [0.10, 0.10])
+    alloc = _optimizer()._plan_ev(
+        forecast,
+        _two_day_request(forecast, prefer_early=True, early_max_extra_pct=10.0),
+    )
+    assert _two_day_hours(alloc) == {24, 25}
+
+
+def test_contiguity_still_rearranges_within_the_day() -> None:
+    # Within the chosen (earliest) day the contiguity budget still closes
+    # gaps: {A0, A1} (+9.5 %) beats the scattered {A0, A2} optimum.
+    forecast = _two_day_forecast([0.10, 0.13, 0.11], [0.30, 0.30])
+    alloc = _optimizer()._plan_ev(
+        forecast,
+        _two_day_request(
+            forecast,
+            prefer_contiguous=True,
+            contiguous_max_extra_pct=15.0,
+            prefer_early=True,
+            early_max_extra_pct=10.0,
+        ),
+    )
+    assert _two_day_hours(alloc) == {0, 1}
+
+
 def test_full_allocation_energy_is_preserved() -> None:
     alloc = _optimizer()._plan_ev(
         _forecast([0.10, 0.13, 0.11]),

@@ -102,7 +102,7 @@ _CHARGE_PRICE_BUCKET = Decimal("0.01")
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # allocator or a stale import.
-EV_ALLOCATOR_VERSION = "minutes-flat-eff-2026-07"
+EV_ALLOCATOR_VERSION = "early-day-first-2026-07"
 
 
 @dataclass
@@ -931,11 +931,15 @@ class Optimizer:
             room *at their deadline*, which the global estimate can't see).
 
             Placement preferences (``EVRequest.prefer_contiguous`` /
-            ``prefer_early``) reshape the choice within a bounded extra cost:
-            contiguity keeps the block unbroken unless the scattered optimum is
-            more than ``contiguous_max_extra_pct`` % cheaper; earliness picks,
-            among placements within ``early_max_extra_pct`` % of the cheapest,
-            the one that finishes charging soonest.
+            ``prefer_early``) reshape the choice within a bounded extra cost.
+            Earliness outranks contiguity, day before hour: placements within
+            ``early_max_extra_pct`` % of the cheapest are first narrowed to
+            those finishing on the earliest calendar day; contiguity then
+            keeps the block unbroken within that day's pool unless the
+            scattered optimum is more than ``contiguous_max_extra_pct`` %
+            cheaper; finally the earliest-finishing placement wins. This
+            order stops a contiguous block on a later day from outbidding
+            still-cheap hours today.
             """
             deficit = min(deficit, capacity_left() if room is None else room)
             if deficit <= _EPS:
@@ -1041,31 +1045,53 @@ class Optimizer:
 
             best_cost = min(v[0] for v in variants)
 
-            def _within(cost: float, pct: float) -> bool:
-                # Bounded extra spend relative to the optimum; |·| keeps the
+            def _within(cost: float, base: float, pct: float) -> bool:
+                # Bounded extra spend relative to ``base``; |·| keeps the
                 # bound meaningful when spot prices go negative.
-                return cost <= best_cost + abs(best_cost) * pct / 100.0 + _EPS
+                return cost <= base + abs(base) * pct / 100.0 + _EPS
 
+            # Preference cascade — earliness OUTRANKS contiguity, and the
+            # calendar day outranks the hour ("charge Saturday before
+            # Sunday"). Contiguity used to filter first, which let a fully
+            # contiguous block on a LATER day outbid still-cheap hours today
+            # the moment the current day could no longer hold the whole block.
             pool = variants
+            if ev_request.prefer_early:
+                # 1. Day: among placements within the early budget of the
+                #    global optimum, keep those finishing on the earliest
+                #    local date. Everything after (contiguity, the hour-level
+                #    pick) may only rearrange hours within that day's pool.
+                eligible = [
+                    v
+                    for v in pool
+                    if _within(v[0], best_cost, ev_request.early_max_extra_pct)
+                ]
+                first_day = min(dt_util.as_local(v[1]).date() for v in eligible)
+                pool = [
+                    v for v in eligible if dt_util.as_local(v[1]).date() == first_day
+                ]
             if ev_request.prefer_contiguous:
+                # 2. Contiguity, within whatever pool earliness left: an
+                #    unbroken block may cost up to its budget over the pool's
+                #    own optimum. No block within budget → the gap is allowed.
+                pool_best = min(v[0] for v in pool)
                 contiguous_pool = [
                     v
-                    for v in variants
+                    for v in pool
                     if _contiguous(sorted([*v[2], v[1]]))
-                    and _within(v[0], ev_request.contiguous_max_extra_pct)
+                    and _within(v[0], pool_best, ev_request.contiguous_max_extra_pct)
                 ]
-                # No block within budget → the gap is allowed (difference
-                # exceeds the configured threshold).
                 if contiguous_pool:
                     pool = contiguous_pool
             if ev_request.prefer_early:
+                # 3. Hour: among the remaining placements within the early
+                #    budget, finish as soon as possible.
                 pool_best = min(v[0] for v in pool)
-                budget = (
-                    pool_best
-                    + abs(pool_best) * ev_request.early_max_extra_pct / 100.0
-                    + _EPS
-                )
-                eligible = [v for v in pool if v[0] <= budget]
+                eligible = [
+                    v
+                    for v in pool
+                    if _within(v[0], pool_best, ev_request.early_max_extra_pct)
+                ]
                 chosen = min(eligible, key=lambda v: (v[1], v[0]))
             else:
                 chosen = min(pool, key=lambda v: v[0])

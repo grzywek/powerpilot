@@ -1,0 +1,15 @@
+nie rozumiem tego. teraz jest cena 21 gr i on nie ładuje, a jutro zaplanował ładowanie nawet tam gdzie jest 28 gr.
+
+nie wiem czy miało wpływ na to, że byłem w sklepie i nie ładowało przez 40 minut? a teraz wróciłem i podłączyłem
+
+---
+
+1. na wykresie jest już przecież cena całkowita! te 21 vs 28 gr to jest dokładna cena całkowita.
+2. wyjazd nie był jako trip, po prostu pojechałem do sklepu bez planowania
+3. "Jeśli czujnik SoC auta spał w chwili planowania (auto w trasie), cele procentowe są w tym cyklu pomijane z ostrzeżeniem w logu — plan mógł być policzony bez nich." tego nie rozumiem chyba
+4. mam prefer_contiguous 10% i prefer_early 0%. 
+5. żeby było ciekawie ten plan się zmienił w trakcie i bez konkretnego powodu. jak się cofnę do prognozy z 12:00 to wygląda tak jak na obrazku. o 12:19 pojechałem do sklepu, o 12:40 wróciłem. o 12:52 podłączyłem samochód i ładował się do 13:00, a nowy plan z 13:00 i 14:00 nie miał już planowanego ładowania, mimo że godziny są tańsze niż jutro i w ogóle lepiej naładować wczęsniej (nawet dzień wczęsniej) jeśli jest taka możliwość (np. gdy godziny tyle samo kosztują dziś i jutro, to lepiej ładować dziś)
+
+---
+
+ok po zmianie na 2% plan wrócił na dzisiaj. tak, trzymajmy się, że "Earliness przed spójnością" i to tak, że nie tylko godziny danego dnia, ale też dzień się liczy, czyli sobota przed niedzielą itp. dopiero potem w ramach dnia można kombinować z blokami i ładowaniem łącznym itp

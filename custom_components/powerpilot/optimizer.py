@@ -641,8 +641,10 @@ class Optimizer:
         # otherwise the line stays blank.
         ev_battery_kwh = ev_request.battery_kwh if ev_request else 0.0
         ev_drain = ev_request.drain_kwh if ev_request else {}
-        # The projected EV SoC can never exceed the active charge ceiling — the
-        # car's BMS stops there, so a line climbing past it would be fiction.
+        # Planned charging can never raise the projected EV SoC past the active
+        # charge ceiling — the car's BMS stops there.  A live SoC already above
+        # that ceiling must be preserved, however: the limit is not a discharge
+        # command and cannot erase energy already present in the pack.
         ev_ceiling_kwh = (
             max(0.0, min(100.0, ev_request.charge_ceiling_soc)) / 100.0 * ev_battery_kwh
             if ev_request is not None and ev_request.charge_ceiling_soc is not None
@@ -720,8 +722,11 @@ class Optimizer:
             decision.ev_charge_minutes = ev_minutes
             if ev_soc_kwh is not None:
                 drain = ev_drain.get(slot.start, 0.0)
+                after_drain = max(0.0, ev_soc_kwh - drain)
+                charge_headroom = max(0.0, ev_ceiling_kwh - after_drain)
                 ev_soc_kwh = min(
-                    ev_ceiling_kwh, max(0.0, ev_soc_kwh + ev_added - drain)
+                    ev_battery_kwh,
+                    after_drain + min(ev_added, charge_headroom),
                 )
                 decision.ev_soc = round(ev_soc_kwh / ev_battery_kwh * 100.0, 1)
             decision.charge_power = (

@@ -1101,6 +1101,44 @@ def test_plan_ev_soc_line_respects_charge_ceiling() -> None:
     assert plan.decisions[-1].ev_soc == 95.0
 
 
+def test_plan_ev_soc_above_charge_ceiling_stays_flat_without_drain() -> None:
+    """A charge ceiling must not erase energy already present in the EV."""
+    fc = _forecast([0.5] * 3)
+    req = EVRequest(
+        enabled=True,
+        battery_kwh=60.0,
+        current_soc=94.0,
+        charge_ceiling_soc=80.0,
+        available_hours={s.start for s in fc.slots},
+        drain_kwh={},
+    )
+    battery = BatteryModel(capacity_kwh=10.0, soc=50.0)
+
+    plan = _optimizer().optimize(fc, battery, req)
+
+    assert all(d.ev_charge_kwh == 0.0 for d in plan.decisions)
+    assert [d.ev_soc for d in plan.decisions] == [94.0, 94.0, 94.0]
+
+
+def test_plan_ev_soc_above_ceiling_only_decreases_by_real_drain() -> None:
+    """Drain lowers excess SoC naturally instead of snapping it to the ceiling."""
+    fc = _forecast([0.5] * 3)
+    req = EVRequest(
+        enabled=True,
+        battery_kwh=60.0,
+        current_soc=94.0,
+        charge_ceiling_soc=80.0,
+        available_hours={s.start for s in fc.slots},
+        drain_kwh={BASE + timedelta(hours=1): 6.0},
+    )
+    battery = BatteryModel(capacity_kwh=10.0, soc=50.0)
+
+    plan = _optimizer().optimize(fc, battery, req)
+
+    assert all(d.ev_charge_kwh == 0.0 for d in plan.decisions)
+    assert [d.ev_soc for d in plan.decisions] == [94.0, 84.0, 84.0]
+
+
 # ---------------------------------------------------------------------------
 # Google Maps response parsing
 # ---------------------------------------------------------------------------

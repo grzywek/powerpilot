@@ -1,0 +1,246 @@
+coś nie gra - dzisiaj pełna cena jest 20 gr przez 4h i jutro też 20 gr przez 4 h, a jednocześnie ładowanie EV zaplanowane jest na jutro. mam 5% tolerancji wczesnego i 5% tolerancji łączonego, ale wczesne ładowanie miało mieć priorytet. chodzi o to, że lepsza jest ogólna zasada - jeśli można zrobić to samo wcześniej, to lepiej robić to wcześniej, bo warunki mogą się zmienić i np. jutro może braknąć ostatecznie tych tanich godzin, a te z dzisiaj pozostają niewykorzystane. prześledź całą tracę i zaproponuj fixa
+
+tutaj ustawienia (upewnij się, że dump jest dostosowany do obecnej wersji aplikacji, bo dużo zmian było):
+
+```
+{
+  "generated_at": "2026-07-25T11:30:21.420373+02:00",
+  "config": {
+    "phases": 3,
+    "main_fuse_a": 32,
+    "grid_voltage": 230,
+    "battery_capacity_kwh": 30,
+    "inverter_max_charge_kw": 7.3,
+    "min_charge_power_kw": 1,
+    "inverter_max_discharge_kw": 11,
+    "charge_efficiency": 0.92,
+    "discharge_efficiency": 0.96,
+    "battery_wear_cost": 0.01,
+    "min_soc": 7,
+    "max_soc": 100,
+    "price_source": "pradcast",
+    "price_markup": 0.08,
+    "price_vat": 1.23,
+    "excise_kwh": 0,
+    "price_rounding": "per_bucket",
+    "price_refresh_hours": 3,
+    "consumption_learn_days": 21,
+    "ev_enabled": true,
+    "ev_charger_kw": 3.5,
+    "ev_charger_phase": 1,
+    "ev_charger_phases": "3",
+    "ev_charge_efficiency": 0.91,
+    "ev_calendar_keyword": "Kotek",
+    "ev_prefer_contiguous": true,
+    "ev_contiguous_max_extra_pct": 5,
+    "ev_prefer_early": true,
+    "ev_early_max_extra_pct": 5,
+    "travel_margin_before_min": 20,
+    "travel_margin_after_min": 0,
+    "ev_battery_kwh": 72,
+    "ev_range_km": 330,
+    "ev_weekly_km": 200,
+    "grid_disconnect_soc": 15,
+    "pradcast_api_key": "***redacted***",
+    "battery_charge_sensor": "sensor.victron_battery_kwh_in",
+    "battery_discharge_sensor": "sensor.victron_battery_kwh_out",
+    "calendars": [
+      "calendar.dom",
+      "calendar.dszwajca2_gmail_com"
+    ],
+    "charge_curve": [
+      {
+        "max_kw": 6,
+        "soc_from": 0,
+        "soc_to": 11
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 11,
+        "soc_to": 31
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 31,
+        "soc_to": 51
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 51,
+        "soc_to": 71
+      },
+      {
+        "max_kw": 7,
+        "soc_from": 71,
+        "soc_to": 91
+      },
+      {
+        "max_kw": 6.5,
+        "soc_from": 91,
+        "soc_to": 101
+      }
+    ],
+    "charge_efficiency_curve": [
+      {
+        "eff": 0.711,
+        "kw": 0.18
+      },
+      {
+        "eff": 0.806,
+        "kw": 0.33
+      },
+      {
+        "eff": 0.838,
+        "kw": 0.394
+      },
+      {
+        "eff": 0.848,
+        "kw": 0.434
+      },
+      {
+        "eff": 0.865,
+        "kw": 0.532
+      },
+      {
+        "eff": 0.895,
+        "kw": 0.76
+      },
+      {
+        "eff": 0.913,
+        "kw": 0.964
+      },
+      {
+        "eff": 0.92,
+        "kw": 1.228
+      },
+      {
+        "eff": 0.923,
+        "kw": 1.516
+      },
+      {
+        "eff": 0.927,
+        "kw": 2.006
+      },
+      {
+        "eff": 0.928,
+        "kw": 2.78
+      },
+      {
+        "eff": 0.925,
+        "kw": 3.532
+      },
+      {
+        "eff": 0.919,
+        "kw": 4.744
+      },
+      {
+        "eff": 0.907,
+        "kw": 6
+      },
+      {
+        "eff": 0.886,
+        "kw": 7.52
+      }
+    ],
+    "climate_sensor": "sensor.salon_klimka_daily_energy",
+    "climate_sensors": [
+      "sensor.salon_klimka_daily_energy"
+    ],
+    "consumption_sensor": "sensor.victron_ac_load",
+    "device_sensors": [
+      "sensor.salon_klimka_daily_energy",
+      "sensor.bathroom_boiler_socket_energy",
+      "sensor.tongou_m3_energy",
+      "sensor.garage_server_socket_energy",
+      "sensor.bedroom_wardrobe_socket_energy"
+    ],
+    "ev_calendar": "calendar.test",
+    "ev_charger_connected_sensor": "binary_sensor.kotek_charger",
+    "ev_charging_sensor": "binary_sensor.kotek_charging",
+    "ev_current_control": true,
+    "ev_efficiency_curve": [
+      {
+        "eff": 0.874,
+        "kw": 4.14
+      },
+      {
+        "eff": 0.908,
+        "kw": 5.52
+      },
+      {
+        "eff": 0.927,
+        "kw": 6.9
+      },
+      {
+        "eff": 0.91,
+        "kw": 8.97
+      },
+      {
+        "eff": 0.911,
+        "kw": 11.04
+      }
+    ],
+    "ev_energy_added_sensor": "sensor.kotek_energy_added",
+    "ev_location_sensor": "device_tracker.kotek_location_tracker",
+    "ev_max_current_a": 16,
+    "ev_min_current_a": 6,
+    "ev_odometer_sensor": "sensor.kotek_odometer",
+    "ev_presence_entities": [
+      "person.dawid",
+      "device_tracker.iphone_dejv"
+    ],
+    "ev_soc_sensor": "sensor.kotek_battery",
+    "ev_target_soc_sensor": "number.kotek_charge_limit",
+    "gmaps_api_key": "***redacted***",
+    "grid_import_sensor": "sensor.victron_grid_power",
+    "sensor_parents": {
+      "sensor.bathroom_boiler_socket_energy": "sensor.tongou_m3_energy",
+      "sensor.bedroom_wardrobe_socket_energy": "sensor.tongou_m3_energy",
+      "sensor.salon_klimka_daily_energy": "sensor.tongou_m3_energy"
+    },
+    "soc_sensor": "sensor.victron_battery_soc",
+    "tariffs": [
+      {
+        "base_component_kwh": 0.0435,
+        "fixed_monthly_cost": 39.47,
+        "id": "5a00395c648242d88ffa1833f078540a",
+        "name": "Tauron G13 lato + Pstryk",
+        "periods": [
+          {
+            "day_sensor": "binary_sensor.workday_today",
+            "hour_from": 7,
+            "hour_to": 13,
+            "id": "7b0989d1dc57470c9c1ea5bee9b8a24f",
+            "name": "Szczyt przedpołudniowy",
+            "price_kwh": 0.2203
+          },
+          {
+            "day_sensor": "binary_sensor.workday_today",
+            "hour_from": 19,
+            "hour_to": 22,
+            "id": "0dd4ad6e904e46c8989a20e31016d98d",
+            "name": "Szczyt popołudniowy",
+            "price_kwh": 0.3898
+          },
+          {
+            "day_sensor": null,
+            "hour_from": 0,
+            "hour_to": 24,
+            "id": "061aec01eb314e30994de5304f4aaccd",
+            "name": "Pozaszczyt",
+            "price_kwh": 0.0392
+          }
+        ],
+        "validity_ranges": [
+          {
+            "id": "3b8b269822c14ce3816a6f0cbb8103af",
+            "valid_from": "2026-04-01",
+            "valid_to": "2026-09-30"
+          }
+        ],
+        "vat_rate": 0.23
+      }
+    ],
+    "weather_entity": "weather.kwiatowa"
+  },
+```

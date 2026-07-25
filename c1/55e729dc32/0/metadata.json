@@ -1,0 +1,70 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "c155e729dc32",
+  "session_id": "99ed3682-1e39-4202-aa84-503e7a7490b7",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-25T09:53:01.766018Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "custom_components/powerpilot/const.py",
+    "custom_components/powerpilot/modules/ev.py",
+    "custom_components/powerpilot/optimizer.py",
+    "custom_components/powerpilot/strings.json",
+    "custom_components/powerpilot/translations/en.json",
+    "custom_components/powerpilot/translations/pl.json",
+    "tests/test_ev_allocation.py"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "127cdd081b37",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 3345,
+    "cache_creation_tokens": 287078,
+    "cache_read_tokens": 7300826,
+    "output_tokens": 52945,
+    "api_call_count": 54
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-25T09:53:01.71958Z",
+    "agent_lines": 145,
+    "agent_removed": 31,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 145,
+    "total_lines_changed": 176,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 147,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84,
+        ".claude/settings.local.json": 8,
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 52
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 8,
+      "user_lines_removed": 0,
+      "agent_lines_added": 284,
+      "agent_lines_removed": 31,
+      "user_added_per_file": {
+        ".claude/settings.local.json": 8
+      }
+    }
+  ]
+}

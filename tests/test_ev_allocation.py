@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
 from homeassistant.util import dt as dt_util
 
 from custom_components.powerpilot.models import Forecast, HourSlot
@@ -149,10 +150,12 @@ def _two_day_forecast(day_a: list[float], day_b: list[float]) -> Forecast:
     return Forecast(slots=slots)
 
 
-def _two_day_request(forecast: Forecast, **prefs) -> EVRequest:
+def _two_day_request(
+    forecast: Forecast, required_kwh: float = 2.0, **prefs
+) -> EVRequest:
     return EVRequest(
         enabled=True,
-        required_kwh=2.0,
+        required_kwh=required_kwh,
         charger_kw=1.0,
         phases=1,
         battery_kwh=10.0,
@@ -230,6 +233,69 @@ def test_contiguity_still_rearranges_within_the_day() -> None:
         ),
     )
     assert _two_day_hours(alloc) == {0, 1}
+
+
+def _day_a_energy(allocation) -> float:
+    """Energy allocated on day A (the earlier of the two forecast days)."""
+    midnight = dt_util.start_of_local_day(BASE) + timedelta(days=1)
+    return sum(kwh for start, kwh in allocation.items() if start < midnight)
+
+
+def test_early_keeps_todays_cheap_hours_when_the_block_no_longer_fits() -> None:
+    """Regression: earliness must front-LOAD, not merely finish early.
+
+    Day A has 2 cheap hours left, day B a 4-hour cheap run, and 4 hours of
+    charging are needed — so no placement fits on day A any more. The old
+    "earliest finishing day" filter therefore kept every variant (they all
+    finish on day B) and contiguity moved the whole session to day B, leaving
+    day A's equally cheap hours unused (the 2026-07-25 report). The split
+    {A0, A1, B0, B1} and the block {B0..B3} cost exactly the same, so the
+    one that charges earlier has to win.
+    """
+    forecast = _two_day_forecast([0.20, 0.20, 0.60, 0.60], [0.20, 0.20, 0.20, 0.20])
+    alloc = _optimizer()._plan_ev(
+        forecast,
+        _two_day_request(
+            forecast,
+            required_kwh=4.0,
+            prefer_contiguous=True,
+            contiguous_max_extra_pct=5.0,
+            prefer_early=True,
+            early_max_extra_pct=5.0,
+        ),
+    )
+    assert _two_day_hours(alloc) == {0, 1, 24, 25}
+
+
+def test_early_budget_is_monotone() -> None:
+    """A bigger early budget may only move energy EARLIER, never later.
+
+    Under the finish-day filter this knob was non-monotone — with a cheap run
+    long enough to hold the whole session, a *larger* tolerance admitted the
+    marginally dearer contiguous block on day B and handed the plan to
+    contiguity, so raising "prefer early" pushed the charging later. Here the
+    budget must only ever buy more of day A.
+    """
+    forecast = _two_day_forecast([0.20, 0.20, 0.60, 0.60], [0.20, 0.20, 0.20, 0.20])
+    early = [
+        _day_a_energy(
+            _optimizer()._plan_ev(
+                forecast,
+                _two_day_request(
+                    forecast,
+                    required_kwh=4.0,
+                    prefer_contiguous=True,
+                    contiguous_max_extra_pct=5.0,
+                    prefer_early=True,
+                    early_max_extra_pct=pct,
+                ),
+            )
+        )
+        for pct in (0.0, 5.0, 15.0)
+    ]
+    assert early == sorted(early)
+    # 0 % already has day A's two cheap hours for free — never fewer.
+    assert early[0] == pytest.approx(2.0)
 
 
 def test_full_allocation_energy_is_preserved() -> None:

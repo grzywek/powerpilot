@@ -977,9 +977,11 @@ class EVModule(PowerPilotModule):
         """The exact EVRequest last fed to the optimizer — the allocator inputs.
 
         Everything needed to reproduce ``_plan_ev`` offline: live SoC, pack size,
-        per-phase power × phases, the resulting full charge power, the top-up
-        deficit, calendar targets/forced windows and how many hours the car was
-        deemed available for.
+        per-phase power × phases, the resulting full charge power, the charging
+        efficiency, the top-up deficit, calendar targets/forced windows, how many
+        hours the car was deemed available for and the placement preferences —
+        without those last four the *hours* the allocator picked can't be
+        explained from a dump alone, only the amount of energy.
         """
         r = self._request
         avail = sorted(r.available_hours)
@@ -991,7 +993,12 @@ class EVModule(PowerPilotModule):
             "charger_kw": r.charger_kw,
             "phases": r.phases,
             "charger_power_kw": round(r.charger_power_kw, 3),
+            "charge_efficiency": r.charge_efficiency,
             "required_kwh": round(r.required_kwh, 3),
+            "prefer_early": r.prefer_early,
+            "early_max_extra_pct": r.early_max_extra_pct,
+            "prefer_contiguous": r.prefer_contiguous,
+            "contiguous_max_extra_pct": r.contiguous_max_extra_pct,
             "available_hours_count": len(avail),
             "available_from": avail[0].isoformat() if avail else None,
             "available_to": avail[-1].isoformat() if avail else None,

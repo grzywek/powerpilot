@@ -65,7 +65,7 @@ import logging
 import math
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 import highspy
@@ -102,7 +102,7 @@ _CHARGE_PRICE_BUCKET = Decimal("0.01")
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # allocator or a stale import.
-EV_ALLOCATOR_VERSION = "early-day-first-2026-07"
+EV_ALLOCATOR_VERSION = "early-energy-first-2026-07"
 
 
 @dataclass
@@ -939,12 +939,13 @@ class Optimizer:
             ``prefer_early``) reshape the choice within a bounded extra cost.
             Earliness outranks contiguity, day before hour: placements within
             ``early_max_extra_pct`` % of the cheapest are first narrowed to
-            those finishing on the earliest calendar day; contiguity then
-            keeps the block unbroken within that day's pool unless the
-            scattered optimum is more than ``contiguous_max_extra_pct`` %
-            cheaper; finally the earliest-finishing placement wins. This
-            order stops a contiguous block on a later day from outbidding
-            still-cheap hours today.
+            those charging as much energy as possible on the earliest day,
+            then on the next (lexicographic per-day energy — "do it now if it
+            can be done now"); contiguity then keeps the block unbroken within
+            that split unless the scattered optimum is more than
+            ``contiguous_max_extra_pct`` % cheaper; finally the
+            earliest-finishing placement wins. This order stops a contiguous
+            block on a later day from outbidding still-cheap hours today.
             """
             deficit = min(deficit, capacity_left() if room is None else room)
             if deficit <= _EPS:
@@ -984,6 +985,28 @@ class Optimizer:
                             return False
                         h += hour_step
                 return True
+
+            # Calendar days the candidates span, earliest first — the axis the
+            # earliness preference is compared on.
+            day_order = sorted({dt_util.as_local(s.start).date() for s in slots})
+
+            def _day_energy(
+                variant: tuple[float, datetime, list[datetime], dict[datetime, float]],
+            ) -> tuple[float, ...]:
+                """Energy per calendar day, earliest day first.
+
+                Every variant delivers the same total, so comparing these
+                tuples lexicographically — bigger is better — ranks placements
+                by how much of the charge happens EARLY: as much as possible
+                today, then as much as possible tomorrow, and so on. Rounded so
+                that float summation order can't split an otherwise equal
+                split.
+                """
+                per_day: dict[date, float] = {}
+                for start, kwh in variant[3].items():
+                    day = dt_util.as_local(start).date()
+                    per_day[day] = per_day.get(day, 0.0) + kwh
+                return tuple(round(per_day.get(day, 0.0), 6) for day in day_order)
 
             def _variant(
                 top_off, fulls: list
@@ -1056,25 +1079,38 @@ class Optimizer:
                 return cost <= base + abs(base) * pct / 100.0 + _EPS
 
             # Preference cascade — earliness OUTRANKS contiguity, and the
-            # calendar day outranks the hour ("charge Saturday before
-            # Sunday"). Contiguity used to filter first, which let a fully
-            # contiguous block on a LATER day outbid still-cheap hours today
-            # the moment the current day could no longer hold the whole block.
+            # calendar day outranks the hour ("charge Saturday before Sunday").
+            # Both earlier orderings let a contiguous block on a LATER day
+            # outbid still-cheap hours today; see the note in step 1.
             pool = variants
             if ev_request.prefer_early:
                 # 1. Day: among placements within the early budget of the
-                #    global optimum, keep those finishing on the earliest
-                #    local date. Everything after (contiguity, the hour-level
-                #    pick) may only rearrange hours within that day's pool.
+                #    global optimum, keep those that put as much energy as
+                #    possible on the earliest day, then as much as possible on
+                #    the next, and so on. Everything after (contiguity, the
+                #    hour-level pick) may only rearrange hours within that
+                #    per-day split.
+                #
+                #    Earliness is deliberately measured as *how much energy
+                #    lands on each day*, not as "which day does the placement
+                #    finish on". The finish-day test collapsed into a no-op the
+                #    moment the whole block no longer fitted in what was left
+                #    of today: every placement then "finished tomorrow", so the
+                #    day filter kept them all and contiguity was free to move
+                #    ALL charging to tomorrow while today's equally cheap hours
+                #    went unused. Worse, a bigger ``early_max_extra_pct`` made
+                #    the plan LATER, because it let that later contiguous block
+                #    into the pool in the first place. Charging early is worth a
+                #    bounded premium on its own: today's cheap hours are known,
+                #    tomorrow's are a forecast that can still evaporate — and an
+                #    unused cheap hour never comes back.
                 eligible = [
                     v
                     for v in pool
                     if _within(v[0], best_cost, ev_request.early_max_extra_pct)
                 ]
-                first_day = min(dt_util.as_local(v[1]).date() for v in eligible)
-                pool = [
-                    v for v in eligible if dt_util.as_local(v[1]).date() == first_day
-                ]
+                earliest = max(_day_energy(v) for v in eligible)
+                pool = [v for v in eligible if _day_energy(v) == earliest]
             if ev_request.prefer_contiguous:
                 # 2. Contiguity, within whatever pool earliness left: an
                 #    unbroken block may cost up to its budget over the pool's

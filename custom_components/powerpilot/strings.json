@@ -64,7 +64,7 @@
           "ev_charger_phases": "Charger phases (1 or 3)",
           "ev_prefer_contiguous": "Prefer contiguous charging (keep hours in one block)",
           "ev_contiguous_max_extra_pct": "Contiguous block cost tolerance (% above cheapest split)",
-          "ev_prefer_early": "Prefer early charging (finish as soon as possible)",
+          "ev_prefer_early": "Prefer early charging (charge as early as possible)",
           "ev_early_max_extra_pct": "Early charging cost tolerance (% above cheapest)"
         }
       }
@@ -155,7 +155,7 @@
           "ev_charger_phases": "Charger phases (1 or 3)",
           "ev_prefer_contiguous": "Prefer contiguous charging (keep hours in one block)",
           "ev_contiguous_max_extra_pct": "Contiguous block cost tolerance (% above cheapest split)",
-          "ev_prefer_early": "Prefer early charging (finish as soon as possible)",
+          "ev_prefer_early": "Prefer early charging (charge as early as possible)",
           "ev_early_max_extra_pct": "Early charging cost tolerance (% above cheapest)"
         }
       },

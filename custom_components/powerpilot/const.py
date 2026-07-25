@@ -160,7 +160,12 @@ CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # event-summary trigger
 #   as the block costs at most ``contiguous_max_extra_pct`` % more than the
 #   scattered optimum; a bigger difference re-allows the gap.
 # * prefer early — among placements within ``early_max_extra_pct`` % of the
-#   cheapest, pick the one that finishes charging soonest.
+#   cheapest, charge as much as possible as early as possible: first maximise
+#   the energy taken on the earliest day, then on the next, and only then
+#   finish the day as soon as possible. Earliness outranks contiguity —
+#   anything that can be charged today should be, because today's cheap hours
+#   are known while tomorrow's are still a forecast that can evaporate, and an
+#   unused cheap hour never comes back.
 CONF_EV_PREFER_CONTIGUOUS: Final = "ev_prefer_contiguous"
 CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT: Final = "ev_contiguous_max_extra_pct"
 CONF_EV_PREFER_EARLY: Final = "ev_prefer_early"

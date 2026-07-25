@@ -74,7 +74,7 @@
           "ev_charger_phases": "Liczba faz ładowarki (1 lub 3)",
           "ev_prefer_contiguous": "Preferuj ładowanie łączone (godziny w jednym bloku)",
           "ev_contiguous_max_extra_pct": "Tolerancja kosztu bloku łączonego (% ponad najtańszy wariant)",
-          "ev_prefer_early": "Preferuj ładowanie wczesne (zakończ jak najszybciej)",
+          "ev_prefer_early": "Preferuj ładowanie wczesne (ładuj jak najwcześniej)",
           "ev_early_max_extra_pct": "Tolerancja kosztu ładowania wczesnego (% ponad najtańszy)",
           "ev_charge_efficiency": "Sprawność ładowania EV przy pełnej mocy (np. 0.91 = 91%)"
         }
@@ -189,7 +189,7 @@
           "ev_charger_phases": "Liczba faz ładowarki (1 lub 3)",
           "ev_prefer_contiguous": "Preferuj ładowanie łączone (godziny w jednym bloku)",
           "ev_contiguous_max_extra_pct": "Tolerancja kosztu bloku łączonego (% ponad najtańszy wariant)",
-          "ev_prefer_early": "Preferuj ładowanie wczesne (zakończ jak najszybciej)",
+          "ev_prefer_early": "Preferuj ładowanie wczesne (ładuj jak najwcześniej)",
           "ev_early_max_extra_pct": "Tolerancja kosztu ładowania wczesnego (% ponad najtańszy)",
           "ev_charge_efficiency": "Sprawność ładowania EV przy pełnej mocy (np. 0.91 = 91%)"
         }

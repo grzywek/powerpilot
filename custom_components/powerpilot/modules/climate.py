@@ -6,7 +6,10 @@ temperature, and forecasts each of them from the weather entity's hourly
 temperature forecast instead of the weekday+hour weekly average.
 
 Data model: hourly ``(temperature, kWh)`` pairs per sensor, folded once per
-settled day. Temperatures come from the module's own history store — the
+settled day. When presence sensors are configured
+(``CONF_CLIMATE_PRESENCE_SENSORS``), hours with nobody home are left out of
+the fold, so the profile models occupied-house consumption only.
+Temperatures come from the module's own history store — the
 current temperature of the weather entity is recorded every update (weather
 entities keep no recorder statistics), seeded once from the recorder's short
 state history. The kWh side reads each device's long-term statistics, so the
@@ -30,6 +33,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import (
+    CONF_CLIMATE_PRESENCE_SENSORS,
     CONF_CLIMATE_SENSORS,
     CONF_WEATHER_ENTITY,
     DOMAIN,
@@ -45,6 +49,12 @@ MIN_CELL_SAMPLES = 3  # samples needed before a (bin, hour) cell is trusted
 MIN_LEARN_DAYS = 14  # observed days before the model replaces the weekly profile
 TEMP_HISTORY_DAYS = 400  # how long hourly temperature observations are kept
 MIN_DAY_HOURS = 12  # hour-pairs needed to fold a day into the profile
+
+# States that count as "someone is home" for the presence gate. Anything else
+# known (e.g. "not_home", "off") reads as away; unknown/unavailable states
+# contribute nothing, so a flaky sensor cannot mark hours as empty.
+PRESENCE_HOME_STATES = {"home", "on", "true"}
+_UNKNOWN_STATES = {"unknown", "unavailable", "none", ""}
 
 
 class TemperatureProfile:
@@ -70,6 +80,11 @@ class TemperatureProfile:
         cell = self._cells.setdefault(key, [0.0, 0.0])
         cell[0] += kwh
         cell[1] += 1
+
+    def reset(self) -> None:
+        """Drop all cells and observed days so the profile can be re-folded."""
+        self._cells = {}
+        self._observed_dates = set()
 
     @property
     def observed_days(self) -> int:
@@ -173,6 +188,10 @@ class ClimateModule(PowerPilotModule):
         self._temps_backfilled = False
         self._store: Store | None = None
         self._last_learn_day: date | None = None
+        # Presence-sensor set the profiles were folded with. When the
+        # configuration diverges, the profiles are re-folded from source data
+        # (own temp history + long-term kWh statistics) under the new gate.
+        self._presence_fingerprint: list[str] | None = None
 
     # ------------------------------------------------------------------
     # Wiring
@@ -180,6 +199,10 @@ class ClimateModule(PowerPilotModule):
     @property
     def sensors(self) -> list[str]:
         return list(self.config.get(CONF_CLIMATE_SENSORS) or [])
+
+    @property
+    def presence_sensors(self) -> list[str]:
+        return list(self.config.get(CONF_CLIMATE_PRESENCE_SENSORS) or [])
 
     def profile_for(self, entity_id: str) -> TemperatureProfile:
         return self.profiles.setdefault(entity_id, TemperatureProfile())
@@ -213,6 +236,10 @@ class ClimateModule(PowerPilotModule):
             self._temps_backfilled = bool(stored.get("temps_backfilled"))
             last = stored.get("last_learn_day")
             self._last_learn_day = date.fromisoformat(last) if last else None
+            fingerprint = stored.get("presence_fingerprint")
+            self._presence_fingerprint = (
+                list(fingerprint) if fingerprint is not None else None
+            )
 
     async def _async_save(self) -> None:
         if self._store is None:
@@ -227,6 +254,7 @@ class ClimateModule(PowerPilotModule):
                 "last_learn_day": (
                     self._last_learn_day.isoformat() if self._last_learn_day else None
                 ),
+                "presence_fingerprint": self._presence_fingerprint,
             }
         )
 
@@ -237,6 +265,7 @@ class ClimateModule(PowerPilotModule):
         self._temps = {}
         self._temps_backfilled = False
         self._last_learn_day = None
+        self._presence_fingerprint = None
 
     # ------------------------------------------------------------------
     # Learning
@@ -276,6 +305,25 @@ class ClimateModule(PowerPilotModule):
         changed = bool(stale)
         for eid in stale:
             del self.profiles[eid]
+
+        # A changed presence-sensor set means the existing cells were folded
+        # under a different gate — re-fold everything from source data (own
+        # temp history + long-term kWh statistics; no samples are lost, they
+        # are just re-aggregated with the new filter). The whole rebuild
+        # happens in the next learn pass, so readiness is not reset for long.
+        fingerprint = sorted(self.presence_sensors)
+        if (self._presence_fingerprint or []) != fingerprint:
+            for profile in self.profiles.values():
+                profile.reset()
+            self._presence_fingerprint = fingerprint
+            self._last_learn_day = None  # force the learn pass this update
+            changed = True
+            if self.profiles:
+                self.log_info(
+                    "Zmiana czujników obecności — profile temperaturowe "
+                    "przeliczane od nowa z historii temperatur i statystyk kWh.",
+                    extra={"presence_sensors": fingerprint},
+                )
 
         changed = self._record_current_temperature() or changed
         if not self._temps_backfilled:
@@ -363,17 +411,87 @@ class ClimateModule(PowerPilotModule):
             )
         return True
 
+    @staticmethod
+    def _presence_map(
+        states_by_entity: dict[str, list], start: datetime, end: datetime
+    ) -> dict[str, bool]:
+        """Per-hour "anyone home" flags from recorder state runs.
+
+        Keys are local-hour ISO strings (like ``_temps``). An hour appears
+        only when at least one presence entity had a *known* state overlapping
+        it; the value is True when any entity read home/on at any point during
+        the hour. Hours missing from the map are unknown — the learner treats
+        them as present, so the gate only drops hours known to be empty.
+        """
+        presence: dict[str, bool] = {}
+        for states in states_by_entity.values():
+            for st, nxt in zip(states, [*states[1:], None]):
+                value = str(st.state).lower()
+                if value in _UNKNOWN_STATES:
+                    continue
+                home = value in PRESENCE_HOME_STATES
+                seg_start = max(st.last_updated, dt_util.as_utc(start))
+                seg_end = nxt.last_updated if nxt is not None else dt_util.as_utc(end)
+                hour = dt_util.as_local(seg_start).replace(
+                    minute=0, second=0, microsecond=0
+                )
+                while hour < seg_end:
+                    key = hour.isoformat()
+                    presence[key] = presence.get(key, False) or home
+                    hour += timedelta(hours=1)
+        return presence
+
+    async def _async_presence_by_hour(
+        self, start: datetime, end: datetime
+    ) -> dict[str, bool]:
+        """Presence gate for a learn window, read back from the recorder.
+
+        The recorder keeps raw states only for its purge window (~10 days),
+        but learning folds a day the morning after it settles, so the window
+        normally fits; older hours simply stay unknown (= they learn).
+        """
+        sensors = self.presence_sensors
+        if not sensors:
+            return {}
+        from homeassistant.components.recorder import get_instance, history
+
+        states_by_entity: dict[str, list] = {}
+        for entity_id in sensors:
+            changes = await get_instance(self.hass).async_add_executor_job(
+                history.state_changes_during_period,
+                self.hass,
+                start,
+                end,
+                entity_id,
+                True,  # no_attributes — only the state matters
+                False,  # descending
+                None,  # limit
+                True,  # include_start_time_state
+            )
+            states_by_entity[entity_id] = changes.get(entity_id, [])
+        return self._presence_map(states_by_entity, start, end)
+
     async def _maybe_learn(self) -> bool:
         """Fold settled days of (temperature, device kWh) into the profiles.
 
         Runs once per day — and immediately when a sensor was just added to
         the configuration (its profile is empty), so a new device does not
         wait for the next day boundary to start learning.
+
+        With presence sensors configured, only hours during which someone was
+        home are folded in — the profile then models "consumption when the
+        house is occupied" instead of averaging empty-house hours into it.
+        A day whose data is complete still counts as observed even when every
+        hour was away, so vacation days don't get re-queried forever.
         """
         today = dt_util.now().date()
         new_sensor = any(eid not in self.profiles for eid in self.sensors)
         if self._last_learn_day == today and not new_sensor:
             return False
+
+        # {(window start, window end): hour → anyone home} — climate sensors
+        # usually share the same unfolded window, so fetch presence once.
+        presence_cache: dict[tuple[datetime, datetime], dict[str, bool]] = {}
 
         for eid in self.sensors:
             profile = self.profile_for(eid)
@@ -391,8 +509,14 @@ class ClimateModule(PowerPilotModule):
             start = dt_util.start_of_local_day(candidate_days[0])
             end = dt_util.start_of_local_day(today)
             kwh = await self.coordinator.consumption.async_range_kwh(eid, start, end)
+            if (start, end) not in presence_cache:
+                presence_cache[(start, end)] = await self._async_presence_by_hour(
+                    start, end
+                )
+            presence = presence_cache[(start, end)]
 
             folded = 0
+            away_hours = 0
             for day in candidate_days:
                 day_start = dt_util.start_of_local_day(day)
                 pairs: list[tuple[float, int, float]] = []
@@ -405,15 +529,29 @@ class ClimateModule(PowerPilotModule):
                 if len(pairs) < MIN_DAY_HOURS:
                     continue  # retried next learn pass once more data lands
                 for temp, h, energy in pairs:
+                    # Presence gate: skip hours known to have had nobody home;
+                    # unknown hours (no presence data) still learn.
+                    if not presence.get(
+                        self._hour_key(day_start + timedelta(hours=h)), True
+                    ):
+                        away_hours += 1
+                        continue
                     profile.observe(temp, h, energy)
                 profile.mark_date_observed(day)
                 folded += 1
 
             if folded:
+                away_note = (
+                    f", pominięto {away_hours} godz. bez obecności" if away_hours else ""
+                )
                 self.log_info(
                     f"Profil temperaturowy {eid}: dodano {folded} dni "
-                    f"(łącznie {profile.observed_days}).",
-                    extra={"sensor": eid, "folded_days": folded},
+                    f"(łącznie {profile.observed_days}{away_note}).",
+                    extra={
+                        "sensor": eid,
+                        "folded_days": folded,
+                        "away_hours_skipped": away_hours,
+                    },
                 )
 
         self._last_learn_day = today

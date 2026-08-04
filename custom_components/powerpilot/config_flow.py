@@ -25,6 +25,7 @@ from .const import (
     CONF_CHARGE_CURVE,
     CONF_CHARGE_EFFICIENCY,
     CONF_CHARGE_EFFICIENCY_CURVE,
+    CONF_CLIMATE_PRESENCE_SENSORS,
     CONF_CLIMATE_SENSORS,
     CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
@@ -188,6 +189,17 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
                 CONF_CLIMATE_SENSORS, default=list(d(CONF_CLIMATE_SENSORS) or [])
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor", multiple=True)
+            ),
+            # Presence entities gating the temperature-profile learning: hours
+            # learn only when someone was home (any entity home/on).
+            vol.Optional(
+                CONF_CLIMATE_PRESENCE_SENSORS,
+                default=list(d(CONF_CLIMATE_PRESENCE_SENSORS) or []),
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["device_tracker", "person", "binary_sensor"],
+                    multiple=True,
+                )
             ),
         }
     )

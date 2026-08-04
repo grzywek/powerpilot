@@ -66,6 +66,11 @@ CONF_CLIMATE_SENSORS: Final = "climate_sensors"
 # only so ``async_setup_entry`` can seed the new list once on upgrade —
 # nothing reads it at runtime anymore.
 CONF_CLIMATE_SENSOR: Final = "climate_sensor"
+# Presence entities (person.*, device_tracker.*, binary_sensor.*) gating the
+# temperature-profile learning: an hour is folded into a profile only when
+# someone was home during it ("anyone home" — any entity reading home/on).
+# Hours whose presence is unknown still learn; empty list → every hour learns.
+CONF_CLIMATE_PRESENCE_SENSORS: Final = "climate_presence_sensors"
 
 # Storage version for the per-entry climate (temperature-profile) store.
 STORAGE_VERSION_CLIMATE: Final = 1

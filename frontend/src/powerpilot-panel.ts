@@ -129,6 +129,8 @@ interface ClimateProfileInfo {
   samples: number;
   ready: boolean;
   min_learn_days: number;
+  /** Number of configured presence sensors gating the learning (0 = off). */
+  presence_sensors?: number;
   matrix: ClimateProfileRow[];
 }
 
@@ -3326,6 +3328,16 @@ export class PowerPilotPanel extends LitElement {
         <div class="check">
           ${status}
           <span class="muted">· ${info.samples} próbek godzinowych</span>
+          ${info.presence_sensors
+            ? html`<span class="muted">
+                · uczony tylko z godzin z obecnością w domu
+                (${info.presence_sensors} ${info.presence_sensors === 1
+                  ? "czujnik"
+                  : info.presence_sensors <= 4
+                    ? "czujniki"
+                    : "czujników"})
+              </span>`
+            : nothing}
         </div>
         ${info.matrix.length
           ? this._tempHeatmap(info.matrix)

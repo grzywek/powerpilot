@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
-from custom_components.powerpilot.const import CONF_CLIMATE_SENSORS
+from homeassistant.util import dt as dt_util
+
+from custom_components.powerpilot.const import (
+    CONF_CLIMATE_PRESENCE_SENSORS,
+    CONF_CLIMATE_SENSORS,
+)
 from custom_components.powerpilot.modules.climate import (
     MIN_LEARN_DAYS,
     TEMP_BIN_C,
@@ -96,3 +102,78 @@ def test_handles_requires_config_and_enough_learning() -> None:
     assert module.handles(AC)
     assert not module.handles(HEAT_PUMP)
     assert not module.handles("sensor.other")
+
+
+def test_presence_sensors_read_from_config() -> None:
+    assert _module({}).presence_sensors == []
+    module = _module({CONF_CLIMATE_PRESENCE_SENSORS: ["person.anna"]})
+    assert module.presence_sensors == ["person.anna"]
+
+
+def _utc(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 8, 4, hour, minute, tzinfo=timezone.utc)
+
+
+def _st(state: str, at: datetime) -> SimpleNamespace:
+    return SimpleNamespace(state=state, last_updated=at)
+
+
+def _presence_map(states_by_entity: dict) -> dict[str, bool]:
+    return ClimateModule._presence_map(states_by_entity, _utc(0), _utc(12))
+
+
+def _key(hour: int) -> str:
+    return dt_util.as_local(_utc(hour)).replace(
+        minute=0, second=0, microsecond=0
+    ).isoformat()
+
+
+def test_presence_map_marks_home_and_away_hours() -> None:
+    # Home 00:00–03:30, away 03:30–12:00 → hours 0–3 present, 4–11 absent.
+    presence = _presence_map(
+        {"person.anna": [_st("home", _utc(0)), _st("not_home", _utc(3, 30))]}
+    )
+    assert presence[_key(0)] is True
+    assert presence[_key(3)] is True  # partially-home hour counts as present
+    assert presence[_key(4)] is False
+    assert presence[_key(11)] is False
+
+
+def test_presence_map_any_entity_home_wins() -> None:
+    # Anna leaves at 02:00 but Bartek is home the whole window → all present.
+    presence = _presence_map(
+        {
+            "person.anna": [_st("home", _utc(0)), _st("not_home", _utc(2))],
+            "person.bartek": [_st("home", _utc(0))],
+        }
+    )
+    assert all(presence[_key(h)] for h in range(12))
+
+
+def test_presence_map_unknown_states_leave_hours_unmapped() -> None:
+    # Unavailable readings contribute nothing: those hours stay unknown, and
+    # the learner's ``presence.get(key, True)`` default keeps them learning.
+    presence = _presence_map(
+        {"person.anna": [_st("unavailable", _utc(0)), _st("home", _utc(6))]}
+    )
+    assert _key(0) not in presence
+    assert _key(5) not in presence
+    assert presence[_key(6)] is True
+
+
+def test_presence_map_empty_without_states() -> None:
+    assert _presence_map({"person.anna": []}) == {}
+
+
+def test_profile_reset_clears_cells_and_days() -> None:
+    # A presence-config change re-folds the profile from source data; reset
+    # is the first half of that: everything learned is dropped for re-fold.
+    profile = TemperatureProfile()
+    for _ in range(3):
+        profile.observe(30.0, 14, 1.5)
+    profile.mark_date_observed(date(2026, 8, 1))
+    profile.reset()
+    assert profile.samples == 0
+    assert profile.observed_days == 0
+    assert not profile.is_date_observed(date(2026, 8, 1))
+    assert profile.predict(30.0, 14) is None

@@ -674,6 +674,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "samples": self.climate.profile_for(eid).samples,
                     "ready": self.climate.is_ready(eid),
                     "min_learn_days": MIN_LEARN_DAYS,
+                    "presence_sensors": len(self.climate.presence_sensors),
                     "matrix": self.climate.profile_for(eid).as_matrix(),
                 }
                 for eid in self.climate.sensors

@@ -27,7 +27,8 @@
           "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
           "consumption_sensor": "Sensor główny (falownik / wyjście)",
           "weather_entity": "Encja pogody",
-          "climate_sensors": "Sensory zużycia zależne od pogody (klimatyzacja, pompa ciepła…) — profile uczone z temperatury"
+          "climate_sensors": "Sensory zużycia zależne od pogody (klimatyzacja, pompa ciepła…) — profile uczone z temperatury",
+          "climate_presence_sensors": "Czujniki obecności w domu (osoby, telefony, binary_sensor) — profil temperaturowy uczy się tylko z godzin, gdy ktoś był w domu"
         }
       },
       "prices": {
@@ -131,7 +132,8 @@
           "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
           "consumption_sensor": "Sensor główny (falownik / wyjście)",
           "weather_entity": "Encja pogody",
-          "climate_sensors": "Sensory zużycia zależne od pogody (klimatyzacja, pompa ciepła…) — profile uczone z temperatury"
+          "climate_sensors": "Sensory zużycia zależne od pogody (klimatyzacja, pompa ciepła…) — profile uczone z temperatury",
+          "climate_presence_sensors": "Czujniki obecności w domu (osoby, telefony, binary_sensor) — profil temperaturowy uczy się tylko z godzin, gdy ktoś był w domu"
         }
       },
       "charge_curve": {

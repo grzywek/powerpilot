@@ -1,0 +1,55 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "f709ccb00f10",
+  "session_id": "0949cf05-93f8-4950-a19e-83a38ce534fb",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-04T22:57:29.209604Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "custom_components/powerpilot/const.py",
+    "custom_components/powerpilot/config_flow.py",
+    "custom_components/powerpilot/modules/climate.py",
+    "custom_components/powerpilot/coordinator.py",
+    "frontend/src/powerpilot-panel.ts",
+    "tests/test_climate.py"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "927ced47825d",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 279,
+    "cache_creation_tokens": 121759,
+    "cache_read_tokens": 6485441,
+    "output_tokens": 43904,
+    "api_call_count": 56
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-04T22:57:29.179276Z",
+    "agent_lines": 254,
+    "agent_removed": 5,
+    "human_added": 30,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 284,
+    "total_lines_changed": 311,
+    "agent_percentage": 83.27974276527331,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 147,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84,
+        ".claude/settings.local.json": 8,
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 52
+      }
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+trzeba coś zrobić, żeby "Profil temperaturowy" był liczony tylko z próbek gdzie był presence w domu. powinno być miejsce wpisania 1 lub więcej czujników presence obecności kogoś w domu

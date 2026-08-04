@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "f709ccb00f10",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "custom_components/powerpilot/config_flow.py",
+    "custom_components/powerpilot/const.py",
+    "custom_components/powerpilot/coordinator.py",
+    "custom_components/powerpilot/modules/climate.py",
+    "frontend/src/powerpilot-panel.ts",
+    "tests/test_climate.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f7/09ccb00f10/0/metadata.json",
+      "transcript": "/f7/09ccb00f10/0/full.jsonl",
+      "compact_transcript": "/f7/09ccb00f10/0/transcript.jsonl",
+      "content_hash": "/f7/09ccb00f10/0/content_hash.txt",
+      "prompt": "/f7/09ccb00f10/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 279,
+    "cache_creation_tokens": 121759,
+    "cache_read_tokens": 6485441,
+    "output_tokens": 43904,
+    "api_call_count": 56
+  }
+}

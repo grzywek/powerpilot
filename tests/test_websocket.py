@@ -262,6 +262,37 @@ async def test_series_current_hour_mode_follows_the_plan_decision(
     assert current["inverter_mode"] == InverterMode.DISCHARGE
 
 
+async def test_series_current_hour_carries_the_hour_start_plan(
+    hass: HomeAssistant,
+) -> None:
+    """The in-progress hour exposes the plan it STARTED with (its vintage).
+
+    The live decision can be a mid-hour re-plan covering only the remainder of
+    the hour; the plan-vs-real card needs the full-hour baseline (charge/EV/
+    grid targets and the planned inverter mode) recorded as the hour began.
+    """
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+    # Setup's first refresh recorded this hour's vintage.
+    assert coordinator._last_snapshot_hour is not None
+
+    result = await coordinator.get_series(past_hours=1)
+    current = next(h for h in result["hours"] if h.get("partial"))
+    plan_side = current["hour_plan"]
+    assert plan_side is not None
+    for key in (
+        "charge",
+        "discharge",
+        "ev",
+        "grid",
+        "consumption",
+        "soc_end",
+        "charge_power_kw",
+    ):
+        assert key in plan_side
+    assert current["planned_mode"] in ("charge", "discharge", "passthrough")
+
+
 async def test_series_future_forecast_chains_from_current_decision(
     hass: HomeAssistant,
 ) -> None:

@@ -1733,6 +1733,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         if pin_requested and _pin_idx(h) is not None
                         else _real_mode(bat_charge_real.get(h), bat_discharge_real.get(h))
                     ),
+                    # The mode THIS hour's own plan chose as it began (vintage
+                    # index 0) — the "plan" side of the plan-vs-real comparison.
+                    "planned_mode": MODE_CODE_INV.get(sn.run0_at(h, "mode") or ""),
                     "battery_charge_kwh": round(bat_charge_real[h], 3) if h in bat_charge_real else None,
                     "battery_discharge_kwh": round(bat_discharge_real[h], 3) if h in bat_discharge_real else None,
                     # Planned grid-side charge setpoint for this hour, from the
@@ -1922,6 +1925,26 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                             if cur_dec is not None
                             else _real_mode(cur_charge, cur_discharge)
                         )
+                    ),
+                    # Plan-vs-real baseline for the in-progress hour: the plan
+                    # the hour STARTED with (its own vintage, full-hour values).
+                    # The live decision above may already be a mid-hour re-plan
+                    # covering only the remainder — comparing realized flows
+                    # against that would always read "on plan".
+                    "planned_mode": MODE_CODE_INV.get(sn.run0_at(now, "mode") or ""),
+                    "hour_plan": (
+                        {
+                            "charge": sn.run0_at(now, "charge"),
+                            "discharge": sn.run0_at(now, "dischg"),
+                            "ev": sn.run0_at(now, "ev"),
+                            "ev_minutes": sn.run0_at(now, "ev_min"),
+                            "grid": sn.run0_at(now, "grid"),
+                            "consumption": sn.run0_at(now, "cons_fc"),
+                            "soc_end": sn.run0_at(now, "soc"),
+                            "charge_power_kw": sn.run0_at(now, "charge_pw"),
+                        }
+                        if sn.origin_at(now, 0) is not None
+                        else None
                     ),
                     "battery_charge_kwh": round(cur_charge, 3) if cur_charge is not None else None,
                     "battery_discharge_kwh": round(cur_discharge, 3) if cur_discharge is not None else None,

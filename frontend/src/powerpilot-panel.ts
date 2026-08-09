@@ -14,6 +14,7 @@ interface PlanHour {
   battery_energy_cost: number;
   battery_charge_kwh: number;
   battery_discharge_kwh: number;
+  grid_buy_kwh: number;
   hour_cost: number;
 }
 
@@ -180,6 +181,12 @@ interface SeriesHour {
   partial_until?: string;
   realized: TipSide | null;
   forecast: TipSide | null;
+  /** Inverter mode the hour's own plan chose as it began (vintage index 0). */
+  planned_mode?: string | null;
+  /** Current hour only: the full-hour plan the hour STARTED with — the
+   *  baseline for plan-vs-realization (the live decision may already be a
+   *  mid-hour re-plan covering only the remainder). */
+  hour_plan?: HourPlan | null;
   // When the forecast side was made (ISO), so the tooltip can show the vintage.
   forecast_origin?: string | null;
   battery_charge_kwh: number | null;
@@ -210,6 +217,18 @@ interface TipSide {
   soc_end: number | null;
   ev_soc_start: number | null;
   ev_soc_end: number | null;
+}
+
+/** The current hour's full-hour baseline plan (its hour-start vintage). */
+interface HourPlan {
+  charge: number | null;
+  discharge: number | null;
+  ev: number | null;
+  ev_minutes: number | null;
+  grid: number | null;
+  consumption: number | null;
+  soc_end: number | null;
+  charge_power_kw: number | null;
 }
 
 interface Series {
@@ -992,27 +1011,7 @@ export class PowerPilotPanel extends LitElement {
       return html`<div class="card empty">Brak danych dla bieżącej godziny.</div>`;
     }
     return html`
-      <div class="card">
-        <div class="stat-row">
-          ${this._stat(
-            "Tryb falownika",
-            INVERTER_MODE_META[current.inverter_mode]?.label ?? current.inverter_mode
-          )}
-          ${this._stat("Moc ładowania", (current.charge_power_kw ?? 0).toFixed(2) + " kW")}
-          ${this._stat("SoC", current.battery_soc.toFixed(0) + " %")}
-          ${this._stat("Cena w baterii", current.battery_energy_cost.toFixed(2))}
-          ${this._stat(
-            "EV",
-            current.ev_charge
-              ? "ładuje" +
-                  (current.ev_charge_minutes != null
-                    ? ` (${current.ev_charge_minutes} min)`
-                    : "")
-              : "—"
-          )}
-          ${this._stat("Koszt horyzontu", plan.total_cost.toFixed(2) + " PLN")}
-        </div>
-      </div>
+      ${this._renderHoursCard(plan, current)}
       ${this._renderNavBar()}
       <div class="card">
         <div class="card-title">
@@ -1149,6 +1148,269 @@ export class PowerPilotPanel extends LitElement {
 
   private _stat(label: string, value: string): TemplateResult {
     return html`<div class="stat"><span class="k">${label}</span><span class="v">${value}</span></div>`;
+  }
+
+  // ------------------------------------------------------------------
+  // Hours card: previous / current / next hour, plan vs realization
+  // ------------------------------------------------------------------
+  private _seriesAt(startMs: number): SeriesHour | null {
+    return (
+      this._series?.hours.find(
+        (h) => new Date(h.start).getTime() === startMs
+      ) ?? null
+    );
+  }
+
+  private _planAt(startMs: number): PlanHour | null {
+    return (
+      this._plan?.hours.find((h) => new Date(h.start).getTime() === startMs) ??
+      null
+    );
+  }
+
+  private _forecastConsumptionAt(startMs: number): number | null {
+    const f = this._plan?.forecast.find(
+      (x) => new Date(x.start).getTime() === startMs
+    );
+    return f ? f.consumption_kwh : null;
+  }
+
+  /** Realized inverter mode from measured flows (mirrors the backend rule:
+   *  charging wins ties, sub-noise flows read as passthrough). */
+  private _measuredMode(tip: TipSide | null | undefined): string | null {
+    if (!tip) return null;
+    const c = tip.charge ?? 0;
+    const d = tip.discharge ?? 0;
+    if (c > 0.05 && c >= d) return "charge";
+    if (d > 0.05) return "discharge";
+    return "passthrough";
+  }
+
+  private _modeChip(mode: string | null | undefined): TemplateResult {
+    if (!mode) return html`<span class="muted">—</span>`;
+    const meta = INVERTER_MODE_META[mode];
+    return html`<span class="mode-chip"
+      ><span class="dot-sq" style=${"background:" + (meta?.dot ?? "#999")}></span
+      >${meta?.label ?? mode}</span
+    >`;
+  }
+
+  private _fmtNum(v: number | null | undefined, digits = 2): string {
+    return v == null ? "—" : v.toFixed(digits);
+  }
+
+  /** One "Tryb: plan → realnie" row; ✓ when they agree, ≠ when they don't. */
+  private _modeRow(
+    plan: string | null | undefined,
+    real: string | null | undefined,
+    planOnly = false
+  ): TemplateResult {
+    const agree = plan && real ? plan === real : null;
+    return html`<div class="pv-row">
+      <span class="pv-label">Tryb falownika</span>
+      <span class="pv-vals">
+        ${planOnly
+          ? this._modeChip(plan)
+          : html`${this._modeChip(plan)} <span class="pv-arrow">→</span>
+              ${this._modeChip(real)}
+              ${agree == null
+                ? nothing
+                : agree
+                  ? html`<span class="pv-ok">✓</span>`
+                  : html`<span class="pv-warn">≠</span>`}`}
+      </span>
+    </div>`;
+  }
+
+  /** One "plan → realnie" value row with an optional realization bar.
+   *  ``elapsed`` (0..1) draws a tick at the elapsed fraction of the hour, so
+   *  a fill left of the tick reads "za planem", right of it "przed planem". */
+  private _pvRow(
+    label: string,
+    plan: number | null | undefined,
+    real: number | null | undefined,
+    opts: {
+      unit?: string;
+      digits?: number;
+      planOnly?: boolean;
+      elapsed?: number | null;
+      planSuffix?: string;
+    } = {}
+  ): TemplateResult | typeof nothing {
+    const p = plan ?? null;
+    const r = real ?? null;
+    const unit = opts.unit ?? "kWh";
+    const digits = opts.digits ?? 2;
+    if (
+      (p == null || Math.abs(p) < 0.005) &&
+      (r == null || Math.abs(r) < 0.005)
+    ) {
+      return nothing;
+    }
+    const showBar = !opts.planOnly && p != null && p > 0.005;
+    const ratio = showBar && r != null ? r / p : null;
+    return html`<div class="pv-row">
+      <span class="pv-label">${label}</span>
+      <span class="pv-vals">
+        ${opts.planOnly
+          ? html`<strong>${this._fmtNum(p, digits)}</strong> ${unit}${opts.planSuffix ?? ""}`
+          : html`${this._fmtNum(p, digits)}${opts.planSuffix ?? ""}
+              <span class="pv-arrow">→</span>
+              <strong>${this._fmtNum(r, digits)}</strong> ${unit}
+              ${ratio != null
+                ? html`<span class="pv-pct">${Math.round(ratio * 100)}%</span>`
+                : nothing}`}
+      </span>
+      ${showBar
+        ? html`<div class="pv-bar">
+            <div
+              class="pv-fill"
+              style=${`width:${Math.min(100, Math.max(0, (ratio ?? 0) * 100))}%`}
+            ></div>
+            ${opts.elapsed != null
+              ? html`<div
+                  class="pv-tick"
+                  style=${`left:${Math.min(100, opts.elapsed * 100)}%`}
+                ></div>`
+              : nothing}
+          </div>`
+        : nothing}
+    </div>`;
+  }
+
+  private _socRow(
+    label: string,
+    plan: number | null | undefined,
+    real: number | null | undefined,
+    planOnly = false
+  ): TemplateResult | typeof nothing {
+    if (plan == null && real == null) return nothing;
+    const fmt = (v: number | null | undefined) =>
+      v == null ? "—" : v.toFixed(0) + "%";
+    return html`<div class="pv-row">
+      <span class="pv-label">${label}</span>
+      <span class="pv-vals">
+        ${planOnly
+          ? html`<strong>${fmt(plan)}</strong>`
+          : html`${fmt(plan)} <span class="pv-arrow">→</span>
+              <strong>${fmt(real)}</strong>`}
+      </span>
+    </div>`;
+  }
+
+  private _hourCol(
+    cls: string,
+    title: string,
+    sub: TemplateResult | string,
+    body: TemplateResult
+  ): TemplateResult {
+    return html`<div class="hour-col ${cls}">
+      <div class="hcol-head">
+        <span class="hcol-title">${title}</span>
+        <span class="hcol-sub">${sub}</span>
+      </div>
+      ${body}
+    </div>`;
+  }
+
+  private _renderHoursCard(plan: Plan, current: PlanHour): TemplateResult {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const range = (ms: number) =>
+      `${pad(new Date(ms).getHours())}:00–${pad(new Date(ms + 3600_000).getHours())}:00`;
+
+    const curStart = new Date();
+    curStart.setMinutes(0, 0, 0);
+    const curMs = curStart.getTime();
+    const prevMs = curMs - 3600_000;
+    const nextMs = curMs + 3600_000;
+
+    const sPrev = this._seriesAt(prevMs);
+    const sCur = this._seriesAt(curMs);
+    const pNext = this._planAt(nextMs);
+
+    const elapsed = Math.max(0, Math.min(1, (Date.now() - curMs) / 3600_000));
+    const elapsedMin = Math.round(elapsed * 60);
+
+    // --- previous hour: its own plan (vintage) vs what actually happened ---
+    const prevBody =
+      sPrev && (sPrev.realized || sPrev.forecast)
+        ? html`
+            ${this._modeRow(sPrev.planned_mode ?? null, sPrev.inverter_mode)}
+            ${this._pvRow("Ładowanie baterii", sPrev.forecast?.charge, sPrev.realized?.charge)}
+            ${this._pvRow("Z baterii", sPrev.forecast?.discharge, sPrev.realized?.discharge)}
+            ${this._pvRow("Ładowanie EV", sPrev.forecast?.ev, sPrev.realized?.ev)}
+            ${this._pvRow("Zużycie domu", sPrev.consumption_forecast, sPrev.consumption_real)}
+            ${this._pvRow("Pobór z sieci", sPrev.forecast?.grid, sPrev.realized?.grid)}
+            ${this._socRow("SoC na koniec", sPrev.forecast?.soc_end, sPrev.realized?.soc_end)}
+          `
+        : html`<div class="muted">brak danych (wróć do „● teraz")</div>`;
+
+    // --- current hour: the plan the hour STARTED with vs realized so far ---
+    const hp = sCur?.hour_plan ?? null;
+    const planCharge = hp ? hp.charge : current.battery_charge_kwh;
+    const planDischarge = hp ? hp.discharge : current.battery_discharge_kwh;
+    const planEv = hp ? hp.ev : current.ev_charge_kwh;
+    const planEvMin = hp ? hp.ev_minutes : current.ev_charge_minutes;
+    const planGrid = hp ? hp.grid : current.grid_buy_kwh;
+    const planCons = hp ? hp.consumption : this._forecastConsumptionAt(curMs);
+    const planSocEnd = hp ? hp.soc_end : current.battery_soc;
+    const planMode = sCur?.planned_mode ?? current.inverter_mode;
+    const realMode = sCur?.realized ? this._measuredMode(sCur.realized) : null;
+    const curBody = html`
+      ${this._modeRow(planMode, realMode)}
+      ${this._pvRow("Ładowanie baterii", planCharge, sCur?.realized?.charge, { elapsed })}
+      ${this._pvRow("Z baterii", planDischarge, sCur?.realized?.discharge, { elapsed })}
+      ${this._pvRow("Ładowanie EV", planEv, sCur?.realized?.ev, {
+        elapsed,
+        planSuffix: planEvMin != null ? ` (${planEvMin} min)` : "",
+      })}
+      ${this._pvRow("Zużycie domu", planCons, sCur?.consumption_real, { elapsed })}
+      ${this._pvRow("Pobór z sieci", planGrid, sCur?.realized?.grid, { elapsed })}
+      ${this._socRow("SoC: plan na koniec → teraz", planSocEnd, sCur?.soc ?? null)}
+    `;
+
+    // --- next hour: the live plan (nothing realized yet) ---
+    const nextBody = pNext
+      ? html`
+          ${this._modeRow(pNext.inverter_mode, null, true)}
+          ${this._pvRow("Ładowanie baterii", pNext.battery_charge_kwh, null, { planOnly: true })}
+          ${this._pvRow("Moc ładowania", pNext.charge_power_kw, null, { planOnly: true, unit: "kW" })}
+          ${this._pvRow("Z baterii", pNext.battery_discharge_kwh, null, { planOnly: true })}
+          ${this._pvRow("Ładowanie EV", pNext.ev_charge_kwh, null, {
+            planOnly: true,
+            planSuffix: pNext.ev_charge_minutes != null ? ` (${pNext.ev_charge_minutes} min)` : "",
+          })}
+          ${this._pvRow("Zużycie domu", this._forecastConsumptionAt(nextMs), null, { planOnly: true })}
+          ${this._pvRow("Pobór z sieci", pNext.grid_buy_kwh, null, { planOnly: true })}
+          ${this._socRow("SoC na koniec", pNext.battery_soc, null, true)}
+        `
+      : html`<div class="muted">poza horyzontem planu</div>`;
+
+    const socNow = sCur?.soc ?? null;
+    return html`<div class="card">
+      <div class="card-title">Sterowanie — plan vs realizacja</div>
+      <div class="hours-grid">
+        ${this._hourCol("prev", "Poprzednia godzina", range(prevMs), prevBody)}
+        ${this._hourCol(
+          "cur",
+          "Bieżąca godzina",
+          html`${range(curMs)} · <span class="hcol-elapsed">${elapsedMin} min (${Math.round(elapsed * 100)}% godziny)</span>`,
+          curBody
+        )}
+        ${this._hourCol("next", "Następna godzina", range(nextMs), nextBody)}
+      </div>
+      <div class="stat-row hours-footer">
+        ${this._stat("SoC baterii teraz", socNow != null ? socNow.toFixed(0) + " %" : "—")}
+        ${this._stat("Cena energii w baterii", current.battery_energy_cost.toFixed(2) + " PLN/kWh")}
+        ${this._stat(
+          "EV teraz",
+          current.ev_charge
+            ? "ładuje" + (current.ev_charge_minutes != null ? ` (${current.ev_charge_minutes} min)` : "")
+            : "—"
+        )}
+        ${this._stat(`Koszt horyzontu (${plan.hours.length} h)`, plan.total_cost.toFixed(2) + " PLN")}
+      </div>
+    </div>`;
   }
 
   // ------------------------------------------------------------------
@@ -3877,6 +4139,107 @@ export class PowerPilotPanel extends LitElement {
       display: flex;
       flex-wrap: wrap;
       gap: 16px;
+    }
+    .hours-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }
+    .hour-col {
+      border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .hour-col.cur {
+      border-color: var(--primary-color, #03a9f4);
+      background: color-mix(
+        in srgb,
+        var(--primary-color, #03a9f4) 5%,
+        transparent
+      );
+    }
+    .hcol-head {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 8px;
+      border-bottom: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
+      padding-bottom: 6px;
+    }
+    .hcol-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--secondary-text-color);
+    }
+    .hcol-sub {
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .hcol-elapsed {
+      font-size: 12px;
+      font-weight: 400;
+      color: var(--secondary-text-color);
+    }
+    .pv-row {
+      padding: 4px 0;
+    }
+    .pv-label {
+      display: block;
+      font-size: 11px;
+      color: var(--secondary-text-color);
+    }
+    .pv-vals {
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .pv-arrow {
+      color: var(--secondary-text-color);
+    }
+    .pv-pct {
+      font-size: 11px;
+      color: var(--secondary-text-color);
+    }
+    .pv-ok {
+      color: var(--success-color, #43a047);
+      font-weight: 600;
+    }
+    .pv-warn {
+      color: var(--warning-color, #f9a825);
+      font-weight: 600;
+    }
+    .mode-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .pv-bar {
+      position: relative;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.15));
+      margin-top: 3px;
+      overflow: visible;
+    }
+    .pv-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: var(--primary-color, #03a9f4);
+    }
+    .pv-tick {
+      position: absolute;
+      top: -2px;
+      bottom: -2px;
+      width: 2px;
+      background: var(--secondary-text-color);
+      opacity: 0.7;
+    }
+    .hours-footer {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--divider-color, #e0e0e0);
     }
     .stat {
       display: flex;

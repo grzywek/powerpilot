@@ -52,6 +52,7 @@ from ..const import (
     CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_ODOMETER_SENSOR,
+    CONF_EV_PLUG_SENSOR,
     CONF_EV_PREFER_CONTIGUOUS,
     CONF_EV_PREFER_EARLY,
     CONF_EV_PRESENCE_ENTITIES,
@@ -80,6 +81,8 @@ DEFAULT_TARGET_SOC = EV_TARGET_SOC_DEFAULT
 DEFAULT_MIN_SOC = EV_MIN_SOC_DEFAULT
 HOME_STATES = {"home", "on", "true", "connected"}
 CHARGING_STATES = {"on", "true", "charging"}
+# Wallboxes/cars report the cable in many dialects; "charging" implies plugged.
+PLUGGED_STATES = {"on", "true", "connected", "plugged", "plugged_in", "charging"}
 
 # Matches a percentage anywhere in the event-summary remainder, e.g. "100%",
 # "80 %", "55,5%".
@@ -299,6 +302,7 @@ class EVModule(PowerPilotModule):
         self._energy_added: float | None = None
         self._home: bool | None = None
         self._charging: bool | None = None
+        self._plugged: bool | None = None
         self._targets: list[EVChargeTarget] = []
         self._trip_targets: list[EVChargeTarget] = []
         self._forced_hours: set[datetime] = set()
@@ -391,6 +395,9 @@ class EVModule(PowerPilotModule):
         self._charging = self._read_bool(
             self.config.get(CONF_EV_CHARGING_SENSOR), CHARGING_STATES
         )
+        self._plugged = self._read_bool(
+            self.config.get(CONF_EV_PLUG_SENSOR), PLUGGED_STATES
+        )
 
         # Learn first: trip drain/targets below depend on the freshest capacity
         # and kWh/km estimates.
@@ -404,7 +411,8 @@ class EVModule(PowerPilotModule):
             f"zużycie={self._kwh_per_km if self._kwh_per_km is not None else '–'} kWh/km "
             f"({self._drain_profile.observed_days} dni), "
             f"cel={self.target_soc if self.target_soc is not None else '–'}%, "
-            f"w domu={self._home}, ładuje={self._charging}, "
+            f"w domu={self._home}, podłączony={self._plugged}, "
+            f"ładuje={self._charging}, "
             f"godziny niedostępne={len(self._unavailable_hours)}, "
             f"deadline'y={len(self._targets)}, wyjazdy={len(self._trip_targets)}, "
             f"godziny ręczne={len(self._forced_hours)}.",
@@ -414,6 +422,7 @@ class EVModule(PowerPilotModule):
                 "min_soc": self.min_soc,
                 "energy_added_kwh": self._energy_added,
                 "home": self._home,
+                "plugged": self._plugged,
                 "charging": self._charging,
                 "unavailable_hours": len(self._unavailable_hours),
                 "targets": len(self._targets),
@@ -601,27 +610,21 @@ class EVModule(PowerPilotModule):
             return None
         return all(known)
 
+    def chargeable_now(self) -> bool | None:
+        """Can the car physically take energy from the home charger right now?
+
+        The plug sensor is the authoritative signal (a plugged car charges no
+        matter what a laggy tracker says); without one, the combined presence
+        stands in — a car that isn't home can't be plugged in. ``None`` when
+        neither source has a usable state, which must NOT restrict the plan.
+        """
+        if self._plugged is not None:
+            return self._plugged
+        return self._home
+
     # ------------------------------------------------------------------
     # Calendar (events + trips come from the calendar module, updated first)
     # ------------------------------------------------------------------
-    def calendar_fingerprint(self) -> tuple:
-        """Stable digest of the calendar-derived charging inputs.
-
-        The coordinator compares this between planning cycles: a change means
-        an event was added/edited/removed, which justifies releasing the
-        frozen current-hour decision so charging can start mid-hour.
-        """
-        return (
-            tuple(
-                sorted(
-                    (t.deadline.isoformat(), t.target_soc, t.source)
-                    for t in (*self._targets, *self._trip_targets)
-                )
-            ),
-            tuple(sorted(h.isoformat() for h in self._forced_hours)),
-            tuple(sorted(h.isoformat() for h in self._unavailable_hours)),
-        )
-
     def _load_calendar_plans(self) -> None:
         """Turn the calendar module's events/trips into charging inputs."""
         self._targets = []
@@ -760,6 +763,16 @@ class EVModule(PowerPilotModule):
             for slot in forecast.slots
         } - self._unavailable_hours
 
+        # The running hour is only plannable when the car can actually take
+        # energy RIGHT NOW (unplugged / driven off → the phase headroom goes
+        # back to the house battery for the rest of the hour). Future hours
+        # stay available — the car comes back and the plug-flip listener
+        # re-plans the moment it does; each cycle re-evaluates this hour.
+        if self.chargeable_now() is False:
+            available_hours.discard(
+                dt_util.now().replace(minute=0, second=0, microsecond=0)
+            )
+
         # Explicit keyword plans take over routine sizing; automatic trip
         # targets do NOT — they are a floor on top of normal behaviour, so the
         # routine top-up keeps running alongside them.
@@ -824,7 +837,14 @@ class EVModule(PowerPilotModule):
         )
         # "Plug in" only makes sense when the car is actually home and idle —
         # away from home there's nothing the user can do about it right now.
-        if need and self._home is not False and self._charging is False:
+        # The plug sensor answers "is it plugged" directly; without one, an
+        # idle charger is the best available proxy.
+        unplugged = (
+            self._plugged is False
+            if self._plugged is not None
+            else self._charging is False
+        )
+        if need and self._home is not False and unplugged:
             reminders.append("Podłącz samochód — zaplanowane jest ładowanie EV.")
         # Percent targets can't be sized without the live SoC (the allocator
         # skips them rather than guessing) — the user should know why the plan
@@ -904,6 +924,8 @@ class EVModule(PowerPilotModule):
             "enabled": self.enabled,
             "available": now_hour not in self._unavailable_hours,
             "home": self._home,
+            "plugged": self._plugged,
+            "chargeable_now": self.chargeable_now(),
             "soc": self.soc,
             "target_soc": self.target_soc,
             "soc_limit": self.soc_limit_now(),

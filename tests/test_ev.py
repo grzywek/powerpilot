@@ -48,7 +48,10 @@ from custom_components.powerpilot.optimizer import (
     OptimizerConfig,
 )
 
-BASE = dt_util.now().replace(hour=0, minute=0, second=0, microsecond=0)
+# Tomorrow's midnight: every BASE-relative hour lies strictly in the future,
+# so the optimizer's partial-current-hour scaling (slot 0 == the running clock
+# hour) never kicks in and the assertions stay deterministic around midnight.
+BASE = dt_util.start_of_local_day(dt_util.now()) + timedelta(days=1)
 
 
 def _forecast(prices: list[float]) -> Forecast:
@@ -753,6 +756,7 @@ def _module_with_state(**state) -> EVModule:
     module._energy_added = None
     module._home = state.get("home")
     module._charging = state.get("charging")
+    module._plugged = state.get("plugged")
     module._targets = state.get("targets", [])
     module._trip_targets = state.get("trip_targets", [])
     module._forced_hours = state.get("forced_hours", set())
@@ -1264,30 +1268,45 @@ def test_combined_home_none_when_nothing_known() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Calendar-input fingerprint (drives the mid-hour commit release)
+# Physical availability: can the car take energy right now?
 # ---------------------------------------------------------------------------
 
 
-def test_calendar_fingerprint_changes_with_inputs() -> None:
-    module = _bare_module()
-    fp_empty = module.calendar_fingerprint()
-    module._forced_hours.add(BASE + timedelta(hours=2))
-    fp_forced = module.calendar_fingerprint()
-    assert fp_empty != fp_forced
-
-    module._targets.append(
-        EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=90.0)
+def _now_forecast(hours: int = 6) -> Forecast:
+    """Forecast anchored at the real current hour (like the live builder)."""
+    start = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    return Forecast(
+        slots=[
+            HourSlot(start=start + timedelta(hours=i), buy_price=0.5)
+            for i in range(hours)
+        ]
     )
-    assert module.calendar_fingerprint() != fp_forced
 
 
-def test_calendar_fingerprint_stable_for_same_inputs() -> None:
-    a = _bare_module()
-    b = _bare_module()
-    for module in (a, b):
-        module._forced_hours.add(BASE + timedelta(hours=2))
-        module._unavailable_hours.add(BASE + timedelta(hours=3))
-        module._targets.append(
-            EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=90.0)
-        )
-    assert a.calendar_fingerprint() == b.calendar_fingerprint()
+def test_chargeable_now_plug_sensor_wins_over_stale_presence() -> None:
+    # Plugged at home while the tracker still says "away" → chargeable.
+    module = _module_with_state(plugged=True, home=False)
+    assert module.chargeable_now() is True
+    # Unplugged beats "home" — a parked-but-unplugged car can't charge.
+    module = _module_with_state(plugged=False, home=True)
+    assert module.chargeable_now() is False
+
+
+def test_chargeable_now_falls_back_to_presence_then_unknown() -> None:
+    assert _module_with_state(home=False).chargeable_now() is False
+    assert _module_with_state(home=True).chargeable_now() is True
+    assert _module_with_state().chargeable_now() is None
+
+
+def test_unplugged_drops_only_the_running_hour_from_the_plan() -> None:
+    fc = _now_forecast()
+    now_hour = fc.slots[0].start
+    req = _module_with_state(soc=20.0, plugged=False).get_request(fc)
+    assert now_hour not in req.available_hours
+    assert req.available_hours == {s.start for s in fc.slots[1:]}
+
+
+def test_unknown_availability_does_not_restrict_the_plan() -> None:
+    fc = _now_forecast()
+    req = _module_with_state(soc=20.0).get_request(fc)
+    assert req.available_hours == {s.start for s in fc.slots}

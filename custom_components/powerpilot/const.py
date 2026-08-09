@@ -118,10 +118,11 @@ ESTIMATE_WEEKLY_WEIGHTS: Final = (0.5, 0.3, 0.2)
 # --- EV ---
 CONF_EV_ENABLED: Final = "ev_enabled"
 CONF_EV_SOC_SENSOR: Final = "ev_soc_sensor"
-# Live "is the car home" tracker — feeds the plug-in reminder and the
-# plan-vs-reality "charging away from home" note. It no longer gates whether
-# the optimizer is allowed to plan charging (see CONF_EV_CALENDAR: calendar
-# events with a non-home ``location`` are the only source of *unavailability*).
+# Live "is the car home" tracker — feeds the plug-in reminder, the
+# plan-vs-reality "charging away from home" note and (when no plug sensor is
+# configured) the "can the car charge right now" signal that drops the running
+# hour from the EV plan. Future hours are still governed by the calendar only
+# (events with a non-home ``location`` are the source of *unavailability*).
 CONF_EV_LOCATION_SENSOR: Final = "ev_location_sensor"
 # Extra presence entities (phones, person.*) combined with the car tracker —
 # car trackers often poll rarely, so a fresh "not home" from any of these
@@ -144,6 +145,11 @@ CONF_EV_CHARGER_PHASES: Final = "ev_charger_phases"  # number of phases the char
 CONF_EV_CHARGE_EFFICIENCY: Final = "ev_charge_efficiency"
 # Charger / charging telemetry. All optional; each has a concrete planning use.
 CONF_EV_CHARGING_SENSOR: Final = "ev_charging_sensor"  # actively drawing (bool) → plan-vs-reality reminders
+# Cable plugged in (bool). The live "can the car charge right now" signal: when
+# it (or, without it, the combined presence) says NO, the running hour drops out
+# of the EV plan, the phase headroom goes back to the house battery and the
+# plug-flip listener re-plans immediately. Falls back to presence when unset.
+CONF_EV_PLUG_SENSOR: Final = "ev_plug_sensor"
 CONF_EV_ENERGY_ADDED_SENSOR: Final = "ev_energy_added_sensor"  # session kWh (total_increasing) → delivered so far
 CONF_EV_ODOMETER_SENSOR: Final = "ev_odometer_sensor"  # total km (increasing) → learn kWh/km + drain profile
 # Grid-side EV charging energy meter — when the charger draws through the house

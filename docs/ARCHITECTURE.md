@@ -46,6 +46,12 @@ decisions.
 ### Hourly slot
 The unit of planning is one hour (`HourSlot`). The horizon stretches **as far as
 price data is available** (typically D+1 confirmed + several days of forecast).
+The first slot is the clock hour the plan is computed in: mid-hour only its
+**remainder** is plannable, so the optimizer scales that slot's charge/discharge
+caps, forecast consumption and EV charger yield by the minutes left (powers in
+the decision stay true kW). Mid-hour re-plans — a calendar edit, the EV being
+plugged/unplugged, a restart — are therefore physically consistent and may
+legitimately change the running hour's action.
 
 ### Forecast
 A `Forecast` is an ordered list of `HourSlot`s, each carrying everything a module

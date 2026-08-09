@@ -238,10 +238,10 @@ async def test_series_can_pin_exact_forecast_run_at(hass: HomeAssistant) -> None
     assert pin["end"] == (selected_start + timedelta(hours=14)).isoformat()
 
 
-async def test_series_current_hour_mode_follows_the_committed_decision(
+async def test_series_current_hour_mode_follows_the_plan_decision(
     hass: HomeAssistant,
 ) -> None:
-    """The in-progress hour shows the plan's (committed) inverter mode.
+    """The in-progress hour shows the plan's inverter mode.
 
     Regression: the current hour derived its mode from the measured battery
     flows — a few minutes into the hour the 5-minute statistics sit under the

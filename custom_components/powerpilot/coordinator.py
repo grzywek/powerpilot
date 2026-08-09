@@ -32,7 +32,9 @@ from .const import (
     CONF_CHARGE_EFFICIENCY,
     CONF_CHARGE_EFFICIENCY_CURVE,
     CONF_DISCHARGE_EFFICIENCY,
+    CONF_EV_CHARGING_SENSOR,
     CONF_EV_LOCATION_SENSOR,
+    CONF_EV_PLUG_SENSOR,
     CONF_EV_PRESENCE_ENTITIES,
     CONF_GRID_VOLTAGE,
     CONF_INVERTER_MAX_CHARGE_KW,
@@ -124,16 +126,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.snapshots = SnapshotStore()
         self._snapshot_store: Store | None = None
         self._last_snapshot_hour: datetime | None = None
-        # Frozen decision for the clock hour we are in. Once committed, a mid-hour
-        # re-run (a restart, a refresh) reuses it instead of re-deciding the active
-        # hour — so the applied inverter mode can't flip mid-hour and the hour's
-        # recorded forecast stays intact. Released automatically at the boundary.
-        self._committed_hour: datetime | None = None
-        self._committed_decision: Decision | None = None
-        # Digest of the calendar-derived EV inputs from the previous cycle.
-        # When it changes mid-hour (event added/edited), the frozen decision
-        # above is released so e.g. EV charging can start immediately.
-        self._ev_inputs_fingerprint: tuple | None = None
 
     @callback
     def async_start_hour_boundary_updates(self) -> None:
@@ -149,28 +141,33 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
     @callback
     def async_start_reactive_listeners(self) -> CALLBACK_TYPE | None:
-        """Refresh the plan when calendars or presence entities change.
+        """Refresh the plan when calendars, presence or the EV plug change.
 
         The hourly cadence stays the baseline; this listener closes the gap
-        between "event added to the calendar" and the next boundary. Calendar
+        between "the world changed" and the next boundary: an event added to
+        the calendar, the car driving off or getting plugged back in. Calendar
         entities fire on any change (their next-event attributes matter);
-        presence entities only on an actual state flip, so GPS attribute
-        chatter from phone trackers doesn't re-run the optimizer every few
-        minutes. ``async_request_refresh`` debounces bursts.
+        presence/plug/charging entities only on an actual state flip, so GPS
+        attribute chatter from phone trackers doesn't re-run the optimizer
+        every few minutes. ``async_request_refresh`` debounces bursts.
         """
         calendar_ids = [str(e) for e in (self.config.get(CONF_CALENDARS) or [])]
-        presence_ids = [
+        flip_ids = [
             str(e)
             for e in (
-                [self.config.get(CONF_EV_LOCATION_SENSOR)]
+                [
+                    self.config.get(CONF_EV_LOCATION_SENSOR),
+                    self.config.get(CONF_EV_PLUG_SENSOR),
+                    self.config.get(CONF_EV_CHARGING_SENSOR),
+                ]
                 + list(self.config.get(CONF_EV_PRESENCE_ENTITIES) or [])
             )
             if e
         ]
-        entities = calendar_ids + presence_ids
+        entities = calendar_ids + flip_ids
         if not entities:
             return None
-        presence_set = set(presence_ids)
+        presence_set = set(flip_ids)
 
         @callback
         def _on_state_change(event) -> None:
@@ -231,22 +228,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # already stored — making "Cena w baterii" drop to ~0 until it rebuilds).
         if stored:
             self._battery_energy_cost = float(stored.get("battery_energy_cost") or 0.0)
-            # Restore the once-per-hour snapshot guard and the frozen active-hour
-            # decision so a mid-hour restart keeps the committed action and leaves
-            # the already-recorded vintage untouched.
+            # Restore the once-per-hour snapshot guard so a mid-hour restart
+            # leaves the already-recorded vintage untouched.
             self._last_snapshot_hour = (
                 dt_util.parse_datetime(stored.get("last_snapshot_hour") or "")
                 or None
             )
-            committed_hour = stored.get("committed_hour")
-            committed_decision = stored.get("committed_decision")
-            if committed_hour and committed_decision:
-                self._committed_hour = dt_util.parse_datetime(committed_hour)
-                try:
-                    self._committed_decision = Decision.from_dict(committed_decision)
-                except (KeyError, ValueError, TypeError):
-                    self._committed_hour = None
-                    self._committed_decision = None
 
     def _snapshots_payload(self) -> dict:
         return {
@@ -258,16 +245,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "last_snapshot_hour": (
                 self._last_snapshot_hour.isoformat()
                 if self._last_snapshot_hour
-                else None
-            ),
-            # The frozen active-hour decision, so the applied action survives a
-            # mid-hour restart instead of being re-planned.
-            "committed_hour": (
-                self._committed_hour.isoformat() if self._committed_hour else None
-            ),
-            "committed_decision": (
-                self._committed_decision.as_dict()
-                if self._committed_decision
                 else None
             ),
         }
@@ -290,8 +267,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             await self._snapshot_store.async_remove()
         self.snapshots = SnapshotStore()
         self._last_snapshot_hour = None
-        self._committed_hour = None
-        self._committed_decision = None
         self._battery_energy_cost = 0.0
         self.events.clear()
         await self.registry.async_clear_all()
@@ -381,36 +356,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         battery = self._build_battery(soc)
         optimizer = self._build_optimizer()
+        # The optimizer models the first slot as the REMAINDER of the running
+        # hour, so a mid-hour re-run (restart, calendar edit, the EV getting
+        # plugged/unplugged) is physically consistent and may legitimately
+        # change the active hour's action — no frozen decision needed.
         plan = optimizer.optimize(forecast, battery, ev_request, reminders)
-
-        # A calendar edit can change what the EV needs *right now* (a new trip
-        # an hour away → charging must start immediately). When the
-        # calendar-derived inputs differ from the previous cycle, release the
-        # frozen current-hour decision below so the plan may change mid-hour;
-        # with unchanged inputs the freeze keeps mid-hour refreshes from
-        # flip-flopping the already-applied action.
-        ev_fingerprint = self.ev.calendar_fingerprint()
-        if (
-            self._ev_inputs_fingerprint is not None
-            and ev_fingerprint != self._ev_inputs_fingerprint
-        ):
-            self._committed_hour = None
-            self._committed_decision = None
-        self._ev_inputs_fingerprint = ev_fingerprint
-
-        # Freeze the active clock hour. The optimizer always re-plans the whole
-        # horizon from the live SoC; for the *current* hour that means a restart
-        # or refresh can flip the already-applied action (charge → passthrough)
-        # partway through the hour and corrupt that hour's recorded forecast. Pin
-        # the first decision to the one committed when the hour began; future
-        # hours keep re-planning from reality.
-        cur_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
-        if plan.decisions and plan.decisions[0].start == cur_hour:
-            if self._committed_hour == cur_hour and self._committed_decision is not None:
-                plan.decisions[0] = self._committed_decision
-            else:
-                self._committed_hour = cur_hour
-                self._committed_decision = plan.decisions[0]
 
         current = self.current_decision(plan)
         if current is not None:

@@ -36,7 +36,11 @@ def _battery() -> BatteryModel:
 
 def _forecast() -> Forecast:
     # One cheap hour, no household demand → charging is purely opportunistic.
-    start = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    # The NEXT clock hour: the running hour would be scaled to its remaining
+    # minutes and make the assertions time-of-run dependent.
+    start = dt_util.now().replace(minute=0, second=0, microsecond=0) + timedelta(
+        hours=1
+    )
     slot = HourSlot(
         start=start,
         buy_price=0.10,

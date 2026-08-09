@@ -54,25 +54,6 @@ def test_plan_decision_at_uses_hour_window() -> None:
     assert plan.decision_at(hour - timedelta(seconds=1)) is None
 
 
-def test_decision_from_dict_roundtrip() -> None:
-    """A committed decision survives serialise → restore (mid-hour restart)."""
-    hour = datetime(2026, 6, 28, 14, tzinfo=timezone.utc)
-    original = Decision(
-        start=hour,
-        inverter_mode=InverterMode.CHARGE,
-        charge_power_kw=4.2,
-        battery_charge_kwh=3.9,
-        battery_soc=61.5,
-        grid_buy_kwh=4.2,
-    )
-    restored = Decision.from_dict(original.as_dict())
-    assert restored.start == hour
-    assert restored.inverter_mode == InverterMode.CHARGE
-    assert restored.charge_power_kw == 4.2
-    assert restored.battery_charge_kwh == 3.9
-    assert restored.battery_soc == 61.5
-
-
 async def test_setup_creates_entities(hass: HomeAssistant) -> None:
     """The integration sets up and creates its output entities."""
     hass.states.async_set("sensor.soc", "55", {"unit_of_measurement": "%"})
@@ -271,15 +252,16 @@ async def test_hour_boundary_updates_current_mode_without_waiting_for_interval(
     )
 
 
-async def test_active_hour_decision_is_frozen(
+async def test_mid_hour_rerun_adopts_the_fresh_decision(
     hass: HomeAssistant,
     freezer,
 ) -> None:
-    """A mid-hour re-run keeps the committed action for the active hour.
+    """A mid-hour re-run may change the active hour's action.
 
-    Reproduces the restart-mid-charge bug: the optimizer would re-decide the
-    current hour (charge → passthrough); the freeze pins it to what was
-    committed when the hour began.
+    The optimizer models the first slot as the remainder of the running hour,
+    so a mid-hour re-plan is physically consistent and its fresh decision (a
+    calendar edit, the EV unplugged, a restart) must reach the entities — the
+    old committed-decision freeze would have pinned the stale action instead.
     """
     now = datetime(2026, 6, 28, 14, 38, tzinfo=timezone.utc)
     freezer.move_to(now)
@@ -298,7 +280,8 @@ async def test_active_hour_decision_is_frozen(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     hour = now.replace(minute=0, second=0, microsecond=0)
 
-    # First run this hour decides CHARGE; a later re-run would decide PASSTHROUGH.
+    # First run this hour decides CHARGE; the world changes and the re-run
+    # decides PASSTHROUGH.
     modes = iter(
         [InverterMode.CHARGE, InverterMode.PASSTHROUGH, InverterMode.PASSTHROUGH]
     )
@@ -324,13 +307,9 @@ async def test_active_hour_decision_is_frozen(
             )
 
     coordinator._build_optimizer = lambda: _StubOptimizer()
-    # Start from a clean freeze so the first stub run does the committing.
-    coordinator._committed_hour = None
-    coordinator._committed_decision = None
 
     first = await coordinator._async_update_data()
     assert first.decisions[0].inverter_mode == InverterMode.CHARGE
 
-    # The re-run's fresh decision is PASSTHROUGH, but the active hour is frozen.
     second = await coordinator._async_update_data()
-    assert second.decisions[0].inverter_mode == InverterMode.CHARGE
+    assert second.decisions[0].inverter_mode == InverterMode.PASSTHROUGH

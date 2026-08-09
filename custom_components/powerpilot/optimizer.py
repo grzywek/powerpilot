@@ -158,7 +158,7 @@ class EVAllocation:
             return (
                 self.added == other.added
                 and self.grid == other.grid
-                and self.amps == other.amps
+                and self.minutes == other.minutes
             )
         return NotImplemented
 
@@ -291,7 +291,21 @@ class Optimizer:
         if n == 0:
             return Plan(forecast=forecast, decisions=[], created_at=dt_util.now())
 
-        ev_alloc = self._plan_ev(forecast, ev_request)
+        # The first slot covers the clock hour we are already inside — only its
+        # REMAINDER is plannable. Every per-hour quantity of slot 0 (charge and
+        # discharge caps, consumption, connection headroom, EV charger yield) is
+        # scaled by this fraction, so a mid-hour re-plan works on a physically
+        # correct model instead of pretending a full hour of capacity is left.
+        # Future slots are whole hours (fraction 1).
+        now = dt_util.now()
+        first_frac = 1.0
+        if slots[0].start <= now < slots[0].start + timedelta(hours=1):
+            first_frac = (
+                slots[0].start + timedelta(hours=1) - now
+            ).total_seconds() / 3600.0
+        fracs = [first_frac] + [1.0] * (n - 1)
+
+        ev_alloc = self._plan_ev(forecast, ev_request, first_frac)
         ev_charger_kw = ev_request.charger_kw if ev_request else 0.0
 
         # Per-hour prices and demand. Missing energy prices fall back to the
@@ -304,7 +318,10 @@ class Optimizer:
         distribution = [s.distribution_price_kwh or 0.0 for s in slots]
         total_price = [energy_price[t] + distribution[t] for t in range(n)]
         charge_order_price = [_charge_order_price(price) for price in total_price]
-        demand = [max(0.0, s.total_consumption_kwh) for s in slots]
+        demand = [
+            max(0.0, s.total_consumption_kwh) * fracs[t]
+            for t, s in enumerate(slots)
+        ]
         # The LP and every cost see GRID energy; the pack-side ("added") energy
         # and the fitted amps ride along into the plan for SoC/control.
         ev_kwh = [ev_alloc.grid.get(slots[t].start, 0.0) for t in range(n)]
@@ -316,6 +333,7 @@ class Optimizer:
             ev_kwh=ev_kwh,
             ev_charger_kw=ev_charger_kw,
             charge_order_price=charge_order_price,
+            fracs=fracs,
         )
 
         return self._build_plan(
@@ -333,6 +351,7 @@ class Optimizer:
             charge_order_price=charge_order_price,
             ev_request=ev_request,
             reminders=reminders,
+            fracs=fracs,
         )
 
     # ------------------------------------------------------------------
@@ -396,9 +415,15 @@ class Optimizer:
         ev_kwh: list[float],
         ev_charger_kw: float,
         charge_order_price: list[float] | None = None,
+        fracs: list[float] | None = None,
     ) -> tuple[list[float], list[float], list[float]]:
         cfg = self.config
         n = len(total_price)
+        # Fraction of each slot that is actually plannable (slot 0 mid-hour is
+        # the remainder of the running hour; see ``optimize``). Power limits
+        # (kW) convert to energy bounds (kWh) through this factor; ``demand``
+        # arrives already scaled.
+        fracs = fracs if fracs is not None else [1.0] * n
         ceff = max(battery.charge_efficiency, _EPS)
         deff = max(battery.discharge_efficiency, _EPS)
         wear = battery.wear_cost
@@ -446,11 +471,12 @@ class Optimizer:
         d0 = n * seg_n  # first discharge column
         y0 = d0 + n  # first min-charge indicator column
 
-        # Per-hour grid-side charge cap. During EV hours the battery may still
-        # charge — the real limit is electrical: worst case the EV charger and
-        # the inverter share one phase, so the inverter gets whatever the phase
-        # fuse leaves after the EV draw. Without fuse data fall back to the
-        # legacy blanket subtraction.
+        # Per-hour grid-side charge cap (kWh over the slot's plannable window).
+        # During EV hours the battery may still charge — the real limit is
+        # electrical: worst case the EV charger and the inverter share one
+        # phase, so the inverter gets whatever the phase fuse leaves after the
+        # EV draw. Without fuse data fall back to the legacy blanket
+        # subtraction.
         charge_caps: list[float] = []
         for t in range(n):
             charge_cap = cfg.inverter_max_charge_kw
@@ -462,18 +488,21 @@ class Optimizer:
                     )
                 else:
                     charge_cap = max(0.0, charge_cap - ev_charger_kw)
-            charge_caps.append(charge_cap)
+            charge_caps.append(charge_cap * fracs[t])
 
         # Charge segment columns c[t,k].
         for t in range(n):
             for k in range(seg_n):
-                h.addVar(0.0, min(seg_width[k], charge_caps[t]))
+                h.addVar(0.0, min(seg_width[k] * fracs[t], charge_caps[t]))
         # Discharge columns are BINARY: each hour either covers the whole house
         # demand from the battery (z=1 → cap[t] kWh delivered) or not at all
         # (z=0). This makes every hour exactly one inverter mode and forbids
         # rationing a *partial* discharge across hours — a deliberate
         # simplification chosen over a marginally cheaper fractional plan.
-        discharge_cap = [min(demand[t], cfg.inverter_max_discharge_kw) for t in range(n)]
+        discharge_cap = [
+            min(demand[t], cfg.inverter_max_discharge_kw * fracs[t])
+            for t in range(n)
+        ]
         for t in range(n):
             if discharge_cap[t] > _EPS:
                 h.addVar(0.0, 1.0)
@@ -517,7 +546,7 @@ class Optimizer:
         # Per-hour total charge cap (the segment bounds alone allow up to the
         # full inverter power; EV hours may leave less).
         for t in range(n):
-            if charge_caps[t] < sum(seg_width) - _EPS:
+            if charge_caps[t] < sum(seg_width) * fracs[t] - _EPS:
                 h.addRow(
                     -inf,
                     charge_caps[t],
@@ -529,7 +558,7 @@ class Optimizer:
         # Connection-power limit on grid import.
         if cfg.connection_power_kw and cfg.connection_power_kw > 0:
             for t in range(n):
-                rhs = cfg.connection_power_kw - demand[t] - ev_kwh[t]
+                rhs = cfg.connection_power_kw * fracs[t] - demand[t] - ev_kwh[t]
                 idx = [seg_col(t, k) for k in range(seg_n)] + [d0 + t]
                 val = [1.0] * seg_n + [-discharge_cap[t]]
                 h.addRow(
@@ -540,7 +569,9 @@ class Optimizer:
                     np.array(val, dtype=np.float64),
                 )
 
-        # SoC-dependent charge curve (only when actually configured).
+        # SoC-dependent charge curve (only when actually configured). The power
+        # bound converts to the slot's energy bound through its plannable
+        # fraction: charge_energy[t] ≤ frac[t]·(slope·E[t−1] + intercept).
         for slope, intercept in _charge_curve_cuts(cfg.charge_curve, capacity_kwh):
             if abs(slope) <= _EPS:
                 continue
@@ -550,12 +581,12 @@ class Optimizer:
                 for k in range(t):
                     for s in range(seg_n):
                         idx.append(seg_col(k, s))
-                        val.append(-slope * seg_eff[s])
+                        val.append(-slope * seg_eff[s] * fracs[t])
                     idx.append(d0 + k)
-                    val.append(slope * discharge_cap[k] / deff)
+                    val.append(slope * discharge_cap[k] / deff * fracs[t])
                 h.addRow(
                     -inf,
-                    intercept + slope * e0,
+                    fracs[t] * (intercept + slope * e0),
                     len(idx),
                     np.array(idx, dtype=np.int32),
                     np.array(val, dtype=np.float64),
@@ -565,6 +596,8 @@ class Optimizer:
         # either 0 or ≥ min_charge. One binary indicator y[t] per hour with
         #   Σ_k c[t,k] ≤ cap[t]·y[t]   (charge only when the switch is on)
         #   Σ_k c[t,k] ≥ min_charge·y[t]  (and then at least the floor)
+        # The floor is a POWER (kW), so the slot's energy floor scales with its
+        # plannable fraction.
         min_charge = cfg.min_charge_power_kw or 0.0
         if min_charge > _EPS:
             for t in range(n):
@@ -580,13 +613,15 @@ class Optimizer:
                     np.array([*idx, y0 + t], dtype=np.int32),
                     np.array([*([1.0] * seg_n), -charge_caps[t]], dtype=np.float64),
                 )
-                # Σc - min_charge·y ≥ 0
+                # Σc - min_charge·frac·y ≥ 0
                 h.addRow(
                     0.0,
                     inf,
                     seg_n + 1,
                     np.array([*idx, y0 + t], dtype=np.int32),
-                    np.array([*([1.0] * seg_n), -min_charge], dtype=np.float64),
+                    np.array(
+                        [*([1.0] * seg_n), -min_charge * fracs[t]], dtype=np.float64
+                    ),
                 )
 
         h.run()
@@ -626,12 +661,14 @@ class Optimizer:
         ev_request: EVRequest | None = None,
         reminders: list[str] | None = None,
         stored: list[float] | None = None,
+        fracs: list[float] | None = None,
     ) -> Plan:
         cfg = self.config
         ceff = max(battery.charge_efficiency, _EPS)
         deff = max(battery.discharge_efficiency, _EPS)
         wear = battery.wear_cost
         n = len(total_price)
+        fracs = fracs if fracs is not None else [1.0] * n
         charge_price = charge_order_price or [
             _charge_order_price(price) for price in total_price
         ]
@@ -735,10 +772,12 @@ class Optimizer:
             decision.battery_charge_kwh = stored_kwh
             # Grid-side charge power (kW) actually drawn this hour — what you set
             # on the inverter as "force charge X kW". Equals ``stored / η``
-            # (reduced if the SoC ceiling clipped the charge mid-hour); the hour
-            # slot is 1 h so kWh == average kW.
+            # spread over the slot's plannable window (the remainder of the
+            # running hour for slot 0, a full hour otherwise).
             decision.charge_power_kw = (
-                stored_kwh / (eff_t or ceff) if stored_kwh > _EPS else 0.0
+                stored_kwh / (eff_t or ceff) / max(fracs[t], _EPS)
+                if stored_kwh > _EPS
+                else 0.0
             )
             decision.battery_discharge_kwh = delivered
             decision.grid_buy_kwh = grid_buy
@@ -774,6 +813,11 @@ class Optimizer:
                     mode, tp, charge_threshold, discharge_threshold, stored_kwh, delivered
                 ),
             }
+            if fracs[t] < 1.0 - _EPS:
+                # Mid-hour re-plan: this decision covers only the remainder of
+                # the running hour — energies are for that window, powers (kW)
+                # are already normalised by it.
+                decision.trace["hour_fraction"] = round(fracs[t], 4)
 
             if t == 0 and reminders:
                 decision.reminders = list(reminders)
@@ -825,7 +869,10 @@ class Optimizer:
     # EV planning (grid-fed, cheapest available hours)
     # ------------------------------------------------------------------
     def _plan_ev(
-        self, forecast: Forecast, ev_request: EVRequest | None
+        self,
+        forecast: Forecast,
+        ev_request: EVRequest | None,
+        first_hour_frac: float = 1.0,
     ) -> EVAllocation:
         """Allocate EV charging across the horizon.
 
@@ -886,8 +933,16 @@ class Optimizer:
         p_full = max(ev_request.charger_power_kw, 0.1)
         eff_full = min(max(ev_request.charge_efficiency, 0.01), 1.0)
 
-        # Full-hour yield (added kWh) — the per-hour allocation cap.
+        # Full-hour yield (added kWh) — the per-hour allocation cap. The slot
+        # we are already inside can only charge for its remaining minutes, so
+        # its cap shrinks by ``first_hour_frac`` (see ``optimize``).
         hour_cap_added = max(p_full * eff_full, 0.1)
+        first_start = forecast.slots[0].start if forecast.slots else None
+
+        def hour_cap(start: datetime) -> float:
+            if start == first_start:
+                return hour_cap_added * first_hour_frac
+            return hour_cap_added
         battery_kwh = max(ev_request.battery_kwh, 0.0)
         # Highest SoC the planner may intentionally buy to. The car/charger is
         # steered off ``soc_limit_now`` and stops there, so energy planned past
@@ -959,14 +1014,15 @@ class Optimizer:
                 (
                     s
                     for s in candidates
-                    if hour_cap_added - allocation.get(s.start, 0.0) > _EPS
+                    if hour_cap(s.start) - allocation.get(s.start, 0.0) > _EPS
                 ),
                 key=lambda s: s.start,
             )
             if not slots:
                 return {}
             caps = {
-                s.start: hour_cap_added - allocation.get(s.start, 0.0) for s in slots
+                s.start: hour_cap(s.start) - allocation.get(s.start, 0.0)
+                for s in slots
             }
             # Every variant must deliver the same energy or it isn't comparable
             # by cost (an under-filled variant would win on price alone).
@@ -1148,9 +1204,11 @@ class Optimizer:
         for start in sorted(ev_request.forced_hours):
             if start not in ev_request.available_hours or start not in slots_by_start:
                 continue
-            take = min(hour_cap_added, capacity_left())
+            if capacity_left() <= _EPS:
+                break  # pack full to the ceiling — later hours can't take more
+            take = min(hour_cap(start), capacity_left())
             if take <= _EPS:
-                break
+                continue  # a spent current hour has no window left; later ones do
             allocation[start] = take
 
         # 2. Deadline targets, earliest deadline first. Predicted trip drain

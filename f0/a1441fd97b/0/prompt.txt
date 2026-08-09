@@ -1,0 +1,11 @@
+musimy coś zrobić, żeby plan był liczony zarówno dla wersji EV jak i bez EV. chodzi o to, że czasem zaplanowane jest ładowanie EV i ESS, a ja np. pojadę do sklepu i odłączę samochód - w tym czasie ESS mógłby się ładować większą mocą; 
+
+więc nie wiem jak to zrobić najsensowniej... albo sensor ładowania EV i powerpilot przełącza sobie plany, albo powerpilot żeby dawał np. moc ładowania ess z ev i bez ev.. albo jeszcze coś innego
+
+---
+
+zastanawiam się jaki sens ma ta blokada aktywnej godziny
+
+---
+
+ok, lecimy z tematem zatem

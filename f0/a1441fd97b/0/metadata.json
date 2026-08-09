@@ -1,0 +1,79 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "f0a1441fd97b",
+  "session_id": "4d559ac0-adb5-4b82-bb9e-ed66cbd31b55",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-09T23:30:24.038946Z",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "save_step_count": 1,
+  "files_touched": [
+    "custom_components/powerpilot/__init__.py",
+    "custom_components/powerpilot/config_flow.py",
+    "custom_components/powerpilot/const.py",
+    "custom_components/powerpilot/coordinator.py",
+    "custom_components/powerpilot/models.py",
+    "custom_components/powerpilot/modules/ev.py",
+    "custom_components/powerpilot/optimizer.py",
+    "custom_components/powerpilot/strings.json",
+    "custom_components/powerpilot/translations/en.json",
+    "custom_components/powerpilot/translations/pl.json",
+    "docs/ARCHITECTURE.md",
+    "tests/test_ev.py",
+    "tests/test_init.py",
+    "tests/test_optimizer_min_charge.py",
+    "tests/test_optimizer_partial_hour.py",
+    "tests/test_websocket.py"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "a39a0c6fceb9",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 380,
+    "cache_creation_tokens": 822814,
+    "cache_read_tokens": 38897923,
+    "output_tokens": 135557,
+    "api_call_count": 173
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-09T23:30:23.953369Z",
+    "agent_lines": 370,
+    "agent_removed": 221,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 370,
+    "total_lines_changed": 591,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 148,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84,
+        ".claude/settings.local.json": 9,
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 52
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 9,
+      "user_lines_removed": 0,
+      "agent_lines_added": 509,
+      "agent_lines_removed": 221,
+      "user_added_per_file": {
+        ".claude/settings.local.json": 9
+      }
+    }
+  ]
+}

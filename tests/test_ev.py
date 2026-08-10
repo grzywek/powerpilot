@@ -538,10 +538,10 @@ def test_parse_custom_keyword_case_insensitive() -> None:
     assert module._targets[0].target_soc == 75.0
 
 
-def test_calendar_parse_ignores_powerpilot_ignore_hashtag() -> None:
+def test_calendar_parse_ignores_ignore_hashtag() -> None:
     module = object.__new__(CalendarModule)
     raw = {
-        "summary": "Spotkanie #PowerPilot_Ignore",
+        "summary": "Spotkanie #Ignore",
         "location": "Warszawa",
         "start": (BASE + timedelta(hours=2)).isoformat(),
         "end": (BASE + timedelta(hours=3)).isoformat(),
@@ -660,6 +660,91 @@ async def test_terminal_nested_event_returns_home_without_parent_return() -> Non
     assert child_trip.return_end == child.end + timedelta(minutes=170)
 
 
+async def test_continue_event_chains_from_previous_location() -> None:
+    """Gliwice 15–16, Katowice 17–18 #continue → dom→Gliwice→Katowice→dom."""
+    first = _event("Spotkanie Gliwice", 15, 16, "Gliwice")
+    second = _event("Spotkanie Katowice #continue", 17, 18, "Katowice")
+    resolver = _RouteResolver(
+        {
+            (None, "Gliwice"): TravelInfo(30.0, 30.0),
+            ("Gliwice", "Katowice"): TravelInfo(20.0, 25.0),
+            ("Katowice", None): TravelInfo(45.0, 40.0),
+        }
+    )
+    module = _calendar_module([first, second], resolver)
+
+    await module._build_trips()
+
+    assert len(module.trips) == 2
+    head, hop = module.trips
+    # Head: home→Gliwice, NO return leg (the hop's outbound continues the tour)…
+    assert head.origin_location == "home"
+    assert head.outbound_distance_km == 30.0
+    assert head.return_distance_km is None
+    assert ("Gliwice", None) not in resolver.calls
+    assert head.continues is False
+    # Hop: Gliwice→Katowice, returns home; the tag is stripped from the label.
+    assert hop.continues is True
+    assert hop.origin_location == "Gliwice"
+    assert hop.outbound_distance_km == 20.0
+    assert hop.return_distance_km == 45.0
+    assert hop.depart == second.start - timedelta(minutes=25)
+    assert "#continue" not in hop.label
+    # The away window is continuous: the head stays "away" until the hop departs.
+    assert head.return_end == hop.depart
+
+
+async def test_continue_chains_inside_a_parent_scope() -> None:
+    """Sub-events chain against the parent base: Kraków→Wawel→Kazimierz→Kraków."""
+    parent = _event("Wyjazd Kraków", 24, 72, "Kraków")
+    first = _event("Wawel", 30, 31, "Wawel")
+    second = _event("Kazimierz #continue", 32, 33, "Kazimierz")
+    resolver = _RouteResolver(
+        {
+            (None, "Kraków"): TravelInfo(300.0, 180.0),
+            ("Kraków", None): TravelInfo(300.0, 180.0),
+            ("Kraków", "Wawel"): TravelInfo(5.0, 15.0),
+            ("Wawel", "Kazimierz"): TravelInfo(2.0, 10.0),
+            ("Kazimierz", "Kraków"): TravelInfo(4.0, 12.0),
+        }
+    )
+    module = _calendar_module([parent, first, second], resolver)
+
+    await module._build_trips()
+
+    trips = {t.location: t for t in module.trips}
+    assert trips["Wawel"].origin_location == "Kraków"
+    assert trips["Wawel"].return_distance_km is None  # continues to Kazimierz
+    assert trips["Kazimierz"].origin_location == "Wawel"
+    assert trips["Kazimierz"].outbound_distance_km == 2.0
+    assert trips["Kazimierz"].return_location == "Kraków"
+    assert trips["Kazimierz"].return_distance_km == 4.0
+    # The chain must not link to the PARENT (different scope than the children).
+    assert trips["Wawel"].continues is False
+
+
+async def test_continue_without_predecessor_falls_back_to_base() -> None:
+    warnings: list[str] = []
+    event = _event("Spotkanie Katowice #continue", 17, 18, "Katowice")
+    resolver = _RouteResolver(
+        {
+            (None, "Katowice"): TravelInfo(45.0, 40.0),
+            ("Katowice", None): TravelInfo(45.0, 40.0),
+        }
+    )
+    module = _calendar_module([event], resolver)
+    module.log_warning = lambda msg, **kw: warnings.append(msg)
+
+    await module._build_trips()
+
+    assert len(module.trips) == 1
+    trip = module.trips[0]
+    assert trip.origin_location == "home"
+    assert trip.return_location == "home"
+    assert trip.continues is False
+    assert warnings and "#continue" in warnings[0]
+
+
 def test_apply_trip_marks_away_hours_unavailable() -> None:
     module = _bare_module()
     # Event 10–12, travel 45 min + margin 30 min → away 8:45 – 13:15.
@@ -674,7 +759,9 @@ def test_apply_trip_builds_drain_and_target() -> None:
     # 50 km one-way, 0.2 kWh/km → 10 kWh per leg, 20 kWh round trip.
     # 60 kWh pack, min SoC 20 % → target 20 + 20/60*100 = 53.33 %.
     module = _bare_module(kwh_per_km=0.2, min_soc=20.0)
-    module._apply_trip(_trip(10, 12, 50.0, 60.0, 0.0), BASE)
+    trip = _trip(10, 12, 50.0, 60.0, 0.0)
+    module._apply_trip(trip, BASE)
+    module._apply_chain_targets([trip], BASE)
     assert round(sum(module._trip_drain.values()), 3) == 20.0
     assert len(module._trip_targets) == 1
     target = module._trip_targets[0]
@@ -698,6 +785,7 @@ def test_apply_trip_uses_asymmetric_leg_distances() -> None:
         return_distance_km=40.0,
     )
     module._apply_trip(trip, BASE)
+    module._apply_chain_targets([trip], BASE)
     assert round(sum(module._trip_drain.values()), 3) == 10.0
     target = module._trip_targets[0]
     assert target.deadline == BASE + timedelta(hours=9)
@@ -706,7 +794,9 @@ def test_apply_trip_uses_asymmetric_leg_distances() -> None:
 
 def test_apply_trip_without_distance_is_unavailability_only() -> None:
     module = _bare_module(kwh_per_km=0.2, min_soc=20.0)
-    module._apply_trip(_trip(10, 12, None, margin_min=30.0), BASE)
+    trip = _trip(10, 12, None, margin_min=30.0)
+    module._apply_trip(trip, BASE)
+    module._apply_chain_targets([trip], BASE)
     assert module._unavailable_hours  # away window still applies
     assert module._trip_drain == {}
     assert module._trip_targets == []
@@ -714,9 +804,51 @@ def test_apply_trip_without_distance_is_unavailability_only() -> None:
 
 def test_apply_trip_without_kwh_per_km_skips_energy_model() -> None:
     module = _bare_module(kwh_per_km=None, min_soc=20.0)
-    module._apply_trip(_trip(10, 12, 50.0, 45.0, 0.0), BASE)
+    trip = _trip(10, 12, 50.0, 45.0, 0.0)
+    module._apply_trip(trip, BASE)
+    module._apply_chain_targets([trip], BASE)
     assert module._trip_drain == {}
     assert module._trip_targets == []
+
+
+def test_chain_target_covers_the_whole_tour_at_head_departure() -> None:
+    """dom→Gliwice→Katowice→dom: ONE target at the head's depart, sized for
+    every leg — a #continue hop can't top up at home before its own depart."""
+    module = _bare_module(kwh_per_km=0.2, min_soc=20.0)
+    head_start = BASE + timedelta(hours=15)
+    head = Trip(
+        label="Gliwice",
+        location="Gliwice",
+        event_start=head_start,
+        event_end=BASE + timedelta(hours=16),
+        depart=head_start - timedelta(hours=1),
+        return_end=BASE + timedelta(hours=16, minutes=30),  # seam → hop depart
+        outbound_distance_km=30.0,
+        return_distance_km=None,  # no return — the hop's outbound continues
+    )
+    hop = Trip(
+        label="Katowice",
+        location="Katowice",
+        event_start=BASE + timedelta(hours=17),
+        event_end=BASE + timedelta(hours=18),
+        depart=BASE + timedelta(hours=16, minutes=30),
+        return_end=BASE + timedelta(hours=19),
+        origin_location="Gliwice",
+        outbound_distance_km=20.0,
+        return_distance_km=45.0,
+        continues=True,
+    )
+    module._apply_trip(head, BASE)
+    module._apply_trip(hop, BASE)
+    module._apply_chain_targets([head, hop], BASE)
+    # Drain: 30 + 20 + 45 km × 0.2 = 19 kWh over the tour.
+    assert round(sum(module._trip_drain.values()), 3) == 19.0
+    # One combined target: 20 % reserve + 19/60 kWh = 51.67 % at the HEAD's depart.
+    assert len(module._trip_targets) == 1
+    target = module._trip_targets[0]
+    assert target.deadline == head.depart
+    assert round(target.target_soc, 2) == 51.67
+    assert "Gliwice" in target.label and "Katowice" in target.label
 
 
 def test_spread_energy_splits_evenly_over_hours() -> None:

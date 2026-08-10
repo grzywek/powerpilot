@@ -645,6 +645,7 @@ class EVModule(PowerPilotModule):
 
         for trip in calendar.trips:
             self._apply_trip(trip, now)
+        self._apply_chain_targets(calendar.trips, now)
 
     def _parse_keyword_event(
         self, event: CalendarEvent, keyword: str, now: datetime
@@ -677,14 +678,28 @@ class EVModule(PowerPilotModule):
             self._forced_hours.add(hour)
             hour += timedelta(hours=1)
 
+    @staticmethod
+    def _trip_legs_km(trip: Trip) -> tuple[float | None, float | None]:
+        """Outbound/return leg distances. Older tests/records may only carry
+        ``distance_km``; for live trips the calendar module fills the explicit
+        outbound/return distances (either may be ``None`` — no guessing)."""
+        if (
+            trip.outbound_distance_km is not None
+            or trip.return_distance_km is not None
+        ):
+            return trip.outbound_distance_km, trip.return_distance_km
+        return trip.distance_km, trip.distance_km
+
     def _apply_trip(self, trip: Trip, now: datetime) -> None:
-        """One trip → unavailable hours, drive drain and a pre-departure target.
+        """One trip → unavailable hours and drive drain.
 
         The away window (depart → return) can't be planned into (overrides
         forced/deadline windows too: a self-contradictory calendar just means
-        no charging happens). The round trip drains the pack via the learned
-        kWh/km; without that model (or without Google-Maps distance) the trip
-        stays unavailability-only and a warning is logged instead of guessing.
+        no charging happens). The legs drain the pack via the learned kWh/km;
+        without that model (or without Google-Maps distance) the trip stays
+        unavailability-only and a warning is logged instead of guessing. The
+        pre-departure charge targets are added per CHAIN, not per trip — see
+        :meth:`_apply_chain_targets`.
         """
         # 1. Unavailability — every hour the away window touches.
         hour = max(trip.depart, now).replace(minute=0, second=0, microsecond=0)
@@ -692,18 +707,10 @@ class EVModule(PowerPilotModule):
             self._unavailable_hours.add(hour)
             hour += timedelta(hours=1)
 
-        # 2. Drive energy: each resolved leg is spread over its own span. Older
-        # tests/records may only carry ``distance_km``; for live trips the
-        # calendar module fills the explicit outbound/return distances.
-        has_explicit_legs = (
-            trip.outbound_distance_km is not None or trip.return_distance_km is not None
-        )
-        if has_explicit_legs:
-            outbound_km = trip.outbound_distance_km
-            return_km = trip.return_distance_km
-        else:
-            outbound_km = trip.distance_km
-            return_km = trip.distance_km
+        # 2. Drive energy: each resolved leg is spread over its own span. A
+        # ``#continue`` hop has no return leg (the successor's outbound covers
+        # the onward drive), so only its outbound drains here.
+        outbound_km, return_km = self._trip_legs_km(trip)
         if outbound_km is None and return_km is None:
             return  # calendar module already logged the missing travel model
         if not self._kwh_per_km:
@@ -728,24 +735,51 @@ class EVModule(PowerPilotModule):
         ).items():
             self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + kwh
 
-        # 3. Pre-departure target: reserve + round trip must be in the pack.
-        if trip.depart <= now or not self._capacity:
-            return
-        trip_soc = (outbound_kwh + return_kwh) / self._capacity * 100.0
-        needed_soc = self.min_soc + trip_soc
-        self._trip_targets.append(
-            EVChargeTarget(
-                deadline=trip.depart,
-                target_soc=min(100.0, needed_soc),
-                label=f"Wyjazd: {trip.label}",
-                source="trip",
-                # Kept separately so the UI can explain the sum: the reserve
-                # comes from the EV min-SoC number entity, not the battery's
-                # config-flow minimum.
-                reserve_soc=self.min_soc,
-                trip_soc=trip_soc,
+    def _apply_chain_targets(self, trips: list[Trip], now: datetime) -> None:
+        """One pre-departure target per chain of trips.
+
+        A ``#continue`` hop cannot charge at home before its own ``depart`` —
+        the car has been away since the chain head left. The whole chain's
+        driving energy must therefore be in the pack when the HEAD departs:
+        one reserve+trip floor at the head's deadline. A standalone trip is a
+        chain of one, which reproduces the old per-trip target exactly.
+        """
+        if not self._capacity or not self._kwh_per_km:
+            return  # legs can't be sized — the drain pass already warned
+        chains: list[list[Trip]] = []
+        for trip in trips:  # sorted by depart; chain hops follow their head
+            if trip.continues and chains:
+                chains[-1].append(trip)
+            else:
+                chains.append([trip])
+        for chain in chains:
+            head = chain[0]
+            if head.depart <= now:
+                continue
+            total_kwh = 0.0
+            for trip in chain:
+                outbound_km, return_km = self._trip_legs_km(trip)
+                total_kwh += ((outbound_km or 0.0) + (return_km or 0.0)) * (
+                    self._kwh_per_km
+                )
+            if total_kwh <= 0.0:
+                continue
+            trip_soc = total_kwh / self._capacity * 100.0
+            needed_soc = self.min_soc + trip_soc
+            label = " → ".join(t.label for t in chain)
+            self._trip_targets.append(
+                EVChargeTarget(
+                    deadline=head.depart,
+                    target_soc=min(100.0, needed_soc),
+                    label=f"Wyjazd: {label}",
+                    source="trip",
+                    # Kept separately so the UI can explain the sum: the
+                    # reserve comes from the EV min-SoC number entity, not the
+                    # battery's config-flow minimum.
+                    reserve_soc=self.min_soc,
+                    trip_soc=trip_soc,
+                )
             )
-        )
 
     # ------------------------------------------------------------------
     # Request building

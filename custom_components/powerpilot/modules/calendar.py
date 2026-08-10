@@ -13,6 +13,13 @@ planning cycle and turns the events into two shared products:
   end plus travel time plus margin). Those hours are not chargeable and the
   round trip drains the pack via the learned kWh/km.
 
+Two summary tags steer the builder: ``#ignore`` removes the event entirely and
+``#continue`` chains a located event onto the previous one in the same scope
+(direct drive, no return to base in between). A located event that fully
+contains others changes their base: children drive from/back to the parent's
+location, and a child ending exactly with its parent returns straight home
+(the parent's own return leg is dropped).
+
 Downstream modules consume this via the coordinator (the registry updates the
 calendar before the EV module — order matters).
 """
@@ -41,7 +48,14 @@ _LOGGER = logging.getLogger(__name__)
 
 # How far ahead calendar events are read (matches the optimizer horizon cap).
 CALENDAR_LOOKAHEAD_HOURS = 96
-IGNORE_EVENT_TAG = "#powerpilot_ignore"
+# Summary tags steering the trip builder (case-insensitive):
+# * ``#ignore`` — the event does not exist for PowerPilot at all.
+# * ``#continue`` — this located event starts where the PREVIOUS located event
+#   (same nesting scope) took place: the car drives there directly instead of
+#   returning to base in between (dom→Gliwice→Katowice→dom, not two round
+#   trips). Chains compose; the final stop still returns to its normal base.
+IGNORE_EVENT_TAG = "#ignore"
+CONTINUE_EVENT_TAG = "#continue"
 _HOME_LOCATION = "home"
 _RETURN_TRAVEL_UNSET = object()
 
@@ -65,6 +79,11 @@ class Trip:
     for display. ``outbound_*`` and ``return_*`` carry the exact route legs used
     for EV drain modelling; either leg may be ``None`` when Google Maps could
     not resolve it, and no distance is guessed.
+
+    ``continues`` marks a ``#continue`` hop: the car arrives straight from the
+    previous trip's location (its ``origin_location``), so it cannot charge at
+    home before this trip's own ``depart`` — the EV module folds the whole
+    chain into one pre-departure target at the chain head instead.
     """
 
     label: str
@@ -81,6 +100,7 @@ class Trip:
     outbound_duration_min: float | None = None
     return_distance_km: float | None = None
     return_duration_min: float | None = None
+    continues: bool = False
 
 
 def trip_window(
@@ -106,6 +126,17 @@ def _is_home_location(location: str) -> bool:
 
 def _same_location(left: str, right: str) -> bool:
     return " ".join(left.split()).lower() == " ".join(right.split()).lower()
+
+
+def _strip_tags(summary: str) -> str:
+    """Trip label without the steering tags (case-insensitive)."""
+    out = summary
+    for tag in (CONTINUE_EVENT_TAG,):
+        index = out.lower().find(tag)
+        while index >= 0:
+            out = out[:index] + out[index + len(tag) :]
+            index = out.lower().find(tag)
+    return " ".join(out.split())
 
 
 class CalendarModule(PowerPilotModule):
@@ -204,16 +235,63 @@ class CalendarModule(PowerPilotModule):
             and event.end == parent.end
             and not _same_location(event.location, parent.location)
         }
-        for event in self.events:
-            location = event.location.strip()
-            if not location or _is_home_location(location):
+
+        # Located events in chronological order; ``#continue`` links each tagged
+        # event to the previous located event in the SAME nesting scope (both
+        # top-level, or children of the same parent) — the car drives there
+        # directly instead of returning to base in between.
+        located = [
+            event
+            for event in self.events
+            if event.location.strip() and not _is_home_location(event.location)
+        ]
+        continue_from: dict[int, CalendarEvent] = {}
+        continued_by: dict[int, CalendarEvent] = {}
+        for event in located:
+            if CONTINUE_EVENT_TAG not in event.summary.lower():
                 continue
             parent = parent_by_event.get(id(event))
-            origin = parent.location if parent is not None else _HOME_LOCATION
-            if _same_location(origin, location):
+            prev = max(
+                (
+                    candidate
+                    for candidate in located
+                    if candidate is not event
+                    and candidate.start < event.start
+                    and parent_by_event.get(id(candidate)) is parent
+                ),
+                key=lambda c: (c.start, c.end),
+                default=None,
+            )
+            if prev is None:
+                self.log_warning(
+                    f"Wydarzenie „{event.summary}” ma {CONTINUE_EVENT_TAG}, ale nie ma "
+                    "wcześniejszego wydarzenia z lokalizacją w tym samym zakresie — "
+                    "traktuję jak zwykły wyjazd z bazy.",
+                    extra={"event": event.summary},
+                )
                 continue
-            if parent is None:
-                return_to: str | None = (
+            continue_from[id(event)] = prev
+            continued_by[id(prev)] = event
+
+        trip_by_event: dict[int, Trip] = {}
+        for event in located:
+            location = event.location.strip()
+            parent = parent_by_event.get(id(event))
+            prev = continue_from.get(id(event))
+            if prev is not None:
+                origin = prev.location.strip()
+            else:
+                origin = parent.location if parent is not None else _HOME_LOCATION
+            # An event at its own base is a no-op stay, not a drive — unless it
+            # continues a chain (the car really is elsewhere and comes here).
+            if prev is None and _same_location(origin, location):
+                continue
+            # The car leaves for the NEXT chain stop, not for base: no inbound
+            # leg here — the successor's outbound covers the onward drive.
+            if id(event) in continued_by:
+                return_to: str | None = None
+            elif parent is None:
+                return_to = (
                     None if id(event) in terminal_parent_ids else _HOME_LOCATION
                 )
             else:
@@ -245,24 +323,39 @@ class CalendarModule(PowerPilotModule):
                 margin_after,
                 return_travel=inbound,
             )
-            self.trips.append(
-                Trip(
-                    label=event.summary,
-                    location=location,
-                    event_start=event.start,
-                    event_end=event.end,
-                    depart=depart,
-                    return_end=return_end,
-                    distance_km=outbound.distance_km if outbound else None,
-                    duration_min=outbound.duration_min if outbound else None,
-                    origin_location=origin,
-                    return_location=return_to or location,
-                    outbound_distance_km=outbound.distance_km if outbound else None,
-                    outbound_duration_min=outbound.duration_min if outbound else None,
-                    return_distance_km=inbound.distance_km if inbound else None,
-                    return_duration_min=inbound.duration_min if inbound else None,
-                )
+            trip = Trip(
+                label=_strip_tags(event.summary),
+                location=location,
+                event_start=event.start,
+                event_end=event.end,
+                depart=depart,
+                return_end=return_end,
+                distance_km=outbound.distance_km if outbound else None,
+                duration_min=outbound.duration_min if outbound else None,
+                origin_location=origin,
+                return_location=return_to or location,
+                outbound_distance_km=outbound.distance_km if outbound else None,
+                outbound_duration_min=outbound.duration_min if outbound else None,
+                return_distance_km=inbound.distance_km if inbound else None,
+                return_duration_min=inbound.duration_min if inbound else None,
+                continues=prev is not None,
             )
+            trip_by_event[id(event)] = trip
+            self.trips.append(trip)
+
+        # Seam chained windows: the predecessor stays "away" until its
+        # successor departs (the car sits at the stop, it is not home) — the
+        # unavailable window must be continuous across the whole chain.
+        for event in located:
+            successor = continued_by.get(id(event))
+            if successor is None:
+                continue
+            trip = trip_by_event.get(id(event))
+            next_trip = trip_by_event.get(id(successor))
+            if trip is None or next_trip is None:
+                continue
+            trip.return_end = max(trip.event_end, next_trip.depart)
+
         self.trips.sort(key=lambda t: t.depart)
 
     def _parent_event(self, event: CalendarEvent) -> CalendarEvent | None:

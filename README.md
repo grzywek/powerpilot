@@ -112,6 +112,19 @@ ones, and charging never pushes the pack past 100 %. When the calendar has no
 matching upcoming events, PowerPilot simply tops the car up to the target SoC in
 the cheapest hours.
 
+Events with a **location** become trips (the car is away, the drive drains the
+pack, a pre-departure charge target is added). Two summary tags steer this:
+
+| Tag in the event title | Meaning |
+|------------------------|---------|
+| `#ignore` | PowerPilot skips the event entirely. |
+| `#continue` | This stop is driven to **directly from the previous located event** (same nesting level) — e.g. Gliwice 15–16 and Katowice 17–18 `#continue` plan dom→Gliwice→Katowice→dom instead of two separate round trips, and the charge needed for the whole tour must be in the pack before the first departure. |
+
+An event that fully contains other located events changes their base: sub-events
+of an all-day "Kraków" event drive from/back to Kraków, not home — and a
+sub-event ending exactly when its parent ends returns straight home (the drive
+home replaces the parent's own return leg).
+
 The planned charging, upcoming deadlines and manual windows are shown on the
 panel's **Status** tab, and the forecast EV SoC is drawn as a dashed line on the
 energy chart's SoC axis.

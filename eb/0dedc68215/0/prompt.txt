@@ -1,0 +1,13 @@
+wolałbym nie dodawać nowych bloków...
+
+chyba wolałbym coś takiego:
+
+#continue (lokalizacja startowa to poprzedni event)
+#ignore (nie uwzględnia eventu w kalkulacjach)
+
+i zostawiamy dalej event nadrzędny, który zmienia home dla swoich dzieci
+
+jeśli dziecko kończy się równo z eventem nadrzędnym, to wtedy już home jest zwykłe, a nie z rodzica (wtedy powroty do domu będą działać)
+
+
+w ten sposób mamy chyba komplet

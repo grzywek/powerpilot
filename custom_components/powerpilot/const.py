@@ -158,6 +158,14 @@ CONF_EV_ODOMETER_SENSOR: Final = "ev_odometer_sensor"  # total km (increasing) �
 # forecast (no double counting); realized history is unaffected. Set only when the
 # charger sits inside the main consumption meter.
 CONF_EV_CHARGE_METER_SENSOR: Final = "ev_charge_meter_sensor"
+# Whether the charger draws THROUGH the configured grid-import/consumption
+# meters (default). ``False`` = the charger taps in before the meter (its own
+# metering point): the house sensors never see EV charging, so the realized
+# grid import and hour costs get the car's session energy (÷ charging
+# efficiency) added back — otherwise plan-vs-real always shows the EV energy
+# as "missing" from reality. The connection/phase limits still apply: a
+# pre-meter tap shares the same physical service and main fuse.
+CONF_EV_BEHIND_METER: Final = "ev_behind_meter"
 # Legacy single-calendar key. Superseded by the integration-wide CONF_CALENDARS
 # list (below); kept only so ``async_setup_entry`` can seed the new list once on
 # upgrade — nothing reads it at runtime anymore.
@@ -292,6 +300,7 @@ DEFAULTS: Final = {
     CONF_EV_CHARGER_PHASE: 1,
     CONF_EV_CHARGER_PHASES: 1,
     CONF_EV_CHARGE_EFFICIENCY: 1.0,
+    CONF_EV_BEHIND_METER: True,
     CONF_EV_CALENDAR_KEYWORD: "Kotek",
     CONF_EV_PREFER_CONTIGUOUS: False,
     CONF_EV_CONTIGUOUS_MAX_EXTRA_PCT: 15.0,

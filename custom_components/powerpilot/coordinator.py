@@ -1375,6 +1375,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_BATTERY_DISCHARGE_SENSOR,
             CONF_CONSUMPTION_SENSOR,
             CONF_DEVICE_SENSORS,
+            CONF_EV_BEHIND_METER,
+            CONF_EV_CHARGE_EFFICIENCY,
             CONF_EV_ENERGY_ADDED_SENSOR,
             CONF_EV_SOC_SENSOR,
             CONF_GRID_IMPORT_SENSOR,
@@ -1598,6 +1600,76 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             code = _pin_val(hour, "mode")
             return MODE_CODE_INV.get(code) if code else None
 
+        # Trips for the away-window shading + tooltip. Stale lead → only the
+        # events the pinned plan knew about. Live view → current calendar trips
+        # plus already-started history harvested from vintages, so past events
+        # removed from the calendar stay visible where they shaped plans, while
+        # edited future events do not leave ghost copies from older snapshots.
+        series_end = (
+            window_end
+            or (
+                self.data.forecast.slots[-1].start + timedelta(hours=1)
+                if self.data and self.data.forecast.slots
+                else past_end
+            )
+        )
+        if pin_requested:
+            trips = list((pin_rec or {}).get("trips") or [])
+        else:
+            live = self.ev.trips_payload()
+
+            def _window(t: dict) -> tuple[datetime, datetime] | None:
+                depart = dt_util.parse_datetime(t.get("depart") or "")
+                ret = dt_util.parse_datetime(t.get("return_end") or "")
+                return (depart, ret) if depart and ret else None
+
+            live_windows = [w for w in map(_window, live) if w]
+
+            def _clashes_with_live(t: dict) -> bool:
+                w = _window(t)
+                if w is None:
+                    return True  # unparseable history row — cannot place it
+                return any(w[0] < ret and w[1] > dep for dep, ret in live_windows)
+
+            # The live calendar is the current truth wherever it says anything:
+            # a harvested trip overlapping a live one is either the same event
+            # (already in ``live``) or its stale pre-edit copy — drop it.
+            trips = sorted(
+                [
+                    t
+                    for t in sn.trips_overlapping(
+                        past_start, series_end, started_at_or_before=real_now
+                    )
+                    if not _clashes_with_live(t)
+                ]
+                + live,
+                key=lambda t: t.get("depart") or "",
+            )
+
+        # EV wired BEFORE the meters (its own tap): the house sensors never see
+        # the charging, so the realized grid import and hour costs get the
+        # car's session energy added back (grid side = added ÷ charging
+        # efficiency). Hours inside a trip window are skipped — away charging
+        # is not home import.
+        ev_behind_meter = bool(self.config.get(CONF_EV_BEHIND_METER, True))
+        ev_charge_eff = max(
+            float(self.config.get(CONF_EV_CHARGE_EFFICIENCY, 1.0) or 1.0), 0.01
+        )
+        away_windows: list[tuple[datetime, datetime]] = []
+        for t in trips:
+            dep = dt_util.parse_datetime(t.get("depart") or "")
+            ret = dt_util.parse_datetime(t.get("return_end") or "")
+            if dep and ret:
+                away_windows.append((dep, ret))
+
+        def _unmetered_ev_grid(hour: datetime, added_kwh: float | None) -> float:
+            if ev_behind_meter or not added_kwh:
+                return 0.0
+            hour_end = hour + timedelta(hours=1)
+            if any(dep < hour_end and ret > hour for dep, ret in away_windows):
+                return 0.0
+            return added_kwh / ev_charge_eff
+
         # ----- Past hours -----
         h = past_start
         while h < past_end:
@@ -1629,6 +1701,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
             g_real, d_real = grid_import_real.get(h), bat_discharge_real.get(h)
             c_real, m_real = bat_charge_real.get(h), main_real.get(h)
+            if g_real is not None:
+                # Pre-meter EV tap: fold the unmetered charging back into the
+                # realized import (0.0 when the charger is behind the meters).
+                g_real += _unmetered_ev_grid(h, ev_charge_real.get(h))
             # Realized hourly costs (PLN/h) reconstructed from the measured flows:
             # grid spend = imported kWh × the hour's gross price; battery-served
             # cost = discharged kWh × the modelled in-battery cost at that hour.
@@ -1797,6 +1873,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             cur_discharge = await _partial(CONF_BATTERY_DISCHARGE_SENSOR)
             cur_grid = await _partial(CONF_GRID_IMPORT_SENSOR)
             cur_ev = await _partial(CONF_EV_ENERGY_ADDED_SENSOR)
+            if cur_grid is not None:
+                # Pre-meter EV tap (see _unmetered_ev_grid): the running hour's
+                # realized import and costs must include the ongoing charging.
+                cur_grid += _unmetered_ev_grid(now, cur_ev)
             cur_main = (
                 await self.consumption.async_partial_kwh(main_sensor, now, real_now)
                 if main_sensor
@@ -2195,52 +2275,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "battery_energy_cost": bcost,
                     }
                 )
-
-        # Trips for the away-window shading + tooltip. Stale lead → only the
-        # events the pinned plan knew about. Live view → current calendar trips
-        # plus already-started history harvested from vintages, so past events
-        # removed from the calendar stay visible where they shaped plans, while
-        # edited future events do not leave ghost copies from older snapshots.
-        series_end = (
-            window_end
-            or (
-                plan.forecast.slots[-1].start + timedelta(hours=1)
-                if plan and plan.forecast.slots
-                else past_end
-            )
-        )
-        if pin_requested:
-            trips = list((pin_rec or {}).get("trips") or [])
-        else:
-            live = self.ev.trips_payload()
-
-            def _window(t: dict) -> tuple[datetime, datetime] | None:
-                depart = dt_util.parse_datetime(t.get("depart") or "")
-                ret = dt_util.parse_datetime(t.get("return_end") or "")
-                return (depart, ret) if depart and ret else None
-
-            live_windows = [w for w in map(_window, live) if w]
-
-            def _clashes_with_live(t: dict) -> bool:
-                w = _window(t)
-                if w is None:
-                    return True  # unparseable history row — cannot place it
-                return any(w[0] < ret and w[1] > dep for dep, ret in live_windows)
-
-            # The live calendar is the current truth wherever it says anything:
-            # a harvested trip overlapping a live one is either the same event
-            # (already in ``live``) or its stale pre-edit copy — drop it.
-            trips = sorted(
-                [
-                    t
-                    for t in sn.trips_overlapping(
-                        past_start, series_end, started_at_or_before=real_now
-                    )
-                    if not _clashes_with_live(t)
-                ]
-                + live,
-                key=lambda t: t.get("depart") or "",
-            )
 
         # Pinned-vintage metadata: when the prognoza is pinned (lead N or an
         # exact run_at) the panel marks the span that plan actually covered —

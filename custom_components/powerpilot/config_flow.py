@@ -31,6 +31,7 @@ from .const import (
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
     CONF_DISCHARGE_EFFICIENCY,
+    CONF_EV_BEHIND_METER,
     CONF_EV_CALENDAR_KEYWORD,
     CONF_EV_CHARGER_KW,
     CONF_EV_CHARGER_PHASES,
@@ -304,6 +305,9 @@ def _ev_schema(data: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_EV_CHARGE_METER_SENSOR, default=d(CONF_EV_CHARGE_METER_SENSOR) or vol.UNDEFINED
             ): _entity("sensor"),
+            vol.Optional(
+                CONF_EV_BEHIND_METER, default=bool(d(CONF_EV_BEHIND_METER))
+            ): selector.BooleanSelector(),
             vol.Optional(
                 CONF_EV_LOCATION_SENSOR, default=d(CONF_EV_LOCATION_SENSOR) or vol.UNDEFINED
             ): _entity(["device_tracker", "binary_sensor", "person"]),

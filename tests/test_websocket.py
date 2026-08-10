@@ -262,6 +262,69 @@ async def test_series_current_hour_mode_follows_the_plan_decision(
     assert current["inverter_mode"] == InverterMode.DISCHARGE
 
 
+async def test_series_pre_meter_ev_adds_back_unmetered_charging(
+    hass: HomeAssistant,
+) -> None:
+    """A pre-meter EV tap: realized grid import gains the car's session energy
+    (÷ charging efficiency), because the house meter never saw that draw."""
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.powerpilot.const import (
+        CONF_EV_BEHIND_METER,
+        CONF_EV_CHARGE_EFFICIENCY,
+        CONF_EV_ENERGY_ADDED_SENSOR,
+        CONF_GRID_IMPORT_SENSOR,
+    )
+
+    hass.states.async_set("sensor.soc", "55", {"unit_of_measurement": "%"})
+    hass.states.async_set("sensor.grid", "10", {"unit_of_measurement": "kWh"})
+    hass.states.async_set("sensor.ev_added", "5", {"unit_of_measurement": "kWh"})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            **DEFAULTS,
+            CONF_SOC_SENSOR: "sensor.soc",
+            CONF_GRID_IMPORT_SENSOR: "sensor.grid",
+            CONF_EV_ENERGY_ADDED_SENSOR: "sensor.ev_added",
+            CONF_EV_BEHIND_METER: False,
+            CONF_EV_CHARGE_EFFICIENCY: 0.9,
+        },
+        title="PowerPilot",
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    async def _empty_recent_soc(*args):
+        return {}
+
+    coordinator._recent_soc = _empty_recent_soc
+
+    prev_hour = dt_util.now().replace(
+        minute=0, second=0, microsecond=0
+    ) - timedelta(hours=1)
+
+    async def fake_range(sensor, start, end):
+        if sensor == "sensor.grid":
+            return {prev_hour: 1.0}
+        if sensor == "sensor.ev_added":
+            return {prev_hour: 0.9}  # pack side; grid side = 0.9 / 0.9 = 1.0
+        return {}
+
+    async def fake_partial(sensor, start, end):
+        return None
+
+    coordinator.consumption.async_range_kwh = fake_range
+    coordinator.consumption.async_partial_kwh = fake_partial
+
+    result = await coordinator.get_series(past_hours=2)
+    row = next(h for h in result["hours"] if h["start"] == prev_hour.isoformat())
+    assert abs(row["realized"]["grid"] - 2.0) < 1e-6
+
+
 async def test_series_current_hour_carries_the_hour_start_plan(
     hass: HomeAssistant,
 ) -> None:

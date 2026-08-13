@@ -494,15 +494,19 @@ const WEEKDAY_PL: Record<string, string> = {
   sat: "Sob",
   sun: "Nd",
 };
+// Device bar colors. Deliberately avoids the fixed stack series — grid import
+// purple (#8e44ad), battery discharge khaki (#b0a14f) / charge ochre
+// (#c98a3a), base-consumption maroon (#b5475d) and the EV green (#15803d) —
+// so every device reads as its own hue next to them.
 const DEVICE_PALETTE = [
-  "#7b6cf6",
-  "#43a047",
-  "#e67e22",
-  "#3498db",
-  "#9b59b6",
-  "#e74c3c",
-  "#1abc9c",
-  "#f1c40f",
+  "#7b6cf6", // indigo
+  "#e91e63", // pink
+  "#f97316", // orange
+  "#06b6d4", // cyan
+  "#facc15", // yellow
+  "#e74c3c", // red
+  "#14b8a6", // teal
+  "#84cc16", // lime
 ];
 
 /** Inverter operating mode → human label + solid dot color. The mode is drawn
@@ -1341,7 +1345,7 @@ export class PowerPilotPanel extends LitElement {
             ${this._pvRow("Ładowanie EV", sPrev.forecast?.ev, sPrev.realized?.ev)}
             ${this._pvRow("Zużycie domu", sPrev.consumption_forecast, sPrev.consumption_real)}
             ${this._pvRow("Pobór z sieci", sPrev.forecast?.grid, sPrev.realized?.grid)}
-            ${this._socRow("SoC na koniec", sPrev.forecast?.soc_end, sPrev.realized?.soc_end)}
+            ${this._socRow("SoC magazynu na koniec", sPrev.forecast?.soc_end, sPrev.realized?.soc_end)}
           `
         : html`<div class="muted">brak danych (wróć do „● teraz")</div>`;
 
@@ -1355,7 +1359,17 @@ export class PowerPilotPanel extends LitElement {
     const planCons = hp ? hp.consumption : this._forecastConsumptionAt(curMs);
     const planSocEnd = hp ? hp.soc_end : current.battery_soc;
     const planMode = sCur?.planned_mode ?? current.inverter_mode;
-    const realMode = sCur?.realized ? this._measuredMode(sCur.realized) : null;
+    // Measured mode needs a few minutes of 5-min statistics to clear the
+    // noise threshold: early in the hour every flow reads ~0 and the measured
+    // mode is a false "passthrough". Until then show "—" instead of a
+    // misleading ≠ against the plan.
+    const measuredMode = sCur?.realized ? this._measuredMode(sCur.realized) : null;
+    const realMode =
+      elapsed < 10 / 60 &&
+      measuredMode === "passthrough" &&
+      planMode !== "passthrough"
+        ? null
+        : measuredMode;
     const curBody = html`
       ${this._modeRow(planMode, realMode)}
       ${this._pvRow("Ładowanie baterii", planCharge, sCur?.realized?.charge, { elapsed })}
@@ -1366,7 +1380,7 @@ export class PowerPilotPanel extends LitElement {
       })}
       ${this._pvRow("Zużycie domu", planCons, sCur?.consumption_real, { elapsed })}
       ${this._pvRow("Pobór z sieci", planGrid, sCur?.realized?.grid, { elapsed })}
-      ${this._socRow("SoC: plan na koniec → teraz", planSocEnd, sCur?.soc ?? null)}
+      ${this._socRow("SoC magazynu: plan na koniec → teraz", planSocEnd, sCur?.soc ?? null)}
     `;
 
     // --- next hour: the live plan (nothing realized yet) ---
@@ -1382,7 +1396,7 @@ export class PowerPilotPanel extends LitElement {
           })}
           ${this._pvRow("Zużycie domu", this._forecastConsumptionAt(nextMs), null, { planOnly: true })}
           ${this._pvRow("Pobór z sieci", pNext.grid_buy_kwh, null, { planOnly: true })}
-          ${this._socRow("SoC na koniec", pNext.battery_soc, null, true)}
+          ${this._socRow("SoC magazynu na koniec", pNext.battery_soc, null, true)}
         `
       : html`<div class="muted">poza horyzontem planu</div>`;
 
@@ -1645,7 +1659,7 @@ export class PowerPilotPanel extends LitElement {
         key: `dev:${eid}`,
         get: device(eid),
       })),
-      { label: "EV ładowanie", color: "#3498db", key: "ev", get: (h) => h.ev_charge_kwh },
+      { label: "EV ładowanie", color: "#15803d", key: "ev", get: (h) => h.ev_charge_kwh },
       { label: "Bateria — ładowanie", color: "#c98a3a", key: "charge", get: (h) => h.battery_charge_kwh },
     ];
 

@@ -192,17 +192,55 @@ def _capacity_samples(
 def _hourly_drain(
     soc_history: list[tuple[datetime, float]], capacity: float
 ) -> dict[datetime, float]:
-    """``{hour_start: kWh out of the pack}`` from SoC drops, by the start hour."""
+    """``{hour_start: kWh out of the pack}`` from NET SoC drops per hour.
+
+    Net per bucket, not the sum of every negative sample delta: cars report
+    SoC in whole percent and the value flickers around the boundary
+    (50↔49↔50). Summing raw drops rectifies that noise into phantom drain —
+    a parked day read as several kWh "consumed" — which inflated both the
+    weekly drain profile and (via the energy sum) the learned kWh/km.
+    """
     out: dict[datetime, float] = {}
     if capacity <= 0 or len(soc_history) < 2:
         return out
+    deltas: dict[datetime, float] = {}
     prev_ts, prev = soc_history[0]
     for ts, soc in soc_history[1:]:
-        if soc < prev:
-            hour = dt_util.as_local(prev_ts).replace(minute=0, second=0, microsecond=0)
-            out[hour] = out.get(hour, 0.0) + (prev - soc) / 100.0 * capacity
+        hour = dt_util.as_local(prev_ts).replace(minute=0, second=0, microsecond=0)
+        deltas[hour] = deltas.get(hour, 0.0) + (prev - soc)
         prev_ts, prev = ts, soc
+    for hour, drop in deltas.items():
+        if drop > 0:
+            out[hour] = drop / 100.0 * capacity
     return out
+
+
+def _driving_hours(
+    odometer_history: list[tuple[datetime, float]],
+) -> set[datetime]:
+    """Hour buckets in which the car was moving (the odometer advanced).
+
+    Padded by one hour on each side: both the SoC and the odometer sensors
+    sample sparsely, so a drive's SoC drop can land in the bucket just before
+    or after the odometer registers the distance.
+    """
+    hours: set[datetime] = set()
+    if len(odometer_history) < 2:
+        return hours
+    prev_ts, prev_km = odometer_history[0]
+    for ts, km in odometer_history[1:]:
+        if km > prev_km:
+            hour = dt_util.as_local(prev_ts).replace(
+                minute=0, second=0, microsecond=0
+            ) - timedelta(hours=1)
+            end = dt_util.as_local(ts).replace(
+                minute=0, second=0, microsecond=0
+            ) + timedelta(hours=1)
+            while hour <= end:
+                hours.add(hour)
+                hour += timedelta(hours=1)
+        prev_ts, prev_km = ts, km
+    return hours
 
 
 def _kwh_per_km(
@@ -210,13 +248,27 @@ def _kwh_per_km(
     odometer_history: list[tuple[datetime, float]],
     capacity: float,
 ) -> float | None:
-    """Average consumption: total SoC-drop energy ÷ distance driven."""
+    """Average DRIVING consumption: SoC-drop energy while moving ÷ distance.
+
+    Only drops in hours the odometer actually advanced count — the pack also
+    bleeds while parked (sentry, cabin protection, vampire drain), and folding
+    those weeks of idle losses into the per-km figure inflated it badly (an
+    observed 0.33 kWh/km on a car that really drives at ~0.18), which in turn
+    doubled every trip target and trip drain in the plan.
+    """
     if capacity <= 0 or len(soc_history) < 2 or len(odometer_history) < 2:
         return None
     km = odometer_history[-1][1] - odometer_history[0][1]
     if km < MIN_TRIP_KM:
         return None
-    energy_out = sum(_hourly_drain(soc_history, capacity).values())
+    driving = _driving_hours(odometer_history)
+    if not driving:
+        return None
+    energy_out = sum(
+        kwh
+        for hour, kwh in _hourly_drain(soc_history, capacity).items()
+        if hour in driving
+    )
     if energy_out <= 0:
         return None
     return energy_out / km
@@ -364,6 +416,15 @@ class EVModule(PowerPilotModule):
             self._drain_profile = WeeklyAccumulator.from_dict(stored.get("drain_profile"))
             drain_last = stored.get("last_drain_learn")
             self._last_drain_learn = date.fromisoformat(drain_last) if drain_last else None
+            # One-time relearn after the drain-math fix: the old numbers were
+            # inflated (idle losses folded into kWh/km, integer-SoC flicker
+            # rectified into phantom drain) and days already marked observed
+            # would never be re-folded — drop them so the next update relearns
+            # the whole window from recorder history with the new math.
+            if not stored.get("drain_net_v2"):
+                self._kwh_per_km = None
+                self._drain_profile = WeeklyAccumulator()
+                self._last_drain_learn = None
         # One-time seed from the old manual capacity so upgrades aren't blank
         # while the first sessions are still being observed.
         if self._capacity is None:
@@ -548,6 +609,9 @@ class EVModule(PowerPilotModule):
                 "last_drain_learn": self._last_drain_learn.isoformat()
                 if self._last_drain_learn
                 else None,
+                # Marks the driving-only kWh/km + net-per-hour drain math; see
+                # the one-time relearn in async_setup.
+                "drain_net_v2": True,
             }
         )
 

@@ -1107,12 +1107,54 @@ def test_hourly_drain_attributes_soc_drops() -> None:
     assert round(drain[_ts(0)], 3) == 6.0
 
 
+def test_hourly_drain_nets_out_integer_soc_flicker() -> None:
+    """A parked car flickering 50↔49 must not read as consumption.
+
+    Regression: every downward sample delta was summed as drain while the
+    recoveries were ignored, so sensor noise rectified into phantom kWh that
+    inflated the drain profile and the learned kWh/km.
+    """
+    from custom_components.powerpilot.modules.ev import _hourly_drain
+
+    soc = [
+        (_ts(0), 50.0),
+        (_ts(0.2), 49.0),
+        (_ts(0.4), 50.0),
+        (_ts(0.6), 49.0),
+        (_ts(0.8), 50.0),
+        (_ts(1), 50.0),
+    ]
+    assert _hourly_drain(soc, 60.0) == {}
+
+
 def test_kwh_per_km_from_distance_and_soc() -> None:
     from custom_components.powerpilot.modules.ev import _kwh_per_km
 
     # 12 kWh out (SoC 60→40 of 60 kWh) over 60 km → 0.2 kWh/km.
     soc = [(_ts(0), 60.0), (_ts(2), 40.0)]
     odo = [(_ts(0), 1000.0), (_ts(2), 1060.0)]
+    assert round(_kwh_per_km(soc, odo, 60.0), 3) == 0.2
+
+
+def test_kwh_per_km_ignores_parked_drain() -> None:
+    """Sentry/vampire losses while parked must not inflate the per-km figure.
+
+    Regression: weeks of idle SoC bleed were folded into the divisor-less
+    energy sum, doubling the learned consumption (0.33 kWh/km on a car that
+    drives at ~0.2) — which doubled every trip target and trip drain.
+    """
+    from custom_components.powerpilot.modules.ev import _kwh_per_km
+
+    soc = [
+        (_ts(0), 60.0),
+        (_ts(1), 50.0),  # -6 kWh while driving
+        (_ts(3), 50.0),
+        (_ts(30), 45.0),  # parked bleed, odometer frozen
+        (_ts(31), 45.0),
+        (_ts(48), 40.0),  # more parked bleed
+    ]
+    odo = [(_ts(0), 1000.0), (_ts(1), 1030.0), (_ts(48), 1030.0)]
+    # Only the driving 6 kWh counts: 6 / 30 km = 0.2 — not (6+6)/30 = 0.4.
     assert round(_kwh_per_km(soc, odo, 60.0), 3) == 0.2
 
 

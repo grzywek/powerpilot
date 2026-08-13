@@ -131,14 +131,20 @@ async def ws_efficiency(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], result)
 
 
-@websocket_api.websocket_command({vol.Required("type"): "powerpilot/debug"})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "powerpilot/debug",
+        # Bound the dump to the next N hours (token-lean paste); omit for full.
+        vol.Optional("hours"): vol.All(int, vol.Range(min=1, max=168)),
+    }
+)
 @websocket_api.async_response
 async def ws_debug(hass: HomeAssistant, connection, msg) -> None:
     coordinator = _coordinator(hass)
     if not coordinator:
         connection.send_result(msg["id"], {})
         return
-    result = await coordinator.get_debug()
+    result = await coordinator.get_debug(hours=msg.get("hours"))
     connection.send_result(msg["id"], result)
 
 

@@ -1013,13 +1013,20 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "groups": groups,
         }
 
-    async def get_debug(self) -> dict:
-        """Full diagnostic snapshot for troubleshooting optimizer decisions.
+    async def get_debug(self, hours: int | None = None) -> dict:
+        """Diagnostic snapshot for troubleshooting optimizer decisions.
 
         Bundles the (secret-redacted) config, the current plan with per-hour
         decision traces, feature status, learned profiles and the recent + full
         forecast series — everything needed to reason about why the optimizer
         made a given decision, in one copy/paste-able JSON blob.
+
+        ``hours`` bounds the dump to the next N hours (and 12 h of history) so
+        it can be pasted into an LLM without burning tokens on the far tail:
+        the plan/series/EV hours beyond the window are cut (each with an
+        explicit summary of what was dropped — a trimmed dump must never read
+        as "that was everything") and the static learned profiles are left
+        out. ``None`` → the full horizon, profiles included.
         """
         secret_hints = ("api_key", "token", "password", "secret")
 
@@ -1043,7 +1050,28 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         )
 
         plan = self.data
-        series = await self.get_series(past_hours=48)
+        now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        window_end = now_hour + timedelta(hours=hours) if hours else None
+        if window_end is not None:
+            series = await self.get_series(
+                past_hours=12, end=window_end.isoformat()
+            )
+        else:
+            series = await self.get_series(past_hours=48)
+
+        plan_dict = plan.as_dict() if plan else None
+        if plan_dict is not None and window_end is not None:
+            for key in ("hours", "forecast"):
+                rows = plan_dict.get(key) or []
+                kept = [
+                    r
+                    for r in rows
+                    if (start := dt_util.parse_datetime(r.get("start") or ""))
+                    is not None
+                    and start < window_end
+                ]
+                plan_dict[key] = kept
+                plan_dict[f"{key}_beyond_window"] = len(rows) - len(kept)
 
         # Per-sensor readability diagnostic: pinpoints why a historical series is
         # empty (unrecognised unit, no statistics, or a sum/mean mismatch).
@@ -1073,16 +1101,47 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             row["config_key"] = key
             sensor_reads.append(row)
 
+        ev_debug = self._ev_debug(plan)
+        if window_end is not None:
+            ev_hours = ev_debug.get("hours") or []
+            kept_ev = [
+                h
+                for h in ev_hours
+                if (start := dt_util.parse_datetime(h.get("start") or ""))
+                is not None
+                and start < window_end
+            ]
+            dropped = [h for h in ev_hours if h not in kept_ev]
+            ev_debug["hours"] = kept_ev
+            # The total EV energy beyond the window stays visible — a trimmed
+            # dump showing 10 kWh must not read as "only 10 kWh planned".
+            ev_debug["beyond_window"] = {
+                "hours": len(dropped),
+                "ev_charge_kwh": round(
+                    sum(h["ev_charge_kwh"] for h in dropped), 3
+                ),
+            }
+
+        log = self.get_log()
+        log_truncated = 0
+        if hours:
+            log_truncated = max(0, len(log) - 12)
+            log = log[:12]
+
         return {
             "generated_at": dt_util.now().isoformat(),
+            "window_hours": hours,
             "config": _redact(dict(self.config)),
-            "plan": plan.as_dict() if plan else None,
-            "ev_debug": self._ev_debug(plan),
+            "plan": plan_dict,
+            "ev_debug": ev_debug,
             "status": self.get_status(),
-            "profiles": self.get_profiles(),
+            # Learned profiles are static reference data — only the full dump
+            # carries them; the windowed dump marks the omission explicitly.
+            "profiles": self.get_profiles() if not hours else "omitted (windowed dump)",
             "series": series,
             "sensor_reads": sensor_reads,
-            "log": self.get_log(),
+            "log": log,
+            "log_truncated": log_truncated,
         }
 
     def _ev_debug(self, plan: Plan | None) -> dict:

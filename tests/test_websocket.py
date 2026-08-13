@@ -262,6 +262,29 @@ async def test_series_current_hour_mode_follows_the_plan_decision(
     assert current["inverter_mode"] == InverterMode.DISCHARGE
 
 
+async def test_debug_dump_window_trims_and_labels_the_cut(
+    hass: HomeAssistant,
+) -> None:
+    """hours=N keeps the dump small and marks every omission explicitly."""
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+
+    full = await coordinator.get_debug()
+    windowed = await coordinator.get_debug(hours=24)
+
+    assert full["window_hours"] is None
+    assert isinstance(full["profiles"], dict)
+
+    assert windowed["window_hours"] == 24
+    assert windowed["profiles"] == "omitted (windowed dump)"
+    assert "beyond_window" in windowed["ev_debug"]
+    plan = windowed["plan"]
+    assert plan is not None
+    assert "hours_beyond_window" in plan and "forecast_beyond_window" in plan
+    assert len(plan["hours"]) <= 24 + 1
+    assert len(windowed["log"]) <= 12
+
+
 async def test_series_pre_meter_ev_adds_back_unmetered_charging(
     hass: HomeAssistant,
 ) -> None:

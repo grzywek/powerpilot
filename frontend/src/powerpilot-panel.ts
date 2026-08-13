@@ -573,6 +573,8 @@ export class PowerPilotPanel extends LitElement {
   @state() private _debugLoading = false;
   @state() private _debugError: string | null = null;
   @state() private _debugCopied = false;
+  /** Dump window in hours; 0 = the full horizon (token-heavy). */
+  @state() private _debugHours = 24;
 
   /** Active range preset. */
   @state() private _rangeMode: RangeMode = "3d";
@@ -3862,7 +3864,11 @@ export class PowerPilotPanel extends LitElement {
     this._debugError = null;
     this._debugCopied = false;
     try {
-      this._debug = await this.hass.callWS({ type: "powerpilot/debug" });
+      // 0 = full horizon; anything else bounds the dump to the next N hours
+      // so the JSON stays small enough to paste into an LLM.
+      const msg: Record<string, unknown> = { type: "powerpilot/debug" };
+      if (this._debugHours > 0) msg.hours = this._debugHours;
+      this._debug = await this.hass.callWS(msg);
     } catch (err: unknown) {
       this._debugError = err instanceof Error ? err.message : String(err);
       this._debug = null;
@@ -3906,13 +3912,30 @@ export class PowerPilotPanel extends LitElement {
       <div class="card">
         <div class="card-title">Zrzut diagnostyczny</div>
         <p class="debug-intro">
-          Generuje pełny zrzut JSON: konfiguracja (bez sekretów), bieżący plan
-          z uzasadnieniem każdej decyzji (<code>trace</code>: progi taniej/drogiej,
-          stan baterii przed godziną, powód trybu), status, profile zużycia,
-          serię (48 h wstecz + horyzont) oraz log. Pobierz lub skopiuj i wklej do
-          analizy.
+          Generuje zrzut JSON: konfiguracja (bez sekretów), plan z uzasadnieniem
+          każdej decyzji (<code>trace</code>), status, seria i log. Zakres
+          ogranicza zrzut do najbliższych godzin (mniejszy JSON do wklejenia w
+          analizę — odcięte godziny są podsumowane, nie znikają po cichu);
+          „cały horyzont" dokłada też profile zużycia.
         </p>
         <div class="debug-actions">
+          <span class="nav-label">Zakres:</span>
+          ${[
+            { label: "24 h", hours: 24 },
+            { label: "48 h", hours: 48 },
+            { label: "cały horyzont", hours: 0 },
+          ].map(
+            (opt) => html`
+              <button
+                class="nav-btn ${this._debugHours === opt.hours ? "active" : ""}"
+                @click=${() => {
+                  this._debugHours = opt.hours;
+                }}
+              >
+                ${opt.label}
+              </button>
+            `
+          )}
           <button class="debug-btn primary" @click=${this._generateDebug} ?disabled=${this._debugLoading}>
             ${this._debugLoading ? "Generowanie…" : "Generuj zrzut"}
           </button>

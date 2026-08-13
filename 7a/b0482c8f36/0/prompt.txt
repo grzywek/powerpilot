@@ -1,0 +1,1857 @@
+coś się zepsuło w planowaniu po tych zmianach..
+
+np. planuje mi dzisiaj ładowanie EV mimo że nie ma potrzeby. co więcej jest słupek ładowania EV niebieski, a Soc się nie zwiększa w planie..
+
+---
+
+```
+pokazuje w sensorach ładowanie za 13h, a na wykresie jest tylko ładowanie ESS, co jest słuszne, bo baterii w EV wystarcza na eventy w kalendarzu {
+  "generated_at": "2026-08-13T00:13:48.058243+02:00",
+  "config": {
+    "phases": 3,
+    "main_fuse_a": 32,
+    "grid_voltage": 230,
+    "battery_capacity_kwh": 30,
+    "inverter_max_charge_kw": 7.3,
+    "min_charge_power_kw": 1,
+    "inverter_max_discharge_kw": 11,
+    "charge_efficiency": 0.92,
+    "discharge_efficiency": 0.96,
+    "battery_wear_cost": 0.01,
+    "min_soc": 6,
+    "max_soc": 100,
+    "price_source": "pradcast",
+    "price_markup": 0.08,
+    "price_vat": 1.23,
+    "excise_kwh": 0,
+    "price_rounding": "per_bucket",
+    "price_refresh_hours": 3,
+    "consumption_learn_days": 21,
+    "ev_enabled": true,
+    "ev_charger_kw": 3.68,
+    "ev_charger_phase": 1,
+    "ev_charger_phases": "3",
+    "ev_charge_efficiency": 0.91,
+    "ev_behind_meter": true,
+    "ev_calendar_keyword": "Kotek",
+    "ev_prefer_contiguous": true,
+    "ev_contiguous_max_extra_pct": 5,
+    "ev_prefer_early": true,
+    "ev_early_max_extra_pct": 5,
+    "travel_margin_before_min": 20,
+    "travel_margin_after_min": 0,
+    "ev_battery_kwh": 72,
+    "ev_range_km": 330,
+    "ev_weekly_km": 200,
+    "grid_disconnect_soc": 15,
+    "pradcast_api_key": "***redacted***",
+    "battery_charge_sensor": "sensor.victron_battery_kwh_in",
+    "battery_discharge_sensor": "sensor.victron_battery_kwh_out",
+    "calendars": [
+      "calendar.dom",
+      "calendar.dszwajca2_gmail_com"
+    ],
+    "charge_curve": [
+      {
+        "max_kw": 6,
+        "soc_from": 0,
+        "soc_to": 11
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 11,
+        "soc_to": 31
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 31,
+        "soc_to": 51
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 51,
+        "soc_to": 71
+      },
+      {
+        "max_kw": 7,
+        "soc_from": 71,
+        "soc_to": 91
+      },
+      {
+        "max_kw": 2.7,
+        "soc_from": 91,
+        "soc_to": 101
+      }
+    ],
+    "charge_efficiency_curve": [
+      {
+        "eff": 0.711,
+        "kw": 0.18
+      },
+      {
+        "eff": 0.806,
+        "kw": 0.33
+      },
+      {
+        "eff": 0.838,
+        "kw": 0.394
+      },
+      {
+        "eff": 0.848,
+        "kw": 0.434
+      },
+      {
+        "eff": 0.865,
+        "kw": 0.532
+      },
+      {
+        "eff": 0.895,
+        "kw": 0.76
+      },
+      {
+        "eff": 0.913,
+        "kw": 0.964
+      },
+      {
+        "eff": 0.92,
+        "kw": 1.228
+      },
+      {
+        "eff": 0.923,
+        "kw": 1.516
+      },
+      {
+        "eff": 0.927,
+        "kw": 2.006
+      },
+      {
+        "eff": 0.928,
+        "kw": 2.78
+      },
+      {
+        "eff": 0.925,
+        "kw": 3.532
+      },
+      {
+        "eff": 0.919,
+        "kw": 4.744
+      },
+      {
+        "eff": 0.907,
+        "kw": 6
+      },
+      {
+        "eff": 0.886,
+        "kw": 7.52
+      }
+    ],
+    "climate_presence_sensors": [
+      "device_tracker.iphone_dejv"
+    ],
+    "climate_sensor": "sensor.salon_klimka_daily_energy",
+    "climate_sensors": [
+      "sensor.salon_klimka_daily_energy"
+    ],
+    "consumption_sensor": "sensor.victron_ac_load",
+    "device_sensors": [
+      "sensor.salon_klimka_daily_energy",
+      "sensor.bathroom_boiler_socket_energy",
+      "sensor.tongou_m3_energy",
+      "sensor.garage_server_socket_energy",
+      "sensor.bedroom_wardrobe_socket_energy"
+    ],
+    "ev_calendar": "calendar.test",
+    "ev_charger_connected_sensor": "binary_sensor.kotek_charger",
+    "ev_charging_sensor": "binary_sensor.kotek_charging",
+    "ev_current_control": true,
+    "ev_efficiency_curve": [
+      {
+        "eff": 0.874,
+        "kw": 4.14
+      },
+      {
+        "eff": 0.908,
+        "kw": 5.52
+      },
+      {
+        "eff": 0.927,
+        "kw": 6.9
+      },
+      {
+        "eff": 0.91,
+        "kw": 8.97
+      },
+      {
+        "eff": 0.911,
+        "kw": 11.04
+      }
+    ],
+    "ev_energy_added_sensor": "sensor.kotek_energy_added",
+    "ev_location_sensor": "device_tracker.kotek_location_tracker",
+    "ev_max_current_a": 16,
+    "ev_min_current_a": 6,
+    "ev_odometer_sensor": "sensor.kotek_odometer",
+    "ev_plug_sensor": "binary_sensor.kotek_charger",
+    "ev_presence_entities": [
+      "person.dawid",
+      "device_tracker.iphone_dejv"
+    ],
+    "ev_soc_sensor": "sensor.kotek_battery",
+    "ev_target_soc_sensor": "number.kotek_charge_limit",
+    "gmaps_api_key": "***redacted***",
+    "grid_import_sensor": "sensor.victron_grid_power",
+    "sensor_parents": {
+      "sensor.bathroom_boiler_socket_energy": "sensor.tongou_m3_energy",
+      "sensor.bedroom_wardrobe_socket_energy": "sensor.tongou_m3_energy",
+      "sensor.salon_klimka_daily_energy": "sensor.tongou_m3_energy"
+    },
+    "soc_sensor": "sensor.victron_battery_soc",
+    "tariffs": [
+      {
+        "base_component_kwh": 0.0435,
+        "fixed_monthly_cost": 39.47,
+        "id": "5a00395c648242d88ffa1833f078540a",
+        "name": "Tauron G13 lato + Pstryk",
+        "periods": [
+          {
+            "day_sensor": "binary_sensor.workday_today",
+            "hour_from": 7,
+            "hour_to": 13,
+            "id": "7b0989d1dc57470c9c1ea5bee9b8a24f",
+            "name": "Szczyt przedpołudniowy",
+            "price_kwh": 0.2203
+          },
+          {
+            "day_sensor": "binary_sensor.workday_today",
+            "hour_from": 19,
+            "hour_to": 22,
+            "id": "0dd4ad6e904e46c8989a20e31016d98d",
+            "name": "Szczyt popołudniowy",
+            "price_kwh": 0.3898
+          },
+          {
+            "day_sensor": null,
+            "hour_from": 0,
+            "hour_to": 24,
+            "id": "061aec01eb314e30994de5304f4aaccd",
+            "name": "Pozaszczyt",
+            "price_kwh": 0.0392
+          }
+        ],
+        "validity_ranges": [
+          {
+            "id": "3b8b269822c14ce3816a6f0cbb8103af",
+            "valid_from": "2026-04-01",
+            "valid_to": "2026-09-30"
+          }
+        ],
+        "vat_rate": 0.23
+      }
+    ],
+    "weather_entity": "weather.kwiatowa"
+  },
+```
+
+---
+
+nie jestem przekonany do tego #late.. na razie olać to.
+
+1. czy potrzebujemy pole Maks. moc ładowania falownika (kW)* i min moc skoro mamy krzywą ładowania? trochę to powtórzone dla mnie
+2. Minimalny SoC (%)* / maksymalny Soc - tu powinno być dodane magazynu lub ESS (jeśli to dobry skrót) - żeby nie mylić z EV. czyli wszędzie gdzie jest ten soc 
+3. skąd on bierze obecny stan falownika? "Tryb falownika
+z baterii
+→
+passthrough
+≠" - nie wiem skąd te informacje
+
+---
+
+dobra, musimy teraz EV zdebugować. za dużo energii planuje. zobacz jak to wygląda obecnie:
+
+
+```
+ "ev_debug": {
+    "allocator_version": "early-energy-first-2026-07",
+    "request": {
+      "enabled": true,
+      "is_actionable": true,
+      "current_soc": 35,
+      "battery_kwh": 74.9,
+      "charger_kw": 3.68,
+      "phases": 3,
+      "charger_power_kw": 11.04,
+      "charge_efficiency": 0.91,
+      "required_kwh": 0,
+      "prefer_early": true,
+      "early_max_extra_pct": 5,
+      "prefer_contiguous": true,
+      "contiguous_max_extra_pct": 5,
+      "available_hours_count": 161,
+      "available_from": "2026-08-13T10:00:00+02:00",
+      "available_to": "2026-08-20T08:00:00+02:00",
+      "forced_hours": [],
+      "min_soc": 10,
+      "charge_ceiling_soc": 95,
+      "drain_total_kwh": 27.283,
+      "drain_hours": {
+        "2026-08-14T17:00:00+02:00": 14.081,
+        "2026-08-14T19:00:00+02:00": 5.026,
+        "2026-08-14T20:00:00+02:00": 5.026,
+        "2026-08-14T21:00:00+02:00": 1.575,
+        "2026-08-14T22:00:00+02:00": 1.575
+      },
+      "targets": [
+        {
+          "deadline": "2026-08-14T17:06:30+02:00",
+          "target_soc": 46.425523364485976,
+          "label": "Wyjazd: Wokal → Altus - trening",
+          "source": "trip"
+        },
+        {
+          "deadline": "2026-08-16T22:00:00+02:00",
+          "target_soc": 95,
+          "label": "Kotek 95%",
+          "source": "calendar"
+        }
+      ]
+    },
+    "planned_kwh_total": 72.22,
+    "hours": [
+      {
+        "start": "2026-08-13T13:00:00+02:00",
+        "buy_price": 0.162729,
+        "total_price_kwh": 0.26445,
+        "ev_charge_kwh": 10.046,
+        "ev_grid_kwh": 11.04,
+        "ev_minutes": 60,
+        "ev_soc": 48.4,
+        "available": true,
+        "forced": false
+      },
+      {
+        "start": "2026-08-15T10:00:00+02:00",
+        "buy_price": 0.120909,
+        "total_price_kwh": 0.22263,
+        "ev_charge_kwh": 10.046,
+        "ev_grid_kwh": 11.04,
+        "ev_minutes": 60,
+        "ev_soc": 25.4,
+        "available": true,
+        "forced": false
+      },
+      {
+        "start": "2026-08-15T11:00:00+02:00",
+        "buy_price": 0.067404,
+        "total_price_kwh": 0.169125,
+        "ev_charge_kwh": 10.046,
+        "ev_grid_kwh": 11.04,
+        "ev_minutes": 60,
+        "ev_soc": 38.8,
+        "available": true,
+        "forced": false
+      },
+      {
+        "start": "2026-08-15T12:00:00+02:00",
+        "buy_price": 0.038745,
+        "total_price_kwh": 0.14046599999999998,
+        "ev_charge_kwh": 10.046,
+        "ev_grid_kwh": 11.04,
+        "ev_minutes": 60,
+        "ev_soc": 52.2,
+        "available": true,
+        "forced": false
+      },
+      {
+        "start": "2026-08-15T13:00:00+02:00",
+        "buy_price": 0.039852,
+        "total_price_kwh": 0.141573,
+        "ev_charge_kwh": 10.046,
+        "ev_grid_kwh": 11.04,
+        "ev_minutes": 60,
+        "ev_soc": 65.6,
+        "available": true,
+        "forced": false
+      },
+      {
+        "start": "2026-08-15T14:00:00+02:00",
+        "buy_price": 0.022509000000000005,
+        "total_price_kwh": 0.12423,
+        "ev_charge_kwh": 10.046,
+        "ev_grid_kwh": 11.04,
+        "ev_minutes": 60,
+        "ev_soc": 79.1,
+        "available": true,
+        "forced": false
+      },
+      {
+        "start": "2026-08-15T15:00:00+02:00",
+        "buy_price": 0.055842,
+        "total_price_kwh": 0.157563,
+        "ev_charge_kwh": 10.046,
+        "ev_grid_kwh": 11.04,
+        "ev_minutes": 60,
+        "ev_soc": 92.5,
+        "available": true,
+        "forced": false
+      },
+      {
+        "start": "2026-08-15T16:00:00+02:00",
+        "buy_price": 0.23111700000000002,
+        "total_price_kwh": 0.332838,
+        "ev_charge_kwh": 1.898,
+        "ev_grid_kwh": 2.086,
+        "ev_minutes": 12,
+        "ev_soc": 95,
+        "available": true,
+        "forced": false
+      }
+    ]
+  },
+  "status": {
+    "version": "1.33.0",
+    "last_update": "2026-08-13T09:00:23.189269+02:00",
+    "horizon_hours": 168,
+    "price_archive_hours": 1392,
+    "consumption_days": 21,
+    "consumption_devices": [
+      "sensor.salon_klimka_daily_energy",
+      "sensor.bathroom_boiler_socket_energy",
+      "sensor.tongou_m3_energy",
+      "sensor.garage_server_socket_energy",
+      "sensor.bedroom_wardrobe_socket_energy"
+    ],
+    "ev_enabled": true,
+    "ev": {
+      "enabled": true,
+      "available": true,
+      "home": true,
+      "plugged": false,
+      "chargeable_now": false,
+      "soc": 35,
+      "target_soc": 80,
+      "soc_limit": 95,
+      "charge_ceiling_soc": 95,
+      "energy_added_kwh": 31.92,
+      "charging": false,
+      "charger_power_kw": 11.040000000000001,
+      "capacity_kwh": 74.9,
+      "capacity_source": "learned",
+      "capacity_sessions": 7,
+      "capacity_ready": true,
+      "min_capacity_sessions": 3,
+      "kwh_per_km": 0.3267,
+      "drain_days": 68,
+      "drain_next24_kwh": 13.08428888888889,
+      "min_soc": 10,
+      "charge_efficiency": 0.91,
+      "targets": [
+        {
+          "deadline": "2026-08-14T17:06:30+02:00",
+          "target_soc": 46.425523364485976,
+          "label": "Wyjazd: Wokal → Altus - trening",
+          "source": "trip",
+          "reserve_soc": 10,
+          "trip_soc": 36.425523364485976
+        },
+        {
+          "deadline": "2026-08-16T22:00:00+02:00",
+          "target_soc": 95,
+          "label": "Kotek 95%",
+          "source": "calendar",
+          "reserve_soc": null,
+          "trip_soc": null
+        }
+      ],
+      "forced_hours": [],
+      "trips": [
+        {
+          "label": "Wokal",
+          "location": "Kozielska 52\nGliwice, Polska",
+          "event_start": "2026-08-14T18:00:00+02:00",
+          "event_end": "2026-08-14T19:00:00+02:00",
+          "depart": "2026-08-14T17:06:30+02:00",
+          "return_end": "2026-08-14T19:25:30+02:00",
+          "distance_km": 43.1,
+          "duration_min": 33.5,
+          "origin_location": "home",
+          "return_location": "Kozielska 52\nGliwice, Polska",
+          "outbound_distance_km": 43.1,
+          "return_distance_km": null,
+          "outbound_duration_min": 33.5,
+          "return_duration_min": null,
+          "energy_kwh": 14.08
+        },
+        {
+          "label": "Altus - trening",
+          "location": "ALTUS\nUniwersytecka 13, 40-007 Katowice, Polska",
+          "event_start": "2026-08-14T20:15:00+02:00",
+          "event_end": "2026-08-14T21:45:00+02:00",
+          "depart": "2026-08-14T19:25:30+02:00",
+          "return_end": "2026-08-14T22:01:36+02:00",
+          "distance_km": 30.77,
+          "duration_min": 29.5,
+          "origin_location": "Kozielska 52\nGliwice, Polska",
+          "return_location": "home",
+          "outbound_distance_km": 30.77,
+          "return_distance_km": 9.64,
+          "outbound_duration_min": 29.5,
+          "return_duration_min": 16.6,
+          "energy_kwh": 13.2
+        }
+      ],
+      "control": {
+        "enabled": true,
+        "connect_charger": true,
+        "charging_now": false,
+        "charge_start": "2026-08-13T13:00:00+02:00",
+        "soc_limit": 95,
+        "soc": 35,
+        "charge_minutes": 60
+      },
+      "planned_hours": [
+        {
+          "start": "2026-08-13T13:00:00+02:00",
+          "kwh": 10.046
+        },
+        {
+          "start": "2026-08-15T10:00:00+02:00",
+          "kwh": 10.046
+        },
+        {
+          "start": "2026-08-15T11:00:00+02:00",
+          "kwh": 10.046
+        },
+        {
+          "start": "2026-08-15T12:00:00+02:00",
+          "kwh": 10.046
+        },
+        {
+          "start": "2026-08-15T13:00:00+02:00",
+          "kwh": 10.046
+        },
+        {
+          "start": "2026-08-15T14:00:00+02:00",
+          "kwh": 10.046
+        },
+        {
+          "start": "2026-08-15T15:00:00+02:00",
+          "kwh": 10.046
+        },
+        {
+          "start": "2026-08-15T16:00:00+02:00",
+          "kwh": 1.898
+        }
+      ]
+    },
+```
+
+---
+
+<task-notification>
+<task-id>bngb4dnnk</task-id>
+<tool-use-id>toolu_01SqZgV69H1p5k2s692LoAv7</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/4d559ac0-adb5-4b82-bb9e-ed66cbd31b55/tasks/bngb4dnnk.output</output-file>
+<status>completed</status>
+<summary>Background command "Wait for release CI and report the new tag" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+```
+zrób jakoś generowanie debug, żebym nie wykorzystywał za dużo tokenów. np. tylko na najbliższe 24h czy coś.. (do wyboru).
+
+dalej trochę za dużo zużycia EV planuje - pokaż jak to teraz działa na danych poniżej to zobaczymy co wychodzi za dużo jeszcze
+
+
+{
+  "generated_at": "2026-08-13T12:49:22.913701+02:00",
+  "config": {
+    "phases": 3,
+    "main_fuse_a": 32,
+    "grid_voltage": 230,
+    "battery_capacity_kwh": 30,
+    "inverter_max_charge_kw": 7.3,
+    "min_charge_power_kw": 1,
+    "inverter_max_discharge_kw": 11,
+    "charge_efficiency": 0.92,
+    "discharge_efficiency": 0.96,
+    "battery_wear_cost": 0.01,
+    "min_soc": 6,
+    "max_soc": 100,
+    "price_source": "pradcast",
+    "price_markup": 0.08,
+    "price_vat": 1.23,
+    "excise_kwh": 0,
+    "price_rounding": "per_bucket",
+    "price_refresh_hours": 3,
+    "consumption_learn_days": 21,
+    "ev_enabled": true,
+    "ev_charger_kw": 3.68,
+    "ev_charger_phase": 1,
+    "ev_charger_phases": "3",
+    "ev_charge_efficiency": 0.91,
+    "ev_behind_meter": false,
+    "ev_calendar_keyword": "Kotek",
+    "ev_prefer_contiguous": true,
+    "ev_contiguous_max_extra_pct": 5,
+    "ev_prefer_early": true,
+    "ev_early_max_extra_pct": 5,
+    "travel_margin_before_min": 20,
+    "travel_margin_after_min": 0,
+    "ev_battery_kwh": 72,
+    "ev_range_km": 330,
+    "ev_weekly_km": 200,
+    "grid_disconnect_soc": 15,
+    "pradcast_api_key": "***redacted***",
+    "battery_charge_sensor": "sensor.victron_battery_kwh_in",
+    "battery_discharge_sensor": "sensor.victron_battery_kwh_out",
+    "calendars": [
+      "calendar.dom",
+      "calendar.dszwajca2_gmail_com"
+    ],
+    "charge_curve": [
+      {
+        "max_kw": 6,
+        "soc_from": 0,
+        "soc_to": 11
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 11,
+        "soc_to": 31
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 31,
+        "soc_to": 51
+      },
+      {
+        "max_kw": 7.3,
+        "soc_from": 51,
+        "soc_to": 71
+      },
+      {
+        "max_kw": 7,
+        "soc_from": 71,
+        "soc_to": 91
+      },
+      {
+        "max_kw": 2.7,
+        "soc_from": 91,
+        "soc_to": 101
+      }
+    ],
+    "charge_efficiency_curve": [
+      {
+        "eff": 0.711,
+        "kw": 0.18
+      },
+      {
+        "eff": 0.806,
+        "kw": 0.33
+      },
+      {
+        "eff": 0.838,
+        "kw": 0.394
+      },
+      {
+        "eff": 0.848,
+        "kw": 0.434
+      },
+      {
+        "eff": 0.865,
+        "kw": 0.532
+      },
+      {
+        "eff": 0.895,
+        "kw": 0.76
+      },
+      {
+        "eff": 0.913,
+        "kw": 0.964
+      },
+      {
+        "eff": 0.92,
+        "kw": 1.228
+      },
+      {
+        "eff": 0.923,
+        "kw": 1.516
+      },
+      {
+        "eff": 0.927,
+        "kw": 2.006
+      },
+      {
+        "eff": 0.928,
+        "kw": 2.78
+      },
+      {
+        "eff": 0.925,
+        "kw": 3.532
+      },
+      {
+        "eff": 0.919,
+        "kw": 4.744
+      },
+      {
+        "eff": 0.907,
+        "kw": 6
+      },
+      {
+        "eff": 0.886,
+        "kw": 7.52
+      }
+    ],
+    "climate_presence_sensors": [
+      "device_tracker.iphone_dejv"
+    ],
+    "climate_sensor": "sensor.salon_klimka_daily_energy",
+    "climate_sensors": [
+      "sensor.salon_klimka_daily_energy"
+    ],
+    "consumption_sensor": "sensor.victron_ac_load",
+    "device_sensors": [
+      "sensor.salon_klimka_daily_energy",
+      "sensor.bathroom_boiler_socket_energy",
+      "sensor.tongou_m3_energy",
+      "sensor.garage_server_socket_energy",
+      "sensor.bedroom_wardrobe_socket_energy"
+    ],
+    "ev_calendar": "calendar.test",
+    "ev_charger_connected_sensor": "binary_sensor.kotek_charger",
+    "ev_charging_sensor": "binary_sensor.kotek_charging",
+    "ev_current_control": true,
+    "ev_efficiency_curve": [
+      {
+        "eff": 0.874,
+        "kw": 4.14
+      },
+      {
+        "eff": 0.908,
+        "kw": 5.52
+      },
+      {
+        "eff": 0.927,
+        "kw": 6.9
+      },
+      {
+        "eff": 0.91,
+        "kw": 8.97
+      },
+      {
+        "eff": 0.911,
+        "kw": 11.04
+      }
+    ],
+    "ev_energy_added_sensor": "sensor.kotek_energy_added",
+    "ev_location_sensor": "device_tracker.kotek_location_tracker",
+    "ev_max_current_a": 16,
+    "ev_min_current_a": 6,
+    "ev_odometer_sensor": "sensor.kotek_odometer",
+    "ev_plug_sensor": "binary_sensor.kotek_charger",
+    "ev_presence_entities": [
+      "person.dawid",
+      "device_tracker.iphone_dejv"
+    ],
+    "ev_soc_sensor": "sensor.kotek_battery",
+    "ev_target_soc_sensor": "number.kotek_charge_limit",
+    "gmaps_api_key": "***redacted***",
+    "grid_import_sensor": "sensor.victron_grid_power",
+    "sensor_parents": {
+      "sensor.bathroom_boiler_socket_energy": "sensor.tongou_m3_energy",
+      "sensor.bedroom_wardrobe_socket_energy": "sensor.tongou_m3_energy",
+      "sensor.salon_klimka_daily_energy": "sensor.tongou_m3_energy"
+    },
+    "soc_sensor": "sensor.victron_battery_soc",
+    "tariffs": [
+      {
+        "base_component_kwh": 0.0435,
+        "fixed_monthly_cost": 39.47,
+        "id": "5a00395c648242d88ffa1833f078540a",
+        "name": "Tauron G13 lato + Pstryk",
+        "periods": [
+          {
+            "day_sensor": "binary_sensor.workday_today",
+            "hour_from": 7,
+            "hour_to": 13,
+            "id": "7b0989d1dc57470c9c1ea5bee9b8a24f",
+            "name": "Szczyt przedpołudniowy",
+            "price_kwh": 0.2203
+          },
+          {
+            "day_sensor": "binary_sensor.workday_today",
+            "hour_from": 19,
+            "hour_to": 22,
+            "id": "0dd4ad6e904e46c8989a20e31016d98d",
+            "name": "Szczyt popołudniowy",
+            "price_kwh": 0.3898
+          },
+          {
+            "day_sensor": null,
+            "hour_from": 0,
+            "hour_to": 24,
+            "id": "061aec01eb314e30994de5304f4aaccd",
+            "name": "Pozaszczyt",
+            "price_kwh": 0.0392
+          }
+        ],
+        "validity_ranges": [
+          {
+            "id": "3b8b269822c14ce3816a6f0cbb8103af",
+            "valid_from": "2026-04-01",
+            "valid_to": "2026-09-30"
+          }
+        ],
+        "vat_rate": 0.23
+      }
+    ],
+    "weather_entity": "weather.kwiatowa"
+  },
+ "trips": [
+      {
+        "label": "Luxmed",
+        "location": "Francuska 36\nKatowice, Polska",
+        "event_start": "2026-08-12T08:00:00+02:00",
+        "event_end": "2026-08-12T09:00:00+02:00",
+        "depart": "2026-08-12T07:25:12+02:00",
+        "return_end": "2026-08-12T09:15:24+02:00",
+        "distance_km": 12.83,
+        "duration_min": 14.8,
+        "origin_location": "home",
+        "return_location": "home",
+        "outbound_distance_km": 12.83,
+        "return_distance_km": 12.97,
+        "outbound_duration_min": 14.8,
+        "return_duration_min": 15.4,
+        "energy_kwh": 8.6
+      },
+      {
+        "label": "Wokal",
+        "location": "Kozielska 52\nGliwice, Polska",
+        "event_start": "2026-08-12T18:00:00+02:00",
+        "event_end": "2026-08-12T19:00:00+02:00",
+        "depart": "2026-08-12T17:06:30+02:00",
+        "return_end": "2026-08-12T19:35:18+02:00",
+        "distance_km": 43.1,
+        "duration_min": 33.5,
+        "origin_location": "home",
+        "return_location": "home",
+        "outbound_distance_km": 43.1,
+        "return_distance_km": 45.12,
+        "outbound_duration_min": 33.5,
+        "return_duration_min": 35.3,
+        "energy_kwh": 29.42
+      },
+      {
+        "label": "Altus - trening #continue",
+        "location": "ALTUS\nUniwersytecka 13, 40-007 Katowice, Polska",
+        "event_start": "2026-08-12T20:35:00+02:00",
+        "event_end": "2026-08-12T22:05:00+02:00",
+        "depart": "2026-08-12T19:56:12+02:00",
+        "return_end": "2026-08-12T22:21:36+02:00",
+        "distance_km": 10.62,
+        "duration_min": 18.8,
+        "origin_location": "home",
+        "return_location": "home",
+        "outbound_distance_km": 10.62,
+        "return_distance_km": 9.64,
+        "outbound_duration_min": 18.8,
+        "return_duration_min": 16.6,
+        "energy_kwh": 6.76
+      },
+      {
+        "label": "Wokal",
+        "location": "Kozielska 52\nGliwice, Polska",
+        "event_start": "2026-08-14T18:00:00+02:00",
+        "event_end": "2026-08-14T19:00:00+02:00",
+        "depart": "2026-08-14T17:06:30+02:00",
+        "return_end": "2026-08-14T19:25:30+02:00",
+        "distance_km": 43.1,
+        "duration_min": 33.5,
+        "origin_location": "home",
+        "return_location": "Kozielska 52\nGliwice, Polska",
+        "outbound_distance_km": 43.1,
+        "return_distance_km": null,
+        "outbound_duration_min": 33.5,
+        "return_duration_min": null,
+        "energy_kwh": 14.08
+      },
+      {
+        "label": "Altus - trening",
+        "location": "ALTUS\nUniwersytecka 13, 40-007 Katowice, Polska",
+        "event_start": "2026-08-14T20:15:00+02:00",
+        "event_end": "2026-08-14T21:45:00+02:00",
+        "depart": "2026-08-14T19:25:30+02:00",
+        "return_end": "2026-08-14T22:01:36+02:00",
+        "distance_km": 30.77,
+        "duration_min": 29.5,
+        "origin_location": "Kozielska 52\nGliwice, Polska",
+        "return_location": "home",
+        "outbound_distance_km": 30.77,
+        "return_distance_km": 9.64,
+        "outbound_duration_min": 29.5,
+        "return_duration_min": 16.6,
+        "energy_kwh": 13.2
+      }
+    ],
+    "forecast_pin": null
+  },
+  "sensor_reads": [
+    {
+      "entity_id": "sensor.victron_ac_load",
+      "available": true,
+      "state": "2563",
+      "unit_of_measurement": "W",
+      "state_class": "measurement",
+      "detected_kind": "power",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 48,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0.69
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0.791
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0.65
+        }
+      ],
+      "config_key": "consumption_sensor"
+    },
+    {
+      "entity_id": "sensor.victron_battery_kwh_in",
+      "available": true,
+      "state": "6148.599244318154582342880125",
+      "unit_of_measurement": "kWh",
+      "state_class": "total",
+      "detected_kind": "energy",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 47,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0
+        }
+      ],
+      "config_key": "battery_charge_sensor"
+    },
+    {
+      "entity_id": "sensor.victron_battery_kwh_out",
+      "available": true,
+      "state": "5766.31",
+      "unit_of_measurement": "kWh",
+      "state_class": "total",
+      "detected_kind": "energy",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 47,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0.69
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0.79
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0.65
+        }
+      ],
+      "config_key": "battery_discharge_sensor"
+    },
+    {
+      "entity_id": "sensor.victron_grid_power",
+      "available": true,
+      "state": "2564",
+      "unit_of_measurement": "W",
+      "state_class": "measurement",
+      "detected_kind": "power",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 48,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0.035
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0.035
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0.034
+        }
+      ],
+      "config_key": "grid_import_sensor"
+    },
+    {
+      "entity_id": "sensor.victron_battery_soc",
+      "available": true,
+      "state": "9",
+      "unit_of_measurement": "%",
+      "state_class": "measurement",
+      "detected_kind": null,
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 0,
+      "samples": [],
+      "config_key": "soc_sensor"
+    },
+    {
+      "entity_id": "sensor.salon_klimka_daily_energy",
+      "available": true,
+      "state": "0.93",
+      "unit_of_measurement": "kWh",
+      "state_class": "total_increasing",
+      "detected_kind": "energy",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 47,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0.38
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0.27
+        }
+      ],
+      "config_key": "device_sensors"
+    },
+    {
+      "entity_id": "sensor.bathroom_boiler_socket_energy",
+      "available": true,
+      "state": "1423.47",
+      "unit_of_measurement": "kWh",
+      "state_class": "total_increasing",
+      "detected_kind": "energy",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 47,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0
+        }
+      ],
+      "config_key": "device_sensors"
+    },
+    {
+      "entity_id": "sensor.tongou_m3_energy",
+      "available": true,
+      "state": "5557.54",
+      "unit_of_measurement": "kWh",
+      "state_class": "total_increasing",
+      "detected_kind": "energy",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 47,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0.5
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0.61
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0.45
+        }
+      ],
+      "config_key": "device_sensors"
+    },
+    {
+      "entity_id": "sensor.garage_server_socket_energy",
+      "available": true,
+      "state": "182.1",
+      "unit_of_measurement": "kWh",
+      "state_class": "total_increasing",
+      "detected_kind": "energy",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 47,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0.2
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0.2
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0.2
+        }
+      ],
+      "config_key": "device_sensors"
+    },
+    {
+      "entity_id": "sensor.bedroom_wardrobe_socket_energy",
+      "available": true,
+      "state": "35.33",
+      "unit_of_measurement": "kWh",
+      "state_class": "total_increasing",
+      "detected_kind": "energy",
+      "stat_rows_sum": 48,
+      "stat_rows_mean": 48,
+      "series_hours": 47,
+      "samples": [
+        {
+          "hour": "2026-08-13T09:00:00+02:00",
+          "kwh": 0
+        },
+        {
+          "hour": "2026-08-13T10:00:00+02:00",
+          "kwh": 0
+        },
+        {
+          "hour": "2026-08-13T11:00:00+02:00",
+          "kwh": 0.04
+        }
+      ],
+      "config_key": "device_sensors"
+    }
+  ],
+  "log": [
+    {
+      "time": "2026-08-13T12:00:05.685488+02:00",
+      "type": "plan",
+      "module": "coordinator",
+      "message": "Plan 168h horizon, action=passthrough",
+      "horizon_hours": 168,
+      "action": "passthrough",
+      "ev_charge": false,
+      "battery_soc": 10,
+      "errors": []
+    },
+    {
+      "time": "2026-08-13T12:00:01.146273+02:00",
+      "type": "info",
+      "module": "loads",
+      "message": "Brak zaplanowanych ładunków na horyzoncie."
+    },
+    {
+      "time": "2026-08-13T12:00:01.146245+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Klimat (salon_klimka_daily_energy): 19.0 kWh na 143h horyzontu (model temperaturowy).",
+      "extra": {
+        "hours": 143,
+        "total_kwh": 19.03
+      }
+    },
+    {
+      "time": "2026-08-13T12:00:01.127165+02:00",
+      "type": "info",
+      "module": "ev",
+      "message": "EV: SoC=34.0%, pojemność=74.9 kWh (learned, 7 sesji), zużycie=0.3267 kWh/km (68 dni), cel=80.0%, w domu=True, podłączony=False, ładuje=False, godziny niedostępne=6, deadline'y=1, wyjazdy=1, godziny ręczne=0.",
+      "extra": {
+        "soc": 34,
+        "target_soc": 80,
+        "min_soc": 10,
+        "energy_added_kwh": 31.92,
+        "home": true,
+        "plugged": false,
+        "charging": false,
+        "unavailable_hours": 6,
+        "targets": 1,
+        "trip_targets": 1,
+        "forced_hours": 0,
+        "trip_drain_kwh": 27.28
+      }
+    },
+    {
+      "time": "2026-08-13T12:00:01.126967+02:00",
+      "type": "info",
+      "module": "calendar",
+      "message": "Kalendarze: 2 źródeł, 3 wydarzeń, 2 wyjazdów (z lokalizacją).",
+      "extra": {
+        "calendars": [
+          "calendar.dom",
+          "calendar.dszwajca2_gmail_com"
+        ],
+        "events": 3,
+        "trips": [
+          {
+            "label": "Wokal",
+            "location": "Kozielska 52\nGliwice, Polska",
+            "depart": "2026-08-14T17:06:30+02:00",
+            "return_end": "2026-08-14T19:25:30+02:00",
+            "distance_km": 43.1
+          },
+          {
+            "label": "Altus - trening",
+            "location": "ALTUS\nUniwersytecka 13, 40-007 Katowice, Polska",
+            "depart": "2026-08-14T19:25:30+02:00",
+            "return_end": "2026-08-14T22:01:36+02:00",
+            "distance_km": 30.77
+          }
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T12:00:00.421176+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Profile temperaturowe — salon_klimka_daily_energy: 27 dni; temperatura zapisana dla 633 godzin.",
+      "extra": {
+        "sensors": {
+          "sensor.salon_klimka_daily_energy": {
+            "observed_days": 27,
+            "samples": 507,
+            "ready": true
+          }
+        }
+      }
+    },
+    {
+      "time": "2026-08-13T12:00:00.418266+02:00",
+      "type": "info",
+      "module": "weather",
+      "message": "Prognoza temperatury: 24 godzin (encja weather.kwiatowa).",
+      "extra": {
+        "entity": "weather.kwiatowa",
+        "hours": 24
+      }
+    },
+    {
+      "time": "2026-08-13T12:00:00.416984+02:00",
+      "type": "info",
+      "module": "consumption",
+      "message": "Profil: baza 21 dni / 504 próbek, urządzeń 5.",
+      "extra": {
+        "base_days": 21,
+        "base_samples": 504,
+        "devices": 5,
+        "device_ids": [
+          "sensor.salon_klimka_daily_energy",
+          "sensor.bathroom_boiler_socket_energy",
+          "sensor.tongou_m3_energy",
+          "sensor.garage_server_socket_energy",
+          "sensor.bedroom_wardrobe_socket_energy"
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T12:00:00.416931+02:00",
+      "type": "info",
+      "module": "tariff",
+      "message": "Aktywna taryfa: Tauron G13 lato + Pstryk (składnik bazowy 0.0435 PLN/kWh, 3 okresów). Snapshot: 3213 godzin. Cache klasyfikacji dni: 7.",
+      "extra": {
+        "tariff_name": "Tauron G13 lato + Pstryk",
+        "periods": 3,
+        "base_component_kwh": 0.0435,
+        "snapshot_hours": 3213,
+        "future_day_cache": 7
+      }
+    },
+    {
+      "time": "2026-08-13T12:00:00.416723+02:00",
+      "type": "info",
+      "module": "prices",
+      "message": "Źródło pradcast: 48h potwierdzonych + 48h prognozy (do 2026-08-16T23:00:00+02:00). Archiwum: 1392 godzin.",
+      "extra": {
+        "source": "pradcast",
+        "confirmed_hours": 48,
+        "forecast_hours": 48,
+        "last_priced_hour": "2026-08-16T23:00:00+02:00",
+        "archive_hours": 1392
+      }
+    },
+    {
+      "time": "2026-08-13T11:00:04.994833+02:00",
+      "type": "plan",
+      "module": "coordinator",
+      "message": "Plan 168h horizon, action=discharge",
+      "horizon_hours": 168,
+      "action": "discharge",
+      "ev_charge": false,
+      "battery_soc": 9,
+      "errors": []
+    },
+    {
+      "time": "2026-08-13T11:00:01.840311+02:00",
+      "type": "info",
+      "module": "loads",
+      "message": "Brak zaplanowanych ładunków na horyzoncie."
+    },
+    {
+      "time": "2026-08-13T11:00:01.840286+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Klimat (salon_klimka_daily_energy): 19.1 kWh na 143h horyzontu (model temperaturowy).",
+      "extra": {
+        "hours": 143,
+        "total_kwh": 19.11
+      }
+    },
+    {
+      "time": "2026-08-13T11:00:01.822680+02:00",
+      "type": "info",
+      "module": "ev",
+      "message": "EV: SoC=34.0%, pojemność=74.9 kWh (learned, 7 sesji), zużycie=0.3267 kWh/km (68 dni), cel=80.0%, w domu=True, podłączony=False, ładuje=False, godziny niedostępne=6, deadline'y=1, wyjazdy=1, godziny ręczne=0.",
+      "extra": {
+        "soc": 34,
+        "target_soc": 80,
+        "min_soc": 10,
+        "energy_added_kwh": 31.92,
+        "home": true,
+        "plugged": false,
+        "charging": false,
+        "unavailable_hours": 6,
+        "targets": 1,
+        "trip_targets": 1,
+        "forced_hours": 0,
+        "trip_drain_kwh": 27.28
+      }
+    },
+    {
+      "time": "2026-08-13T11:00:01.822437+02:00",
+      "type": "info",
+      "module": "calendar",
+      "message": "Kalendarze: 2 źródeł, 3 wydarzeń, 2 wyjazdów (z lokalizacją).",
+      "extra": {
+        "calendars": [
+          "calendar.dom",
+          "calendar.dszwajca2_gmail_com"
+        ],
+        "events": 3,
+        "trips": [
+          {
+            "label": "Wokal",
+            "location": "Kozielska 52\nGliwice, Polska",
+            "depart": "2026-08-14T17:06:30+02:00",
+            "return_end": "2026-08-14T19:25:30+02:00",
+            "distance_km": 43.1
+          },
+          {
+            "label": "Altus - trening",
+            "location": "ALTUS\nUniwersytecka 13, 40-007 Katowice, Polska",
+            "depart": "2026-08-14T19:25:30+02:00",
+            "return_end": "2026-08-14T22:01:36+02:00",
+            "distance_km": 30.77
+          }
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T11:00:00.863492+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Profile temperaturowe — salon_klimka_daily_energy: 27 dni; temperatura zapisana dla 632 godzin.",
+      "extra": {
+        "sensors": {
+          "sensor.salon_klimka_daily_energy": {
+            "observed_days": 27,
+            "samples": 507,
+            "ready": true
+          }
+        }
+      }
+    },
+    {
+      "time": "2026-08-13T11:00:00.859884+02:00",
+      "type": "info",
+      "module": "weather",
+      "message": "Prognoza temperatury: 24 godzin (encja weather.kwiatowa).",
+      "extra": {
+        "entity": "weather.kwiatowa",
+        "hours": 24
+      }
+    },
+    {
+      "time": "2026-08-13T11:00:00.009900+02:00",
+      "type": "info",
+      "module": "consumption",
+      "message": "Profil: baza 21 dni / 504 próbek, urządzeń 5.",
+      "extra": {
+        "base_days": 21,
+        "base_samples": 504,
+        "devices": 5,
+        "device_ids": [
+          "sensor.salon_klimka_daily_energy",
+          "sensor.bathroom_boiler_socket_energy",
+          "sensor.tongou_m3_energy",
+          "sensor.garage_server_socket_energy",
+          "sensor.bedroom_wardrobe_socket_energy"
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T11:00:00.009843+02:00",
+      "type": "info",
+      "module": "tariff",
+      "message": "Aktywna taryfa: Tauron G13 lato + Pstryk (składnik bazowy 0.0435 PLN/kWh, 3 okresów). Snapshot: 3212 godzin. Cache klasyfikacji dni: 7.",
+      "extra": {
+        "tariff_name": "Tauron G13 lato + Pstryk",
+        "periods": 3,
+        "base_component_kwh": 0.0435,
+        "snapshot_hours": 3212,
+        "future_day_cache": 7
+      }
+    },
+    {
+      "time": "2026-08-13T11:00:00.009662+02:00",
+      "type": "info",
+      "module": "prices",
+      "message": "Ceny z pamięci podręcznej (następne pobranie ~11:44). Archiwum: 1392 godzin.",
+      "extra": {
+        "cached": true,
+        "next_fetch": "2026-08-13T11:44:03.064584+02:00",
+        "archive_hours": 1392
+      }
+    },
+    {
+      "time": "2026-08-13T10:00:05.175376+02:00",
+      "type": "plan",
+      "module": "coordinator",
+      "message": "Plan 168h horizon, action=discharge",
+      "horizon_hours": 168,
+      "action": "discharge",
+      "ev_charge": false,
+      "battery_soc": 12.2,
+      "errors": []
+    },
+    {
+      "time": "2026-08-13T10:00:00.775690+02:00",
+      "type": "info",
+      "module": "loads",
+      "message": "Brak zaplanowanych ładunków na horyzoncie."
+    },
+    {
+      "time": "2026-08-13T10:00:00.775666+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Klimat (salon_klimka_daily_energy): 19.0 kWh na 142h horyzontu (model temperaturowy).",
+      "extra": {
+        "hours": 142,
+        "total_kwh": 18.96
+      }
+    },
+    {
+      "time": "2026-08-13T10:00:00.745145+02:00",
+      "type": "info",
+      "module": "ev",
+      "message": "EV: SoC=35.0%, pojemność=74.9 kWh (learned, 7 sesji), zużycie=0.3267 kWh/km (68 dni), cel=80.0%, w domu=True, podłączony=False, ładuje=False, godziny niedostępne=6, deadline'y=1, wyjazdy=1, godziny ręczne=0.",
+      "extra": {
+        "soc": 35,
+        "target_soc": 80,
+        "min_soc": 10,
+        "energy_added_kwh": 31.92,
+        "home": true,
+        "plugged": false,
+        "charging": false,
+        "unavailable_hours": 6,
+        "targets": 1,
+        "trip_targets": 1,
+        "forced_hours": 0,
+        "trip_drain_kwh": 27.28
+      }
+    },
+    {
+      "time": "2026-08-13T10:00:00.744855+02:00",
+      "type": "info",
+      "module": "calendar",
+      "message": "Kalendarze: 2 źródeł, 3 wydarzeń, 2 wyjazdów (z lokalizacją).",
+      "extra": {
+        "calendars": [
+          "calendar.dom",
+          "calendar.dszwajca2_gmail_com"
+        ],
+        "events": 3,
+        "trips": [
+          {
+            "label": "Wokal",
+            "location": "Kozielska 52\nGliwice, Polska",
+            "depart": "2026-08-14T17:06:30+02:00",
+            "return_end": "2026-08-14T19:25:30+02:00",
+            "distance_km": 43.1
+          },
+          {
+            "label": "Altus - trening",
+            "location": "ALTUS\nUniwersytecka 13, 40-007 Katowice, Polska",
+            "depart": "2026-08-14T19:25:30+02:00",
+            "return_end": "2026-08-14T22:01:36+02:00",
+            "distance_km": 30.77
+          }
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T10:00:00.020928+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Profile temperaturowe — salon_klimka_daily_energy: 27 dni; temperatura zapisana dla 631 godzin.",
+      "extra": {
+        "sensors": {
+          "sensor.salon_klimka_daily_energy": {
+            "observed_days": 27,
+            "samples": 507,
+            "ready": true
+          }
+        }
+      }
+    },
+    {
+      "time": "2026-08-13T10:00:00.016097+02:00",
+      "type": "info",
+      "module": "weather",
+      "message": "Prognoza temperatury: 24 godzin (encja weather.kwiatowa).",
+      "extra": {
+        "entity": "weather.kwiatowa",
+        "hours": 24
+      }
+    },
+    {
+      "time": "2026-08-13T10:00:00.014810+02:00",
+      "type": "info",
+      "module": "consumption",
+      "message": "Profil: baza 21 dni / 504 próbek, urządzeń 5.",
+      "extra": {
+        "base_days": 21,
+        "base_samples": 504,
+        "devices": 5,
+        "device_ids": [
+          "sensor.salon_klimka_daily_energy",
+          "sensor.bathroom_boiler_socket_energy",
+          "sensor.tongou_m3_energy",
+          "sensor.garage_server_socket_energy",
+          "sensor.bedroom_wardrobe_socket_energy"
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T10:00:00.014738+02:00",
+      "type": "info",
+      "module": "tariff",
+      "message": "Aktywna taryfa: Tauron G13 lato + Pstryk (składnik bazowy 0.0435 PLN/kWh, 3 okresów). Snapshot: 3211 godzin. Cache klasyfikacji dni: 7.",
+      "extra": {
+        "tariff_name": "Tauron G13 lato + Pstryk",
+        "periods": 3,
+        "base_component_kwh": 0.0435,
+        "snapshot_hours": 3211,
+        "future_day_cache": 7
+      }
+    },
+    {
+      "time": "2026-08-13T10:00:00.014365+02:00",
+      "type": "info",
+      "module": "prices",
+      "message": "Ceny z pamięci podręcznej (następne pobranie ~11:44). Archiwum: 1392 godzin.",
+      "extra": {
+        "cached": true,
+        "next_fetch": "2026-08-13T11:44:03.064584+02:00",
+        "archive_hours": 1392
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:23.189269+02:00",
+      "type": "plan",
+      "module": "coordinator",
+      "message": "Plan 168h horizon, action=discharge",
+      "horizon_hours": 168,
+      "action": "discharge",
+      "ev_charge": false,
+      "battery_soc": 16.2,
+      "errors": []
+    },
+    {
+      "time": "2026-08-13T09:00:20.520312+02:00",
+      "type": "info",
+      "module": "loads",
+      "message": "Brak zaplanowanych ładunków na horyzoncie."
+    },
+    {
+      "time": "2026-08-13T09:00:20.520293+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Klimat (salon_klimka_daily_energy): 18.9 kWh na 142h horyzontu (model temperaturowy).",
+      "extra": {
+        "hours": 142,
+        "total_kwh": 18.94
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:20.507803+02:00",
+      "type": "info",
+      "module": "ev",
+      "message": "EV: SoC=35.0%, pojemność=74.9 kWh (learned, 7 sesji), zużycie=0.3267 kWh/km (68 dni), cel=80.0%, w domu=True, podłączony=False, ładuje=False, godziny niedostępne=6, deadline'y=1, wyjazdy=1, godziny ręczne=0.",
+      "extra": {
+        "soc": 35,
+        "target_soc": 80,
+        "min_soc": 10,
+        "energy_added_kwh": 31.92,
+        "home": true,
+        "plugged": false,
+        "charging": false,
+        "unavailable_hours": 6,
+        "targets": 1,
+        "trip_targets": 1,
+        "forced_hours": 0,
+        "trip_drain_kwh": 27.28
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:20.507600+02:00",
+      "type": "info",
+      "module": "calendar",
+      "message": "Kalendarze: 2 źródeł, 3 wydarzeń, 2 wyjazdów (z lokalizacją).",
+      "extra": {
+        "calendars": [
+          "calendar.dom",
+          "calendar.dszwajca2_gmail_com"
+        ],
+        "events": 3,
+        "trips": [
+          {
+            "label": "Wokal",
+            "location": "Kozielska 52\nGliwice, Polska",
+            "depart": "2026-08-14T17:06:30+02:00",
+            "return_end": "2026-08-14T19:25:30+02:00",
+            "distance_km": 43.1
+          },
+          {
+            "label": "Altus - trening",
+            "location": "ALTUS\nUniwersytecka 13, 40-007 Katowice, Polska",
+            "depart": "2026-08-14T19:25:30+02:00",
+            "return_end": "2026-08-14T22:01:36+02:00",
+            "distance_km": 30.77
+          }
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:19.986489+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Profile temperaturowe — salon_klimka_daily_energy: 27 dni; temperatura zapisana dla 630 godzin.",
+      "extra": {
+        "sensors": {
+          "sensor.salon_klimka_daily_energy": {
+            "observed_days": 27,
+            "samples": 507,
+            "ready": true
+          }
+        }
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:19.986342+02:00",
+      "type": "info",
+      "module": "weather",
+      "message": "Prognoza temperatury: 24 godzin (encja weather.kwiatowa).",
+      "extra": {
+        "entity": "weather.kwiatowa",
+        "hours": 24
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:19.985035+02:00",
+      "type": "info",
+      "module": "consumption",
+      "message": "Profil: baza 21 dni / 504 próbek, urządzeń 5.",
+      "extra": {
+        "base_days": 21,
+        "base_samples": 504,
+        "devices": 5,
+        "device_ids": [
+          "sensor.salon_klimka_daily_energy",
+          "sensor.bathroom_boiler_socket_energy",
+          "sensor.tongou_m3_energy",
+          "sensor.garage_server_socket_energy",
+          "sensor.bedroom_wardrobe_socket_energy"
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:19.984981+02:00",
+      "type": "info",
+      "module": "tariff",
+      "message": "Aktywna taryfa: Tauron G13 lato + Pstryk (składnik bazowy 0.0435 PLN/kWh, 3 okresów). Snapshot: 3211 godzin. Cache klasyfikacji dni: 7.",
+      "extra": {
+        "tariff_name": "Tauron G13 lato + Pstryk",
+        "periods": 3,
+        "base_component_kwh": 0.0435,
+        "snapshot_hours": 3211,
+        "future_day_cache": 7
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:19.984768+02:00",
+      "type": "info",
+      "module": "prices",
+      "message": "Ceny z pamięci podręcznej (następne pobranie ~11:44). Archiwum: 1392 godzin.",
+      "extra": {
+        "cached": true,
+        "next_fetch": "2026-08-13T11:44:03.064584+02:00",
+        "archive_hours": 1392
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:09.960178+02:00",
+      "type": "plan",
+      "module": "coordinator",
+      "message": "Plan 168h horizon, action=discharge",
+      "horizon_hours": 168,
+      "action": "discharge",
+      "ev_charge": false,
+      "battery_soc": 16.2,
+      "errors": []
+    },
+    {
+      "time": "2026-08-13T09:00:07.354238+02:00",
+      "type": "info",
+      "module": "loads",
+      "message": "Brak zaplanowanych ładunków na horyzoncie."
+    },
+    {
+      "time": "2026-08-13T09:00:07.354220+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Klimat (salon_klimka_daily_energy): 18.9 kWh na 142h horyzontu (model temperaturowy).",
+      "extra": {
+        "hours": 142,
+        "total_kwh": 18.94
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:07.335300+02:00",
+      "type": "info",
+      "module": "ev",
+      "message": "EV: SoC=35.0%, pojemność=74.9 kWh (learned, 7 sesji), zużycie=0.3267 kWh/km (68 dni), cel=80.0%, w domu=True, podłączony=False, ładuje=False, godziny niedostępne=0, deadline'y=0, wyjazdy=0, godziny ręczne=0.",
+      "extra": {
+        "soc": 35,
+        "target_soc": 80,
+        "min_soc": 10,
+        "energy_added_kwh": 31.92,
+        "home": true,
+        "plugged": false,
+        "charging": false,
+        "unavailable_hours": 0,
+        "targets": 0,
+        "trip_targets": 0,
+        "forced_hours": 0,
+        "trip_drain_kwh": 0
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:07.333796+02:00",
+      "type": "info",
+      "module": "calendar",
+      "message": "Kalendarze: 2 źródeł, 0 wydarzeń, 0 wyjazdów (z lokalizacją).",
+      "extra": {
+        "calendars": [
+          "calendar.dom",
+          "calendar.dszwajca2_gmail_com"
+        ],
+        "events": 0,
+        "trips": []
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:07.216206+02:00",
+      "type": "warning",
+      "module": "calendar",
+      "message": "Nie udało się odczytać kalendarza calendar.dom: Service call requested response data but did not match any entities.",
+      "extra": {
+        "calendar": "calendar.dom"
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:07.215671+02:00",
+      "type": "info",
+      "module": "climate",
+      "message": "Profile temperaturowe — salon_klimka_daily_energy: 27 dni; temperatura zapisana dla 630 godzin.",
+      "extra": {
+        "sensors": {
+          "sensor.salon_klimka_daily_energy": {
+            "observed_days": 27,
+            "samples": 507,
+            "ready": true
+          }
+        }
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:07.215504+02:00",
+      "type": "info",
+      "module": "weather",
+      "message": "Prognoza temperatury: 24 godzin (encja weather.kwiatowa).",
+      "extra": {
+        "entity": "weather.kwiatowa",
+        "hours": 24
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:06.350636+02:00",
+      "type": "info",
+      "module": "consumption",
+      "message": "Profil: baza 21 dni / 504 próbek, urządzeń 5.",
+      "extra": {
+        "base_days": 21,
+        "base_samples": 504,
+        "devices": 5,
+        "device_ids": [
+          "sensor.salon_klimka_daily_energy",
+          "sensor.bathroom_boiler_socket_energy",
+          "sensor.tongou_m3_energy",
+          "sensor.garage_server_socket_energy",
+          "sensor.bedroom_wardrobe_socket_energy"
+        ]
+      }
+    },
+    {
+      "time": "2026-08-13T09:00:06.350576+02:00",
+      "type": "info",
+      "module": "tariff",
+      "message": "Aktywna taryfa: Tauron G13 lato + Pstryk (składnik bazowy 0.0435 PLN/kWh, 3 okresów). Snapshot: 3211 godzin. Cache klasyfikacji dni: 7.",
+      "extra": {
+        "tariff_name": "Tauron G13 lato + Pstryk",
+        "periods": 3,
+        "base_component_kwh": 0.0435,
+        "snapshot_hours": 3211,
+        "future_day_cache": 7
+      }
+    }
+  ]
+}
+
+
+
+
+
+```

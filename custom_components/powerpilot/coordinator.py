@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from datetime import datetime, timedelta
+from typing import Final
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
@@ -61,6 +62,7 @@ from .const import (
 from . import pricing
 from .forecast import ForecastBuilder
 from .models import Decision, Plan, tariff_for_day
+from .modules.ev import CHARGING_STATES, HOME_STATES, PLUGGED_STATES
 from .modules.snapshots import SnapshotStore
 from .modules import (
     CalendarModule,
@@ -77,6 +79,40 @@ from .optimizer import ChargeCurve, Optimizer, OptimizerConfig
 
 _LOGGER = logging.getLogger(__name__)
 
+# Why a mid-hour re-plan ran, in the panel's language. The reactive listener
+# knows which entity flipped; without that label a recorded revision only says
+# "the plan changed", not "because the cable went in" — which is the whole point
+# of recording it. Role → (config key it comes from) and the words for the flip.
+_TRIGGER_ROLE_KEYS: Final[dict[str, str]] = {
+    CONF_EV_PLUG_SENSOR: "plug",
+    CONF_EV_CHARGING_SENSOR: "charging",
+    CONF_EV_LOCATION_SENSOR: "location",
+}
+_TRIGGER_LABELS: Final[dict[str, str]] = {
+    "plug": "kabel EV",
+    "charging": "ładowanie EV",
+    "location": "lokalizacja auta",
+    "presence": "obecność",
+    "calendar": "kalendarz",
+}
+# Role → (states that read as "yes", word for yes, word for no). Mirrors the EV
+# module's own dialect sets, so the label matches what the planner concluded.
+_TRIGGER_STATES: Final[dict[str, tuple[set[str], str, str]]] = {
+    "plug": (PLUGGED_STATES, "podłączono", "odłączono"),
+    "charging": (CHARGING_STATES, "start", "stop"),
+    "location": (HOME_STATES, "w domu", "poza domem"),
+    "presence": (HOME_STATES, "w domu", "poza domem"),
+}
+_UNKNOWN_STATES: Final = ("unknown", "unavailable", "none", "")
+
+# A re-plan counts as a revision only past these thresholds (see
+# ``_plan_row_differs``): 0.1 kW of charge power, 0.05 kWh of EV energy.
+_REVISION_POWER_EPS: Final = 0.1
+_REVISION_EV_EPS: Final = 0.05
+# How long a charger may overrun the end of a planned hour before the spill into
+# the next hour stops reading as "that session finishing" (see ``_ev_off_plan``).
+_EV_SPILL_MINUTES: Final = 10
+
 
 class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
     """Coordinates modules, forecast and optimizer."""
@@ -86,6 +122,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.config: dict = {**DEFAULTS, **entry.data, **entry.options}
         self._battery_energy_cost = 0.0
         self.events: deque = deque(maxlen=50)
+        # What triggered the re-plan currently being computed (entity flips seen
+        # by the reactive listener), and the entity → role map that names them.
+        # Consumed by the snapshot recorder, which labels each mid-hour revision
+        # with its cause.
+        self._pending_triggers: list[str] = []
+        self._trigger_roles: dict[str, str] = {}
 
         super().__init__(
             hass,
@@ -169,6 +211,16 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             return None
         presence_set = set(flip_ids)
 
+        # Entity → role, so a recorded re-plan can name what caused it.
+        roles: dict[str, str] = {eid: "calendar" for eid in calendar_ids}
+        for conf_key, role in _TRIGGER_ROLE_KEYS.items():
+            entity_id = self.config.get(conf_key)
+            if entity_id:
+                roles[str(entity_id)] = role
+        for entity_id in self.config.get(CONF_EV_PRESENCE_ENTITIES) or []:
+            roles.setdefault(str(entity_id), "presence")
+        self._trigger_roles = roles
+
         @callback
         def _on_state_change(event) -> None:
             entity_id = event.data.get("entity_id")
@@ -178,9 +230,38 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 return
             if entity_id in presence_set and old is not None and old.state == new.state:
                 return
+            self._note_trigger(entity_id, new)
             self.hass.async_create_task(self.async_request_refresh())
 
         return async_track_state_change_event(self.hass, entities, _on_state_change)
+
+    @callback
+    def _note_trigger(self, entity_id: str | None, new_state) -> None:
+        """Remember what caused the upcoming re-plan, in the panel's language.
+
+        Labels dedupe by role, so a burst across several presence entities reads
+        as one "obecność" and the list stays bounded by the number of roles.
+        """
+        role = self._trigger_roles.get(str(entity_id or ""))
+        if role is None:
+            return
+        label = _TRIGGER_LABELS.get(role, role)
+        states = _TRIGGER_STATES.get(role)
+        if states is not None:
+            truthy, yes, no = states
+            value = str(new_state.state).lower()
+            if value not in _UNKNOWN_STATES:
+                label = f"{label}: {yes if value in truthy else no}"
+        if label not in self._pending_triggers:
+            self._pending_triggers.append(label)
+
+    def _consume_trigger(self) -> str | None:
+        """Take the reason for this run — cleared so it can't label a later one."""
+        if not self._pending_triggers:
+            return None
+        reason = ", ".join(self._pending_triggers)
+        self._pending_triggers = []
+        return reason
 
     @callback
     def _schedule_hour_boundary_update(self) -> None:
@@ -333,6 +414,14 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
     async def _async_update_data(self) -> Plan:
         await self.registry.async_update_all()
 
+        # Claimed at the top: a run already in flight when the entity flipped
+        # would otherwise attach the label to a plan computed before it. A
+        # re-plan straight after a restart has no flip behind it at all — say so
+        # rather than leaving its revision unexplained.
+        trigger = self._consume_trigger() or (
+            "start integracji" if self.data is None else None
+        )
+
         # The plan is only as good as its starting SoC. If the sensor is
         # momentarily unavailable, never seed from a fabricated value — keep the
         # last good plan and retry next cycle (a wrong seed mis-plans the battery).
@@ -366,7 +455,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if current is not None:
             self._battery_energy_cost = current.battery_energy_cost
 
-        await self._maybe_record_snapshot(forecast, plan)
+        await self._maybe_record_snapshot(forecast, plan, trigger)
         self._record_event(plan)
         return plan
 
@@ -382,11 +471,88 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             return PRICE_TYPE_ESTIMATED
         return PRICE_TYPE_FORECAST
 
-    async def _maybe_record_snapshot(self, forecast, plan) -> None:
-        """Persist one columnar snapshot per clock hour (a 'vintage')."""
+    def _plan_row(self, plan: Plan, hour: datetime) -> dict | None:
+        """What ``plan`` says about ``hour`` itself, compacted for a revision."""
+        decision = plan.decision_at(hour)
+        if decision is None:
+            return None
+        return {
+            "ev": round(decision.ev_charge_kwh, 3),
+            "ev_min": decision.ev_charge_minutes,
+            "chg": round(decision.battery_charge_kwh, 3),
+            "pw": round(decision.charge_power_kw, 3),
+            "grid": round(decision.grid_buy_kwh, 3),
+            "mode": MODE_CODE.get(decision.inverter_mode, "p"),
+        }
+
+    @staticmethod
+    def _plan_row_differs(row: dict, baseline: dict) -> bool:
+        """Did the running hour's plan materially change?
+
+        Compared on quantities that do NOT shrink with the hour's remainder: the
+        inverter mode, whether the car charges at all, and the charge POWER. The
+        kWh figures fall proportionally on every mid-hour re-run (slot 0 covers
+        only the rest of the hour), so comparing those would mark every refresh
+        as a revision and bury the one that matters under the noise.
+        """
+        if row.get("mode") != baseline.get("mode"):
+            return True
+        charging = (row.get("ev") or 0.0) > _REVISION_EV_EPS
+        was_charging = (baseline.get("ev") or 0.0) > _REVISION_EV_EPS
+        if charging != was_charging:
+            return True
+        power, was_power = row.get("pw"), baseline.get("pw")
+        if (power is None) != (was_power is None):
+            return True
+        return (
+            power is not None
+            and was_power is not None
+            and abs(power - was_power) >= _REVISION_POWER_EPS
+        )
+
+    def _record_revision(
+        self, hour: datetime, now: datetime, plan: Plan, trigger: str | None
+    ) -> bool:
+        """Append a mid-hour re-plan of ``hour`` when it changes something.
+
+        Measured against whatever is already on record for the hour — the newest
+        revision, or the hour-start vintage when there is none — so each entry
+        marks an actual change of mind rather than a repeat of the last one.
+        """
+        row = self._plan_row(plan, hour)
+        if row is None:
+            return False
+        previous = self.snapshots.revisions_at(hour)
+        baseline = (
+            previous[-1]
+            if previous
+            else {
+                "ev": self.snapshots.run0_at(hour, "ev"),
+                "pw": self.snapshots.run0_at(hour, "charge_pw"),
+                "mode": self.snapshots.run0_at(hour, "mode"),
+            }
+        )
+        if not self._plan_row_differs(row, baseline):
+            return False
+        return self.snapshots.add_revision(
+            hour, {"at": now.isoformat(), "why": trigger, **row}
+        )
+
+    async def _maybe_record_snapshot(
+        self, forecast, plan, trigger: str | None = None
+    ) -> None:
+        """Persist one columnar snapshot per clock hour (a 'vintage').
+
+        Re-runs inside the same hour leave the vintage frozen — it is the plan
+        the hour STARTED with, the honest baseline for forecast accuracy — and
+        are appended as revisions instead, so a mid-hour change of mind stays
+        visible rather than vanishing without trace.
+        """
         now = dt_util.now()
         hour = now.replace(minute=0, second=0, microsecond=0)
         if self._last_snapshot_hour is not None and hour <= self._last_snapshot_hour:
+            if self._record_revision(hour, now, plan, trigger):
+                await self._async_save_snapshots()
             return
 
         slots = forecast.slots
@@ -400,6 +566,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         record: dict = {
             "run_at": now.isoformat(),
             "start": slots[0].start.isoformat(),
+            # This hour is watched for mid-hour re-plans. Older vintages carry no
+            # such marker, and for them "no revision recorded" must not be read as
+            # "the plan never changed" — nobody was looking.
+            "revcap": True,
             "n": len(slots),
             "horizon_hours": len(decisions),
             "total_cost": _r(plan.total_cost, 2),
@@ -1436,6 +1606,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_DEVICE_SENSORS,
             CONF_EV_BEHIND_METER,
             CONF_EV_CHARGE_EFFICIENCY,
+            CONF_EV_CHARGER_KW,
+            CONF_EV_CHARGER_PHASES,
             CONF_EV_ENERGY_ADDED_SENSOR,
             CONF_EV_SOC_SENSOR,
             CONF_GRID_IMPORT_SENSOR,
@@ -1729,6 +1901,55 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 return 0.0
             return added_kwh / ev_charge_eff
 
+        # A charger told to run to the end of an hour stops a little late, so a
+        # few minutes of the PREVIOUS hour's planned session land in this one.
+        # That much charging after a planned hour is a session finishing, not an
+        # unplanned one — flagging it would cry wolf on ordinary days.
+        ev_spill_kwh = (
+            float(self.config.get(CONF_EV_CHARGER_KW, 0) or 0)
+            * max(int(self.config.get(CONF_EV_CHARGER_PHASES, 1) or 1), 1)
+            * _EV_SPILL_MINUTES
+            / 60.0
+        )
+
+        def _planned_ev(hour: datetime) -> float:
+            """Most EV energy any plan of ``hour`` asked for — its vintage or any
+            mid-hour revision of it."""
+            values = [sn.run0_at(hour, "ev")] + [
+                r.get("ev") for r in sn.revisions_at(hour)
+            ]
+            return max((value or 0.0) for value in values)
+
+        def _ev_off_plan(hour: datetime, realized_ev: float | None) -> bool:
+            """Did the car charge in an hour no plan ever asked it to?
+
+            Judged against the hour's OWN plans — its vintage plus every recorded
+            mid-hour revision — never the pinned view: "was this charging planned"
+            must not change its answer when the forecast-lead picker moves. This
+            is what tells a deliberate re-plan (the cable went in mid-hour, a
+            revision records it) apart from charging nothing in PowerPilot asked
+            for. Hours with no vintage at all are not flagged — there was no plan
+            to contradict — and neither are trip hours, where the charging
+            happened away from home. Neither are hours older than revision
+            tracking itself: their re-plans went unrecorded, so their silence
+            means "nobody was looking", not "nothing was planned".
+            """
+            if realized_ev is None:
+                return False
+            if sn.origin_at(hour, 0) is None:
+                return False
+            if not sn.records_revisions_at(hour):
+                return False
+            hour_end = hour + timedelta(hours=1)
+            if any(dep < hour_end and ret > hour for dep, ret in away_windows):
+                return False
+            if _planned_ev(hour) > _REVISION_EV_EPS:
+                return False
+            floor = _REVISION_EV_EPS
+            if _planned_ev(hour - timedelta(hours=1)) > _REVISION_EV_EPS:
+                floor = max(floor, ev_spill_kwh)
+            return realized_ev > floor
+
         # ----- Past hours -----
         h = past_start
         while h < past_end:
@@ -1835,6 +2056,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 )
             else:
                 forecast_side = None
+            # Mid-hour re-plans of this hour + the "nobody planned this" flag, so
+            # the tooltip can say whether a divergence was a decision or a
+            # surprise. Always the hour's own record, independent of the pin.
+            revisions = sn.revisions_at(h)
             hours.append(
                 {
                     "start": h.isoformat(),
@@ -1842,6 +2067,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "realized": realized_side,
                     "forecast": forecast_side,
                     "forecast_origin": fc_origin if forecast_side else None,
+                    "revisions": revisions or None,
+                    "revisions_dropped": sn.revisions_dropped_at(h) or None,
+                    "ev_off_plan": _ev_off_plan(h, ev_charge_real.get(h)) or None,
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
@@ -2026,6 +2254,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     if self.data and self.data.created_at
                     else sn.origin_at(now, 0)
                 )
+            cur_revisions = sn.revisions_at(now)
             hours.append(
                 {
                     "start": now.isoformat(),
@@ -2035,6 +2264,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "realized": realized_side,
                     "forecast": forecast_side,
                     "forecast_origin": cur_fc_origin if forecast_side else None,
+                    "revisions": cur_revisions or None,
+                    "revisions_dropped": sn.revisions_dropped_at(now) or None,
+                    "ev_off_plan": _ev_off_plan(now, cur_ev) or None,
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,

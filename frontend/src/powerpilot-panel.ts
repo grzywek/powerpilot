@@ -189,6 +189,16 @@ interface SeriesHour {
   hour_plan?: HourPlan | null;
   // When the forecast side was made (ISO), so the tooltip can show the vintage.
   forecast_origin?: string | null;
+  /** Re-plans that happened AFTER this hour began (oldest first). The forecast
+   *  side is frozen at the hour's start, so without these a mid-hour change of
+   *  mind — the EV cable going in, a calendar edit — is invisible and reads as
+   *  the plan simply having been wrong. */
+  revisions?: PlanRevision[] | null;
+  /** Re-plans dropped at the per-hour storage cap (never silently). */
+  revisions_dropped?: number | null;
+  /** Realized EV charging that neither the hour's plan nor any of its revisions
+   *  asked for — i.e. the charger ran off-plan. */
+  ev_off_plan?: boolean | null;
   battery_charge_kwh: number | null;
   battery_discharge_kwh: number | null;
   charge_power_kw: number | null;
@@ -204,6 +214,19 @@ interface SeriesHour {
   fixed_cost: number | null;
   devices_real: Record<string, number | null>;
   devices_forecast: Record<string, number | null>;
+}
+
+/** One mid-hour re-plan: when it ran, what triggered it, and what the plan then
+ *  said for the REST of that hour (kWh figures cover the remainder only). */
+interface PlanRevision {
+  at: string;
+  why: string | null;
+  ev: number | null;
+  ev_min: number | null;
+  chg: number | null;
+  pw: number | null;
+  grid: number | null;
+  mode: string | null;
 }
 
 interface TipSide {
@@ -516,6 +539,14 @@ const INVERTER_MODE_META: Record<string, { label: string; dot: string }> = {
   charge: { label: "ładowanie baterii", dot: "#22c55e" },
   discharge: { label: "z baterii", dot: "#e11d48" },
   passthrough: { label: "passthrough", dot: "#94a3b8" },
+};
+
+/** Snapshots store the inverter mode as one letter (vintages and plan
+ *  revisions alike); map it back before looking up a label. */
+const MODE_CODE_NAME: Record<string, string> = {
+  c: "charge",
+  d: "discharge",
+  p: "passthrough",
 };
 
 /** Trip away-window shading: travel legs (dojazd/powrót + margins) vs the
@@ -1304,6 +1335,32 @@ export class PowerPilotPanel extends LitElement {
     </div>`;
   }
 
+  /** Why an hour's plan column may not match what happened: the re-plans that
+   *  ran after the hour began, plus a warning for EV charging no plan of that
+   *  hour asked for. The plan column is the hour's STARTING plan, so without
+   *  this a deliberate mid-hour revision is indistinguishable from the plan
+   *  having been wrong — the difference the user actually needs. */
+  private _revisionNote(hour: SeriesHour | null | undefined): TemplateResult | typeof nothing {
+    const revs = hour?.revisions ?? [];
+    const dropped = hour?.revisions_dropped ?? 0;
+    if (!revs.length && !dropped && !hour?.ev_off_plan) return nothing;
+    const hm = (iso: string) => {
+      const d = new Date(iso);
+      return isNaN(d.getTime())
+        ? "—"
+        : d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+    };
+    return html`<div class="pv-note">
+      ${revs.map(
+        (r) => html`<div>↻ ${hm(r.at)} przeliczono${r.why ? ` — ${r.why}` : ""}</div>`
+      )}
+      ${dropped ? html`<div>… i ${dropped} dalszych zmian planu (limit zapisu)</div>` : nothing}
+      ${hour?.ev_off_plan
+        ? html`<div class="pv-note-alert">⚠ ładowanie EV poza planem</div>`
+        : nothing}
+    </div>`;
+  }
+
   private _hourCol(
     cls: string,
     title: string,
@@ -1348,6 +1405,7 @@ export class PowerPilotPanel extends LitElement {
             ${this._pvRow("Zużycie domu", sPrev.consumption_forecast, sPrev.consumption_real)}
             ${this._pvRow("Pobór z sieci", sPrev.forecast?.grid, sPrev.realized?.grid)}
             ${this._socRow("SoC magazynu na koniec", sPrev.forecast?.soc_end, sPrev.realized?.soc_end)}
+            ${this._revisionNote(sPrev)}
           `
         : html`<div class="muted">brak danych (wróć do „● teraz")</div>`;
 
@@ -1383,6 +1441,7 @@ export class PowerPilotPanel extends LitElement {
       ${this._pvRow("Zużycie domu", planCons, sCur?.consumption_real, { elapsed })}
       ${this._pvRow("Pobór z sieci", planGrid, sCur?.realized?.grid, { elapsed })}
       ${this._socRow("SoC magazynu: plan na koniec → teraz", planSocEnd, sCur?.soc ?? null)}
+      ${this._revisionNote(sCur)}
     `;
 
     // --- next hour: the live plan (nothing realized yet) ---
@@ -2102,6 +2161,45 @@ export class PowerPilotPanel extends LitElement {
                   .join("")}${hasDelta ? `<td style="text-align:right;opacity:0.7;padding-left:10px">Δ</td>` : ""}</tr>`
               : `<tr><td></td><td style="text-align:right;opacity:0.7">${sides[0].label}</td></tr>`;
 
+          // The prognoza column is frozen at the hour's start, so a delta on its
+          // own cannot say whether the plan was deliberately revised mid-hour or
+          // reality simply diverged from it. These lines answer exactly that:
+          // every re-plan with its trigger, and a warning for EV charging that
+          // no plan of this hour ever asked for.
+          const revs = h.revisions ?? [];
+          const revLine = (r: PlanRevision) => {
+            const why = r.why ? ` — ${esc(r.why)}` : "";
+            const mode = r.mode
+              ? INVERTER_MODE_META[MODE_CODE_NAME[r.mode] ?? ""]?.label
+              : null;
+            const bits = [
+              (r.ev ?? 0) > 0.005
+                ? `EV ${fmt(r.ev as number)} kWh${r.ev_min != null ? ` (${r.ev_min} min)` : ""}`
+                : "bez ładowania EV",
+              mode ? `tryb: ${mode}` : null,
+              (r.pw ?? 0) > 0.005 ? `${fmt(r.pw as number)} kW` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            return (
+              `<div style="opacity:0.85">↻ ${fmtHM(r.at)} przeliczono${why}</div>` +
+              `<div style="opacity:0.65;padding-left:14px">plan na resztę godziny: ${bits}</div>`
+            );
+          };
+          const dropped = h.revisions_dropped ?? 0;
+          const footer =
+            revs.length || dropped || h.ev_off_plan
+              ? `<div style="margin-top:6px;border-top:1px solid ${tt.border};padding-top:4px;font-size:11px;line-height:1.4">` +
+                revs.map(revLine).join("") +
+                (dropped
+                  ? `<div style="opacity:0.6">… i ${dropped} dalszych zmian planu (limit zapisu)</div>`
+                  : "") +
+                (h.ev_off_plan
+                  ? `<div style="color:#f59e0b;font-weight:600;margin-top:${revs.length ? "3px" : "0"}">⚠ ładowanie EV poza planem — żaden plan tej godziny go nie przewidywał</div>`
+                  : "") +
+                `</div>`
+              : "";
+
           return `
             <div style="padding:8px 10px;color:${tt.fg};font-size:12px;line-height:1.45;min-width:240px">
               <div style="font-weight:600;margin-bottom:6px;border-bottom:1px solid ${tt.border};padding-bottom:4px">${date}${modeStr}${evMinStr}${tripRows}</div>
@@ -2121,6 +2219,7 @@ export class PowerPilotPanel extends LitElement {
                     : ""
                 }
               </table>
+              ${footer}
             </div>
           `;
         },
@@ -4244,6 +4343,18 @@ export class PowerPilotPanel extends LitElement {
       font-weight: 600;
     }
     .pv-warn {
+      color: var(--warning-color, #f9a825);
+      font-weight: 600;
+    }
+    .pv-note {
+      margin-top: 6px;
+      padding-top: 5px;
+      border-top: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--secondary-text-color);
+    }
+    .pv-note-alert {
       color: var(--warning-color, #f9a825);
       font-weight: 600;
     }

@@ -17,6 +17,10 @@ Record shape (arrays are parallel, one entry per horizon hour)::
       "buy": [..], "dist": [..], "ptype": ["c"|"f"|"e"|None],
       "cons_fc": [..], "base_fc": [..], "mode": ["c"|"d"|"p"],
       "soc": [..], "grid": [..], "cost": [..],
+      "rev": [{"at": iso, "why": str|None, "ev": .., "chg": .., "grid": ..,
+               "mode": "c"|"d"|"p"}],   # mid-hour re-plans, oldest first
+      "rev_more": int,                  # revisions dropped at the cap
+      "revcap": True,                   # this hour was watched for re-plans
     }
 """
 
@@ -29,6 +33,12 @@ from homeassistant.util import dt as dt_util
 
 # How long vintages are kept (user-chosen: 30 days of history for bias analysis).
 _SNAPSHOT_RETENTION_DAYS = 30
+
+# Mid-hour re-plans kept per vintage. The running hour may legitimately be
+# re-planned several times (the car gets plugged in, a calendar event lands, HA
+# restarts); the cap stops a chatty hour from growing the store without bound.
+# Overflow is counted in ``rev_more``, never dropped silently.
+_MAX_REVISIONS_PER_HOUR = 12
 
 
 class SnapshotStore:
@@ -55,6 +65,51 @@ class SnapshotStore:
         key = self._key(run_at) if run_at else record["run_at"]
         self._records[key] = record
         return key
+
+    def add_revision(self, run_hour: datetime, revision: dict[str, Any]) -> bool:
+        """Append a mid-hour re-plan to the vintage covering ``run_hour``.
+
+        The vintage itself (index 0 = the plan the hour started with) stays
+        untouched, so forecast-accuracy scoring keeps measuring against the plan
+        that was actually in force when the hour began. The revisions record what
+        changed *after* that — the difference between "the plan was deliberately
+        revised" and "reality simply diverged from the plan", which is invisible
+        from the vintage alone.
+
+        Returns ``False`` when no vintage backs the hour (nothing to attach to)
+        or the per-hour cap is reached — the overflow is counted in ``rev_more``
+        so the UI can say how many changes it isn't showing.
+        """
+        rec = self._records.get(self._key(run_hour))
+        if rec is None:
+            return False
+        revisions = rec.setdefault("rev", [])
+        if len(revisions) >= _MAX_REVISIONS_PER_HOUR:
+            rec["rev_more"] = int(rec.get("rev_more") or 0) + 1
+            return False
+        revisions.append(revision)
+        return True
+
+    def revisions_at(self, hour: datetime) -> list[dict[str, Any]]:
+        """Mid-hour re-plans recorded for ``hour``, oldest first (may be empty)."""
+        rec = self._records.get(self._key(hour))
+        return list(rec.get("rev") or []) if rec else []
+
+    def revisions_dropped_at(self, hour: datetime) -> int:
+        """How many re-plans for ``hour`` were dropped at the per-hour cap."""
+        rec = self._records.get(self._key(hour))
+        return int(rec.get("rev_more") or 0) if rec else 0
+
+    def records_revisions_at(self, hour: datetime) -> bool:
+        """Was ``hour`` recorded by a build that tracks mid-hour re-plans?
+
+        Vintages written before revision tracking existed have no revisions —
+        not because the hour was never re-planned, but because nobody was
+        looking. "No revision recorded" may only be read as "the plan never
+        changed" for hours this returns ``True`` for.
+        """
+        rec = self._records.get(self._key(hour))
+        return bool(rec.get("revcap")) if rec else False
 
     def runs(self) -> list[dict[str, Any]]:
         """Lightweight list of available vintages, newest first (for the picker)."""

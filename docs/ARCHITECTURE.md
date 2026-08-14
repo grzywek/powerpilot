@@ -53,6 +53,30 @@ the decision stay true kW). Mid-hour re-plans — a calendar edit, the EV being
 plugged/unplugged, a restart — are therefore physically consistent and may
 legitimately change the running hour's action.
 
+### Vintage and plan revisions
+One snapshot of the inputs + plan is persisted per clock hour (a **vintage**),
+recorded on the first run of that hour. It stays frozen for the rest of the hour:
+it is the plan the hour *started with*, the only honest baseline for measuring
+forecast accuracy against what actually happened.
+
+Mid-hour re-plans are appended to it as **revisions** — `{at, why, ev, chg, pw,
+grid, mode}` — instead of overwriting it. Without them, the panel's *prognoza*
+column shows the hour-start plan while reality reflects a plan revised at :10,
+and the resulting delta cannot be told apart from the plan having simply been
+wrong. A revision is recorded only when the running hour's plan *materially*
+changes — inverter mode, whether the car charges, or the charge power. The kWh
+figures are not compared: slot 0 covers only the hour's remainder, so they shrink
+on every mid-hour re-run and would mark every refresh as a change.
+
+The `why` comes from the reactive listener, which knows which entity flipped
+("kabel EV: podłączono", "kalendarz"), so the record names its cause. The series
+payload also carries `ev_off_plan`: EV energy realized in an hour that neither
+its vintage nor any of its revisions asked for — charging PowerPilot never
+planned, as opposed to charging it decided on mid-hour. Vintages recorded while
+revision tracking is active are marked `revcap`; hours without that marker are
+never flagged, since their silence means nobody was watching for re-plans rather
+than that none happened.
+
 ### Forecast
 A `Forecast` is an ordered list of `HourSlot`s, each carrying everything a module
 knew about that hour: buy/sell price (and whether it is *confirmed* or

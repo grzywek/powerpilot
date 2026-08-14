@@ -241,10 +241,49 @@ def test_nested_trips_within_one_vintage_both_kept() -> None:
     assert sorted(t["label"] for t in trips) == ["Leg", "Parent"]
 
 
+def test_revisions_attach_to_the_hour_without_touching_the_vintage() -> None:
+    """A mid-hour re-plan is recorded alongside the vintage, never over it."""
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    store.add(_rec(base))
+
+    assert store.add_revision(base + timedelta(minutes=10), {"at": "x", "ev": 9.1})
+    assert [r["ev"] for r in store.revisions_at(base)] == [9.1]
+    # The vintage's own arrays are untouched — accuracy scoring still measures
+    # against the plan the hour actually started with.
+    assert store.get(store._key(base))["grid"] == [0.0, 0.1, 0.2]
+
+
+def test_revision_without_a_vintage_is_refused() -> None:
+    """Nothing to attach to → no revision (and no phantom record created)."""
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    assert store.add_revision(base, {"at": "x"}) is False
+    assert len(store) == 0
+    assert store.revisions_at(base) == []
+
+
+def test_revisions_cap_counts_the_overflow() -> None:
+    """Past the cap the extras are counted, never silently dropped."""
+    store = SnapshotStore()
+    base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    store.add(_rec(base))
+
+    stored = sum(bool(store.add_revision(base, {"at": str(i)})) for i in range(15))
+    assert stored == 12
+    assert len(store.revisions_at(base)) == 12
+    assert store.revisions_dropped_at(base) == 3
+
+
 def test_serialisation_roundtrip() -> None:
     store = SnapshotStore()
     base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
     store.add(_rec(base))
+    store.add_revision(base, {"at": "x", "ev": 9.1, "why": "kabel EV: podłączono"})
     restored = SnapshotStore.from_dict(store.to_dict())
     assert len(restored) == 1
     assert restored.runs() == store.runs()
+    # Revisions survive a restart — they are the record of what changed mid-hour.
+    assert restored.revisions_at(base) == [
+        {"at": "x", "ev": 9.1, "why": "kabel EV: podłączono"}
+    ]

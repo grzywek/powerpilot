@@ -436,7 +436,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 )
                 return self.data
             raise UpdateFailed(
-                "Czujnik SoC niedostępny — nie mogę policzyć planu bez stanu baterii."
+                "Czujnik SoC niedostępny — nie mogę policzyć planu bez stanu ESS."
             )
 
         forecast = await self.hass.async_add_executor_job(self.forecast_builder.build)
@@ -1018,7 +1018,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 required=True,
             ),
             await _sensor_item(
-                "soc", "SoC baterii", CONF_SOC_SENSOR, required=True, raw=True
+                "soc", "🔋 SoC ESS", CONF_SOC_SENSOR, required=True, raw=True
             ),
         ]
 
@@ -1079,13 +1079,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         battery_items = [
             await _sensor_item(
                 "battery_charge",
-                "Sensor ładowania baterii",
+                "🔋 Sensor ładowania ESS",
                 CONF_BATTERY_CHARGE_SENSOR,
                 required=False,
             ),
             await _sensor_item(
                 "battery_discharge",
-                "Sensor rozładowania baterii",
+                "🔋 Sensor rozładowania ESS",
                 CONF_BATTERY_DISCHARGE_SENSOR,
                 required=False,
             ),
@@ -1164,7 +1164,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         groups = [
             {"title": "Wymagane do optymalizacji", "items": required_items},
-            {"title": "Bateria i sieć (dane rzeczywiste)", "items": battery_items},
+            {"title": "🔋 ESS i sieć (dane rzeczywiste)", "items": battery_items},
             {"title": "Opcjonalne", "items": optional_items},
         ]
 
@@ -2970,7 +2970,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         checks = [
             {
                 "key": "battery_soc",
-                "label": "Sensor SoC baterii",
+                "label": "🔋 Sensor SoC ESS",
                 "ok": bool(self.config.get(CONF_SOC_SENSOR)),
             },
             {

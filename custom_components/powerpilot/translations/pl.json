@@ -6,24 +6,24 @@
     "step": {
       "user": {
         "title": "PowerPilot – konfiguracja podstawowa",
-        "description": "Parametry sieci, baterii i falownika oraz sensory, które PowerPilot ma odczytywać.",
+        "description": "Parametry sieci, ESS i falownika oraz sensory, które PowerPilot ma odczytywać.",
         "data": {
           "device_sensors": "Sensory podrzędne (mieszkanie, klima, pralka, bojler…)",
           "consumption_learn_days": "Okno uczenia zużycia (dni)",
           "phases": "Liczba faz (1 lub 3)",
           "main_fuse_a": "Zabezpieczenie przedlicznikowe (A)",
-          "battery_capacity_kwh": "Pojemność baterii (kWh)",
+          "battery_capacity_kwh": "🔋 Pojemność ESS (kWh)",
           "inverter_max_charge_kw": "Maks. moc ładowania falownika (kW)",
           "min_charge_power_kw": "Min. moc ładowania (kW, 0 = wył.)",
           "inverter_max_discharge_kw": "Maks. moc rozładowania falownika (kW)",
           "charge_efficiency": "Sprawność ładowania (stała — używana tylko, gdy krzywa sprawności nie jest ustawiona)",
           "discharge_efficiency": "Sprawność rozładowania",
-          "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh netto)",
-          "min_soc": "Minimalny SoC magazynu (%) — ESS, nie EV",
-          "max_soc": "Maksymalny SoC magazynu (%) — ESS, nie EV",
-          "soc_sensor": "Sensor SoC magazynu (ESS)",
-          "battery_charge_sensor": "Sensor ładowania baterii (kW lub kWh)",
-          "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
+          "battery_wear_cost": "🔋 Koszt zużycia ESS (PLN/kWh netto)",
+          "min_soc": "🔋 Minimalny SoC ESS (%)",
+          "max_soc": "🔋 Maksymalny SoC ESS (%)",
+          "soc_sensor": "🔋 Sensor SoC ESS",
+          "battery_charge_sensor": "🔋 Sensor ładowania ESS (kW lub kWh)",
+          "battery_discharge_sensor": "🔋 Sensor rozładowania ESS (kW lub kWh)",
           "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
           "consumption_sensor": "Sensor główny (falownik / wyjście)",
           "weather_entity": "Encja pogody",
@@ -60,7 +60,7 @@
         "description": "Opcjonalna optymalizacja ładowania EV.",
         "data": {
           "ev_enabled": "Włącz optymalizację EV",
-          "ev_soc_sensor": "Sensor SoC EV",
+          "ev_soc_sensor": "🚗 Sensor SoC EV",
           "ev_odometer_sensor": "Przebieg EV (km, rosnący)",
           "ev_charging_sensor": "Ładuje teraz (do wykrywania sesji zgodnej z planem i przypomnień)",
           "ev_plug_sensor": "Kabel ładowarki podłączony (odpięty → bieżąca godzina wypada z planu EV)",
@@ -70,8 +70,8 @@
           "ev_location_sensor": "Lokalizacja EV — dom/poza domem (do przypomnień i wykrywania ładowania poza domem)",
           "ev_presence_entities": "Dodatkowe encje obecności (telefony, osoby) — świeże \"poza domem\" wygrywa ze starym stanem trackera auta",
           "ev_calendar_keyword": "Słowo kluczowe wydarzenia (np. Kotek)",
-          "ev_range_km": "Zasięg na pełnej baterii (km)",
-          "ev_battery_kwh": "Pojemność baterii EV (kWh)",
+          "ev_range_km": "🚗 Zasięg EV na pełnym SoC (km)",
+          "ev_battery_kwh": "🚗 Pojemność EV (kWh)",
           "ev_weekly_km": "Tygodniowe km poza kalendarzem",
           "ev_charger_kw": "Moc ładowarki na fazę (kW)",
           "ev_charger_phases": "Liczba faz ładowarki (1 lub 3)",
@@ -90,9 +90,9 @@
         "title": "PowerPilot",
         "description": "Wybierz sekcję do edycji, potem wróć tutaj. Użyj *Zapisz i zakończ* aby zapisać zmiany.",
         "menu_options": {
-          "core": "⚙️ Podstawy (sieć / bateria / falownik / sensory)",
+          "core": "⚙️ Podstawy (sieć / ESS / falownik / sensory)",
           "hierarchy": "🌳 Hierarchia liczników (poziomy zużycia)",
-          "charge_curve": "🔋 Krzywa ładowania (moc vs SoC)",
+          "charge_curve": "🔋 Krzywa ładowania ESS (moc vs SoC)",
           "prices": "💰 Ceny energii",
           "calendars": "📅 Kalendarze i wyjazdy",
           "ev": "🚗 Samochód elektryczny",
@@ -103,7 +103,7 @@
       },
       "reset_data": {
         "title": "Wyczyść dane i cache",
-        "description": "Usuwa wszystkie zapisane dane — wyuczony profil zużycia, archiwum cen, snapshoty taryf dystrybucyjnych oraz symulacje optymalizatora — i przeładowuje integrację. Konfiguracja (sensory, bateria, taryfy, ceny) zostaje zachowana. Użyj, gdy po zmianach konfiguracji stare dane zaczynają się mieszać.",
+        "description": "Usuwa wszystkie zapisane dane — wyuczony profil zużycia, archiwum cen, snapshoty taryf dystrybucyjnych oraz symulacje optymalizatora — i przeładowuje integrację. Konfiguracja (sensory, ESS, taryfy, ceny) zostaje zachowana. Użyj, gdy po zmianach konfiguracji stare dane zaczynają się mieszać.",
         "data": {
           "confirm": "Tak, wyczyść wszystkie dane i cache"
         }
@@ -119,18 +119,18 @@
           "consumption_learn_days": "Okno uczenia zużycia (dni)",
           "phases": "Liczba faz (1 lub 3)",
           "main_fuse_a": "Zabezpieczenie przedlicznikowe (A)",
-          "battery_capacity_kwh": "Pojemność baterii (kWh)",
+          "battery_capacity_kwh": "🔋 Pojemność ESS (kWh)",
           "inverter_max_charge_kw": "Maks. moc ładowania falownika (kW)",
           "min_charge_power_kw": "Min. moc ładowania (kW, 0 = wył.)",
           "inverter_max_discharge_kw": "Maks. moc rozładowania falownika (kW)",
           "charge_efficiency": "Sprawność ładowania (stała — używana tylko, gdy krzywa sprawności nie jest ustawiona)",
           "discharge_efficiency": "Sprawność rozładowania",
-          "battery_wear_cost": "Koszt zużycia baterii (PLN/kWh netto)",
-          "min_soc": "Minimalny SoC magazynu (%) — ESS, nie EV",
-          "max_soc": "Maksymalny SoC magazynu (%) — ESS, nie EV",
-          "soc_sensor": "Sensor SoC magazynu (ESS)",
-          "battery_charge_sensor": "Sensor ładowania baterii (kW lub kWh)",
-          "battery_discharge_sensor": "Sensor rozładowania baterii (kW lub kWh)",
+          "battery_wear_cost": "🔋 Koszt zużycia ESS (PLN/kWh netto)",
+          "min_soc": "🔋 Minimalny SoC ESS (%)",
+          "max_soc": "🔋 Maksymalny SoC ESS (%)",
+          "soc_sensor": "🔋 Sensor SoC ESS",
+          "battery_charge_sensor": "🔋 Sensor ładowania ESS (kW lub kWh)",
+          "battery_discharge_sensor": "🔋 Sensor rozładowania ESS (kW lub kWh)",
           "grid_import_sensor": "Sensor importu z sieci (kW lub kWh)",
           "consumption_sensor": "Sensor główny (falownik / wyjście)",
           "weather_entity": "Encja pogody",
@@ -140,7 +140,7 @@
       },
       "charge_curve": {
         "title": "PowerPilot – krzywa ładowania",
-        "description": "Maksymalna moc ładowania baterii (kW) w każdym przedziale SoC. Ogniwa litowe obniżają moc ładowania w miarę zapełniania, więc falownik nie utrzyma pełnej mocy przy ~100 %. Wpisz moc, jaką falownik realnie utrzymuje w danym przedziale; zostaw wszystkie pola na płaskim limicie falownika, aby zachować płaską krzywą. Optymalizator nigdy nie zaplanuje ładowania powyżej tych limitów.",
+        "description": "Maksymalna moc ładowania ESS (kW) w każdym przedziale SoC. Ogniwa litowe obniżają moc ładowania w miarę zapełniania, więc falownik nie utrzyma pełnej mocy przy ~100 %. Wpisz moc, jaką falownik realnie utrzymuje w danym przedziale; zostaw wszystkie pola na płaskim limicie falownika, aby zachować płaską krzywą. Optymalizator nigdy nie zaplanuje ładowania powyżej tych limitów.",
         "data": {
           "charge_curve_kw_0_10": "0–10 % SoC — maks. moc ładowania (kW)",
           "charge_curve_kw_11_30": "11–30 % SoC — maks. moc ładowania (kW)",
@@ -178,7 +178,7 @@
         "title": "PowerPilot – samochód elektryczny",
         "data": {
           "ev_enabled": "Włącz optymalizację EV",
-          "ev_soc_sensor": "Sensor SoC EV",
+          "ev_soc_sensor": "🚗 Sensor SoC EV",
           "ev_odometer_sensor": "Przebieg EV (km, rosnący)",
           "ev_charging_sensor": "Ładuje teraz (do wykrywania sesji zgodnej z planem i przypomnień)",
           "ev_plug_sensor": "Kabel ładowarki podłączony (odpięty → bieżąca godzina wypada z planu EV)",
@@ -188,8 +188,8 @@
           "ev_location_sensor": "Lokalizacja EV — dom/poza domem (do przypomnień i wykrywania ładowania poza domem)",
           "ev_presence_entities": "Dodatkowe encje obecności (telefony, osoby) — świeże \"poza domem\" wygrywa ze starym stanem trackera auta",
           "ev_calendar_keyword": "Słowo kluczowe wydarzenia (np. Kotek)",
-          "ev_range_km": "Zasięg na pełnej baterii (km)",
-          "ev_battery_kwh": "Pojemność baterii EV (kWh)",
+          "ev_range_km": "🚗 Zasięg EV na pełnym SoC (km)",
+          "ev_battery_kwh": "🚗 Pojemność EV (kWh)",
           "ev_weekly_km": "Tygodniowe km poza kalendarzem",
           "ev_charger_kw": "Moc ładowarki na fazę (kW)",
           "ev_charger_phases": "Liczba faz ładowarki (1 lub 3)",
@@ -276,10 +276,10 @@
         "name": "Tryb falownika"
       },
       "charge_power": {
-        "name": "Moc ładowania"
+        "name": "🔋 Moc ładowania ESS"
       },
       "battery_energy_cost": {
-        "name": "Cena energii w baterii"
+        "name": "🔋 Cena energii w ESS"
       },
       "plan": {
         "name": "Plan optymalizacji"
@@ -288,32 +288,32 @@
         "name": "Następna akcja"
       },
       "ess_charge_start": {
-        "name": "ESS początek ładowania lub passthrough"
+        "name": "🔋 ESS początek ładowania lub passthrough"
       },
       "ev_charge_start": {
-        "name": "EV początek ładowania"
+        "name": "🚗 EV początek ładowania"
       },
       "ev_soc_limit": {
-        "name": "EV limit ładowania (SoC)"
+        "name": "🚗 Limit ładowania EV (SoC)"
       },
       "ev_charge_minutes": {
-        "name": "EV minuty ładowania w godzinie"
+        "name": "🚗 EV minuty ładowania w godzinie"
       }
     },
     "binary_sensor": {
       "ev_charge": {
-        "name": "Ładowanie EV"
+        "name": "🚗 Ładowanie EV"
       },
       "ev_connect_charger": {
-        "name": "EV podłącz ładowarkę"
+        "name": "🚗 EV podłącz ładowarkę"
       }
     },
     "number": {
       "ev_target_soc": {
-        "name": "Docelowy SoC EV"
+        "name": "🚗 Docelowy SoC EV"
       },
       "ev_min_soc": {
-        "name": "Minimalny SoC EV (rezerwa)"
+        "name": "🚗 Minimalny SoC EV (rezerwa)"
       }
     }
   }

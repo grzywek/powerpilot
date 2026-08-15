@@ -42,7 +42,7 @@ views:
           - entity: binary_sensor.powerpilot_ev_charge
             name: Ładowanie EV
           - entity: sensor.powerpilot_battery_energy_cost
-            name: Cena energii w baterii (po stratach)
+            name: 🔋 Cena energii w ESS (po stratach)
           - entity: sensor.powerpilot_optimization_plan
             name: Plan (koszt horyzontu)
 
@@ -53,11 +53,11 @@ views:
           {% if r %}{% for item in r %}- {{ item }}
           {% endfor %}{% else %}Brak przypomnień.{% endif %}
 
-      # --- Wykres 1: bateria i przepływy energii ---
+      # --- Wykres 1: ESS i przepływy energii ---
       - type: custom:apexcharts-card
         header:
           show: true
-          title: Bateria i przepływy energii
+          title: 🔋 ESS i przepływy energii
           show_states: false
         graph_span: 4d
         span:
@@ -81,7 +81,7 @@ views:
                 text: kWh
         series:
           - entity: sensor.powerpilot_optimization_plan
-            name: Końcowy SOC baterii (%)
+            name: 🔋 Końcowy SoC ESS (%)
             type: line
             yaxis_id: soc
             stroke_width: 2
@@ -170,7 +170,7 @@ views:
                 new Date(f.start).getTime(), f.sell_price
               ]);
           - entity: sensor.powerpilot_optimization_plan
-            name: Cena energii w baterii (po stratach)
+            name: 🔋 Cena energii w ESS (po stratach)
             type: line
             yaxis_id: price
             stroke_width: 2
@@ -233,7 +233,7 @@ views:
     icon: mdi:text-box-search
     cards:
       - type: history-graph
-        title: Historia decyzji i ceny baterii
+        title: Historia decyzji i ceny energii w ESS
         hours_to_show: 72
         entities:
           - sensor.powerpilot_inverter_mode

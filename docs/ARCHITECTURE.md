@@ -53,6 +53,25 @@ the decision stay true kW). Mid-hour re-plans — a calendar edit, the EV being
 plugged/unplugged, a restart — are therefore physically consistent and may
 legitimately change the running hour's action.
 
+### EV availability: calendar predicts, the plug decides
+Calendar trips are the only source of EV *unavailability*, but they are a
+**forecast** of absence. The plug sensor is ground truth about the present, so it
+overrides the calendar **for the running hour in both directions**: unplugged
+drops that hour from the plan, still plugged brings it back even when the trip
+window says the car should already be gone (it left late, came home early, the
+event overran) — and the hour's predicted drive drain is dropped with it, since a
+car on the cable is not on the road. Only the running hour is re-opened; whether
+the car is still home in two hours is genuinely unknown, so later hours stay
+calendar-driven and each one re-opens as it becomes current.
+
+Availability is not all-or-nothing per hour either: the hour a trip departs in is
+carried as a **fraction** (`EVRequest.hour_fraction`), so a 13:40 departure keeps
+40 chargeable minutes instead of writing the hour off. The allocator scales that
+hour's yield and its charging minutes by the fraction; for the running hour the
+value already folds in the minutes elapsed. The RETURN hour stays unavailable —
+its free minutes sit at the end of the hour, out of reach of a charger started at
+the top of it.
+
 ### Vintage and plan revisions
 One snapshot of the inputs + plan is persisted per clock hour (a **vintage**),
 recorded on the first run of that hour. It stays frozen for the rest of the hour:

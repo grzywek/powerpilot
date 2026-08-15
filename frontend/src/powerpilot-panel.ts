@@ -536,8 +536,8 @@ const DEVICE_PALETTE = [
  *  as a row of colored dots along the bottom of the energy chart (background
  *  bands collided with the trip away-window shading and became unreadable). */
 const INVERTER_MODE_META: Record<string, { label: string; dot: string }> = {
-  charge: { label: "ładowanie baterii", dot: "#22c55e" },
-  discharge: { label: "z baterii", dot: "#e11d48" },
+  charge: { label: "ładowanie ESS", dot: "#22c55e" },
+  discharge: { label: "z ESS", dot: "#e11d48" },
   passthrough: { label: "passthrough", dot: "#94a3b8" },
 };
 
@@ -1052,7 +1052,7 @@ export class PowerPilotPanel extends LitElement {
       ${this._renderNavBar()}
       <div class="card">
         <div class="card-title">
-          Energia: ↑ sieć/bateria · ↓ zużycie (stack) + tryb falownika + SoC · poniżej: ceny i koszty
+          Energia: ↑ sieć/ESS · ↓ zużycie (stack) + tryb falownika + SoC · poniżej: ceny i koszty
         </div>
         <div id="pp-chart-energy" class="apex-chart"></div>
         <div id="pp-chart-prices" class="apex-chart apex-chart-short"></div>
@@ -1248,8 +1248,8 @@ export class PowerPilotPanel extends LitElement {
       <span class="pv-vals">
         ${planOnly
           ? this._modeChip(plan)
-          : html`${this._modeChip(plan)} <span class="pv-arrow">→</span>
-              ${this._modeChip(real)}
+          : html`${this._modeChip(real)} <span class="pv-arrow">→</span>
+              ${this._modeChip(plan)}
               ${agree == null
                 ? nothing
                 : agree
@@ -1259,9 +1259,13 @@ export class PowerPilotPanel extends LitElement {
     </div>`;
   }
 
-  /** One "plan → realnie" value row with an optional realization bar.
+  /** One "realnie → plan" value row with an optional realization bar.
    *  ``elapsed`` (0..1) draws a tick at the elapsed fraction of the hour, so
-   *  a fill left of the tick reads "za planem", right of it "przed planem". */
+   *  a fill left of the tick reads "za planem", right of it "przed planem".
+   *
+   *  Reads **realized → plan**: what actually happened first, what was asked
+   *  for second. The realized number is the one being judged, so it leads and
+   *  carries the emphasis; the plan is the yardstick it is read against. */
   private _pvRow(
     label: string,
     plan: number | null | undefined,
@@ -1291,9 +1295,9 @@ export class PowerPilotPanel extends LitElement {
       <span class="pv-vals">
         ${opts.planOnly
           ? html`<strong>${this._fmtNum(p, digits)}</strong> ${unit}${opts.planSuffix ?? ""}`
-          : html`${this._fmtNum(p, digits)}${opts.planSuffix ?? ""}
+          : html`<strong>${this._fmtNum(r, digits)}</strong>
               <span class="pv-arrow">→</span>
-              <strong>${this._fmtNum(r, digits)}</strong> ${unit}
+              ${this._fmtNum(p, digits)}${opts.planSuffix ?? ""} ${unit}
               ${ratio != null
                 ? html`<span class="pv-pct">${Math.round(ratio * 100)}%</span>`
                 : nothing}`}
@@ -1329,8 +1333,8 @@ export class PowerPilotPanel extends LitElement {
       <span class="pv-vals">
         ${planOnly
           ? html`<strong>${fmt(plan)}</strong>`
-          : html`${fmt(plan)} <span class="pv-arrow">→</span>
-              <strong>${fmt(real)}</strong>`}
+          : html`<strong>${fmt(real)}</strong> <span class="pv-arrow">→</span>
+              ${fmt(plan)}`}
       </span>
     </div>`;
   }
@@ -1399,12 +1403,12 @@ export class PowerPilotPanel extends LitElement {
       sPrev && (sPrev.realized || sPrev.forecast)
         ? html`
             ${this._modeRow(sPrev.planned_mode ?? null, sPrev.inverter_mode)}
-            ${this._pvRow("Ładowanie baterii", sPrev.forecast?.charge, sPrev.realized?.charge)}
-            ${this._pvRow("Z baterii", sPrev.forecast?.discharge, sPrev.realized?.discharge)}
-            ${this._pvRow("Ładowanie EV", sPrev.forecast?.ev, sPrev.realized?.ev)}
-            ${this._pvRow("Zużycie domu", sPrev.consumption_forecast, sPrev.consumption_real)}
-            ${this._pvRow("Pobór z sieci", sPrev.forecast?.grid, sPrev.realized?.grid)}
-            ${this._socRow("SoC magazynu na koniec", sPrev.forecast?.soc_end, sPrev.realized?.soc_end)}
+            ${this._pvRow("🔋 Ładowanie ESS", sPrev.forecast?.charge, sPrev.realized?.charge)}
+            ${this._pvRow("🔋 Z ESS", sPrev.forecast?.discharge, sPrev.realized?.discharge)}
+            ${this._pvRow("🚗 Ładowanie EV", sPrev.forecast?.ev, sPrev.realized?.ev)}
+            ${this._pvRow("🏠 Zużycie domu", sPrev.consumption_forecast, sPrev.consumption_real)}
+            ${this._pvRow("⚡ Pobór z sieci", sPrev.forecast?.grid, sPrev.realized?.grid)}
+            ${this._socRow("🔋 SoC ESS na koniec", sPrev.forecast?.soc_end, sPrev.realized?.soc_end)}
             ${this._revisionNote(sPrev)}
           `
         : html`<div class="muted">brak danych (wróć do „● teraz")</div>`;
@@ -1432,15 +1436,15 @@ export class PowerPilotPanel extends LitElement {
         : measuredMode;
     const curBody = html`
       ${this._modeRow(planMode, realMode)}
-      ${this._pvRow("Ładowanie baterii", planCharge, sCur?.realized?.charge, { elapsed })}
-      ${this._pvRow("Z baterii", planDischarge, sCur?.realized?.discharge, { elapsed })}
-      ${this._pvRow("Ładowanie EV", planEv, sCur?.realized?.ev, {
+      ${this._pvRow("🔋 Ładowanie ESS", planCharge, sCur?.realized?.charge, { elapsed })}
+      ${this._pvRow("🔋 Z ESS", planDischarge, sCur?.realized?.discharge, { elapsed })}
+      ${this._pvRow("🚗 Ładowanie EV", planEv, sCur?.realized?.ev, {
         elapsed,
         planSuffix: planEvMin != null ? ` (${planEvMin} min)` : "",
       })}
-      ${this._pvRow("Zużycie domu", planCons, sCur?.consumption_real, { elapsed })}
-      ${this._pvRow("Pobór z sieci", planGrid, sCur?.realized?.grid, { elapsed })}
-      ${this._socRow("SoC magazynu: plan na koniec → teraz", planSocEnd, sCur?.soc ?? null)}
+      ${this._pvRow("🏠 Zużycie domu", planCons, sCur?.consumption_real, { elapsed })}
+      ${this._pvRow("⚡ Pobór z sieci", planGrid, sCur?.realized?.grid, { elapsed })}
+      ${this._socRow("🔋 SoC ESS: teraz → plan na koniec", planSocEnd, sCur?.soc ?? null)}
       ${this._revisionNote(sCur)}
     `;
 
@@ -1448,22 +1452,22 @@ export class PowerPilotPanel extends LitElement {
     const nextBody = pNext
       ? html`
           ${this._modeRow(pNext.inverter_mode, null, true)}
-          ${this._pvRow("Ładowanie baterii", pNext.battery_charge_kwh, null, { planOnly: true })}
-          ${this._pvRow("Moc ładowania", pNext.charge_power_kw, null, { planOnly: true, unit: "kW" })}
-          ${this._pvRow("Z baterii", pNext.battery_discharge_kwh, null, { planOnly: true })}
-          ${this._pvRow("Ładowanie EV", pNext.ev_charge_kwh, null, {
+          ${this._pvRow("🔋 Ładowanie ESS", pNext.battery_charge_kwh, null, { planOnly: true })}
+          ${this._pvRow("🔋 Moc ładowania ESS", pNext.charge_power_kw, null, { planOnly: true, unit: "kW" })}
+          ${this._pvRow("🔋 Z ESS", pNext.battery_discharge_kwh, null, { planOnly: true })}
+          ${this._pvRow("🚗 Ładowanie EV", pNext.ev_charge_kwh, null, {
             planOnly: true,
             planSuffix: pNext.ev_charge_minutes != null ? ` (${pNext.ev_charge_minutes} min)` : "",
           })}
-          ${this._pvRow("Zużycie domu", this._forecastConsumptionAt(nextMs), null, { planOnly: true })}
-          ${this._pvRow("Pobór z sieci", pNext.grid_buy_kwh, null, { planOnly: true })}
-          ${this._socRow("SoC magazynu na koniec", pNext.battery_soc, null, true)}
+          ${this._pvRow("🏠 Zużycie domu", this._forecastConsumptionAt(nextMs), null, { planOnly: true })}
+          ${this._pvRow("⚡ Pobór z sieci", pNext.grid_buy_kwh, null, { planOnly: true })}
+          ${this._socRow("🔋 SoC ESS na koniec", pNext.battery_soc, null, true)}
         `
       : html`<div class="muted">poza horyzontem planu</div>`;
 
     const socNow = sCur?.soc ?? null;
     return html`<div class="card">
-      <div class="card-title">Sterowanie — plan vs realizacja</div>
+      <div class="card-title">Sterowanie — realizacja vs plan</div>
       <div class="hours-grid">
         ${this._hourCol("prev", "Poprzednia godzina", range(prevMs), prevBody)}
         ${this._hourCol(
@@ -1475,10 +1479,10 @@ export class PowerPilotPanel extends LitElement {
         ${this._hourCol("next", "Następna godzina", range(nextMs), nextBody)}
       </div>
       <div class="stat-row hours-footer">
-        ${this._stat("SoC baterii teraz", socNow != null ? socNow.toFixed(0) + " %" : "—")}
-        ${this._stat("Cena energii w baterii", current.battery_energy_cost.toFixed(2) + " PLN/kWh")}
+        ${this._stat("🔋 SoC ESS teraz", socNow != null ? socNow.toFixed(0) + " %" : "—")}
+        ${this._stat("🔋 Cena energii w ESS", current.battery_energy_cost.toFixed(2) + " PLN/kWh")}
         ${this._stat(
-          "EV teraz",
+          "🚗 EV teraz",
           current.ev_charge
             ? "ładuje" + (current.ev_charge_minutes != null ? ` (${current.ev_charge_minutes} min)` : "")
             : "—"
@@ -1652,8 +1656,8 @@ export class PowerPilotPanel extends LitElement {
    *
    * Diverging stacked columns + SoC line:
    *   - UP (positive)   = energy supply, stacked into one bar:
-   *                       grid import (charging the battery *or* passthrough)
-   *                       + battery discharge.
+   *                       grid import (charging the ESS *or* passthrough)
+   *                       + ESS discharge.
    *   - DOWN (negative) = consumption, stacked into one bar:
    *                       base household load + per-device + EV + battery charge.
    * Background bands show the inverter mode (charge / discharge / passthrough).
@@ -1709,19 +1713,19 @@ export class PowerPilotPanel extends LitElement {
     };
     const deviceIds = s.device_ids ?? [];
     const upRows: Row[] = [
-      { label: "Import z sieci", color: "#8e44ad", key: "grid", get: (h) => h.grid_buy_kwh },
-      { label: "Bateria — rozładowanie", color: "#b0a14f", key: "discharge", get: (h) => h.battery_discharge_kwh },
+      { label: "⚡ Import z sieci", color: "#8e44ad", key: "grid", get: (h) => h.grid_buy_kwh },
+      { label: "🔋 ESS — rozładowanie", color: "#b0a14f", key: "discharge", get: (h) => h.battery_discharge_kwh },
     ];
     const downRows: Row[] = [
-      { label: "Zużycie bazowe", color: "#b5475d", key: "base", get: baseConsumption },
+      { label: "🏠 Zużycie bazowe", color: "#b5475d", key: "base", get: baseConsumption },
       ...deviceIds.map((eid, idx) => ({
         label: `Urz: ${eid.split(".").slice(-1)[0]}`,
         color: DEVICE_PALETTE[idx % DEVICE_PALETTE.length],
         key: `dev:${eid}`,
         get: device(eid),
       })),
-      { label: "EV ładowanie", color: "#15803d", key: "ev", get: (h) => h.ev_charge_kwh },
-      { label: "Bateria — ładowanie", color: "#c98a3a", key: "charge", get: (h) => h.battery_charge_kwh },
+      { label: "🚗 Ładowanie EV", color: "#15803d", key: "ev", get: (h) => h.ev_charge_kwh },
+      { label: "🔋 ESS — ładowanie", color: "#c98a3a", key: "charge", get: (h) => h.battery_charge_kwh },
     ];
 
     // √-compressed bar heights: an EV-charge hour (10+ kWh) would otherwise
@@ -1801,7 +1805,7 @@ export class PowerPilotPanel extends LitElement {
     }
     if (socData.length) {
       series.push({
-        name: "SoC %",
+        name: "🔋 SoC ESS %",
         type: "line",
         data: socData,
         color: "#22c55e",
@@ -1815,7 +1819,7 @@ export class PowerPilotPanel extends LitElement {
     const hasFcSoc = hrs.some((h) => h.forecast?.soc_end != null);
     if (hasFcSoc) {
       series.push({
-        name: "SoC prognoza %",
+        name: "🔋 SoC ESS prognoza %",
         type: "line",
         data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].forecast?.soc_end ?? null })),
         color: "#22c55e",
@@ -1833,7 +1837,7 @@ export class PowerPilotPanel extends LitElement {
     const hasEvSoc = hrs.some((h) => h.is_past && h.ev_soc != null);
     if (hasEvSoc) {
       series.push({
-        name: "EV SoC %",
+        name: "🚗 SoC EV %",
         type: "line",
         data: ts.map((t, i) => ({
           x: t + HOUR,
@@ -1845,7 +1849,7 @@ export class PowerPilotPanel extends LitElement {
     const hasFcEvSoc = hrs.some((h) => h.forecast?.ev_soc_end != null);
     if (hasFcEvSoc) {
       series.push({
-        name: "EV SoC prognoza %",
+        name: "🚗 SoC EV prognoza %",
         type: "line",
         data: ts.map((t, i) => ({ x: t + HOUR, y: hrs[i].forecast?.ev_soc_end ?? null })),
         color: "#3498db",
@@ -1948,7 +1952,7 @@ export class PowerPilotPanel extends LitElement {
           max: axMax,
           forceNiceScale: false,
           decimalsInFloat: 2,
-          title: { text: "kWh, skala √  (↑ sieć/bateria · ↓ zużycie)" },
+          title: { text: "kWh, skala √  (↑ sieć/ESS · ↓ zużycie)" },
           // Ticks are placed in √-space (bar height = √kWh); square them back
           // so the axis reads in real kWh.
           labels: {
@@ -1957,7 +1961,7 @@ export class PowerPilotPanel extends LitElement {
           },
         },
         {
-          seriesName: ["SoC %", "SoC prognoza %", "EV SoC %", "EV SoC prognoza %", MODE_SERIES],
+          seriesName: ["🔋 SoC ESS %", "🔋 SoC ESS prognoza %", "🚗 SoC EV %", "🚗 SoC EV prognoza %", MODE_SERIES],
           opposite: true,
           min: 0,
           max: 100,
@@ -2211,11 +2215,11 @@ export class PowerPilotPanel extends LitElement {
                 ${totalRow("↓ Zużycie", downRows)}
                 ${downRows.map(compRow).join("")}
                 ${sep}
-                <tr><td style="padding:1px 0">SoC</td>${valCells(socFn)}</tr>
-                ${hasEvSoc ? `<tr><td style="padding:1px 0">SoC EV</td>${valCells(evSocFn)}</tr>` : ""}
+                <tr><td style="padding:1px 0">🔋 SoC ESS</td>${valCells(socFn)}</tr>
+                ${hasEvSoc ? `<tr><td style="padding:1px 0">🚗 SoC EV</td>${valCells(evSocFn)}</tr>` : ""}
                 ${
                   h.charge_power_kw != null && h.charge_power_kw > 0.005
-                    ? `<tr><td style="padding:1px 0">Moc ładowania (sieć)</td><td colspan="${sides.length}" style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px">${fmt(h.charge_power_kw)} kW</td></tr>`
+                    ? `<tr><td style="padding:1px 0">🔋 Moc ładowania ESS (sieć)</td><td colspan="${sides.length}" style="text-align:right;font-variant-numeric:tabular-nums;padding-left:14px">${fmt(h.charge_power_kw)} kW</td></tr>`
                     : ""
                 }
               </table>
@@ -2413,7 +2417,7 @@ export class PowerPilotPanel extends LitElement {
 
     // The PLN/kWh axis is √-compressed (like the kWh axis on the energy panel):
     // the decisive differences live in the 0.2–0.8 range where the price lines
-    // cross "Cena w baterii", while rare 2–3 PLN spikes would flatten them.
+    // cross "Cena w ESS", while rare 2–3 PLN spikes would flatten them.
     // Signed so occasional negative RDN prices keep working; axis labels square
     // back to real PLN/kWh and the tooltip reads raw row values.
     const sqrtP = (v: number | null): number | null =>
@@ -2509,13 +2513,13 @@ export class PowerPilotPanel extends LitElement {
       // Near-black (near-white in dark mode) — teal read as "blue" and sank
       // into the blue battery-cost columns it usually overlaps.
       {
-        name: "Cena w baterii",
+        name: "🔋 Cena w ESS",
         type: "line",
         data: batCostData,
         color: dark ? "#e5e7eb" : "#111827",
       },
-      { name: "Koszt energii - sieć", type: "column", data: gridCostData, color: "#e67e22" },
-      { name: "Koszt energii - bateria", type: "column", data: batUseCostData, color: "#3b82f6" },
+      { name: "⚡ Koszt energii — sieć", type: "column", data: gridCostData, color: "#e67e22" },
+      { name: "🔋 Koszt energii — ESS", type: "column", data: batUseCostData, color: "#3b82f6" },
     ];
 
     const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
@@ -2564,7 +2568,7 @@ export class PowerPilotPanel extends LitElement {
           // Values live in √-space (see sqrtP) — square ticks back to PLN/kWh.
           // Bounds are explicit (data max + 6%): forceNiceScale would round the
           // √ max up and waste most of the panel above the lines.
-          seriesName: [...priceSeriesNames, "Cena w baterii"],
+          seriesName: [...priceSeriesNames, "🔋 Cena w ESS"],
           title: { text: "PLN/kWh, skala √" },
           min: priceAxMin,
           max: priceAxMax,
@@ -2578,7 +2582,7 @@ export class PowerPilotPanel extends LitElement {
           decimalsInFloat: 2,
         },
         {
-          seriesName: ["Koszt energii - sieć", "Koszt energii - bateria"],
+          seriesName: ["⚡ Koszt energii — sieć", "🔋 Koszt energii — ESS"],
           opposite: true,
           title: { text: "PLN/h, skala √" },
           // Column heights live in √-space — square tick values back to PLN.
@@ -2634,10 +2638,10 @@ export class PowerPilotPanel extends LitElement {
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· energia</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.buy_price)} PLN/kWh</td></tr>
                 <tr><td style="padding:1px 0 1px 10px;opacity:0.8">· dystrybucja (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.distribution_price_kwh)} PLN/kWh</td></tr>
                 ${row.fixed_cost ? `<tr><td style="padding:1px 0 1px 10px;opacity:0.8">· koszt stały (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.fixed_cost)} PLN/h</td></tr>` : ""}
-                <tr><td style="padding:1px 0">Cena w baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.battery_energy_cost)} PLN/kWh</td></tr>
+                <tr><td style="padding:1px 0">🔋 Cena w ESS</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.battery_energy_cost)} PLN/kWh</td></tr>
                 <tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>
                 <tr><td style="padding:1px 0">Koszt z sieci</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.hour_cost)} PLN</td></tr>
-                <tr><td style="padding:1px 0">Koszt z baterii</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.battery_use_cost)} PLN</td></tr>
+                <tr><td style="padding:1px 0">🔋 Koszt z ESS</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.battery_use_cost)} PLN</td></tr>
                 <tr><td style="padding:1px 0">Koszt stały</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.fixed_cost)} PLN/h</td></tr>
               </table>
             </div>
@@ -3107,7 +3111,7 @@ export class PowerPilotPanel extends LitElement {
           ${ev.min_soc != null ? html`<span class="muted">· min ${ev.min_soc}%</span>` : nothing}
         </div>
         <div class="check">
-          Pojemność baterii:
+          Pojemność ESS:
           ${ev.capacity_kwh != null
             ? html`<b>${ev.capacity_kwh.toFixed(1)} kWh</b>
                 <span class="muted">
@@ -3243,13 +3247,13 @@ export class PowerPilotPanel extends LitElement {
           <div class="card-title">1 · Wejścia — sensory i źródła danych</div>
           <div class="flow-inputs">
             ${this._flowInput("Zużycie domu", inp.consumption)}
-            ${this._flowInput("SoC baterii", inp.battery_soc)}
-            ${this._flowInput("Ładowanie baterii", inp.battery_charge)}
-            ${this._flowInput("Rozładowanie baterii", inp.battery_discharge)}
+            ${this._flowInput("🔋 SoC ESS", inp.battery_soc)}
+            ${this._flowInput("🔋 Ładowanie ESS", inp.battery_charge)}
+            ${this._flowInput("🔋 Rozładowanie ESS", inp.battery_discharge)}
             ${this._flowInput("Import z sieci", inp.grid_import)}
             ${this._flowInput("Cena energii (RDN)", inp.buy_price_sensor)}
             ${this._flowInput("Pogoda", inp.weather)}
-            ${this._flowInput("EV SoC", inp.ev_soc)}
+            ${this._flowInput("🚗 SoC EV", inp.ev_soc)}
             ${this._flowInput("EV energia sesji", inp.ev_energy_added)}
           </div>
           <div class="check muted">
@@ -3293,10 +3297,10 @@ export class PowerPilotPanel extends LitElement {
           </div>
         </div>
 
-        ${arrow("zapotrzebowanie + ceny → model baterii")}
+        ${arrow("zapotrzebowanie + ceny → model ESS")}
 
         <div class="card flow-stage">
-          <div class="card-title">4 · Model baterii — skąd bierze się „Cena w baterii"</div>
+          <div class="card-title">4 · 🔋 Model ESS — skąd bierze się „Cena w ESS"</div>
           <div class="check">
             Pojemność <b>${n2(bat.capacity_kwh, 1)} kWh</b> · SoC
             <b>${bat.soc != null ? bat.soc.toFixed(0) + " %" : "—"}</b> ·
@@ -3308,7 +3312,7 @@ export class PowerPilotPanel extends LitElement {
             koszt zużycia (wear) <b>${n2(bat.wear_cost)} PLN/kWh</b>
           </div>
           <div class="flow-formula">
-            wkładanie: 1 kWh z sieci → ${n2(bat.charge_efficiency)} kWh w baterii
+            wkładanie: 1 kWh z sieci → ${n2(bat.charge_efficiency)} kWh w ESS
             (strata ładowania) — zmagazynowanie teraz kosztowałoby
             ≈ <b>${n2(bat.store_cost_now)} PLN/kWh</b>
           </div>
@@ -3316,13 +3320,13 @@ export class PowerPilotPanel extends LitElement {
             koszt zmagazynowany (średnia ważona zakupów): <b>${n2(bat.reservoir_cost)} PLN/kWh</b>
           </div>
           <div class="flow-formula flow-highlight">
-            „Cena w baterii" = ${n2(bat.reservoir_cost)} / η ${n2(bat.discharge_efficiency)}
+            „Cena w ESS" = ${n2(bat.reservoir_cost)} / η ${n2(bat.discharge_efficiency)}
             + wear ${n2(bat.wear_cost)} = <b>${n2(bat.delivered_cost)} PLN/kWh</b>
             <span class="muted">(strata rozładowania wliczana przy oddawaniu energii)</span>
           </div>
         </div>
 
-        ${arrow("koszt z sieci vs koszt z baterii → decyzje co godzinę")}
+        ${arrow("koszt z sieci vs koszt z ESS → decyzje co godzinę")}
 
         <div class="card flow-stage">
           <div class="card-title">5 · Optymalizator</div>
@@ -3344,8 +3348,8 @@ export class PowerPilotPanel extends LitElement {
               </div>
               <div class="check muted">
                 Koszt godziny: ${n2(cur.hour_cost)} PLN z sieci +
-                ${n2(cur.battery_use_cost)} PLN z baterii (rozładowanie ×
-                „cena w baterii") · SoC na koniec: ${cur.battery_soc_end.toFixed(0)} %
+                ${n2(cur.battery_use_cost)} PLN z ESS (rozładowanie ×
+                „cena w ESS") · SoC ESS na koniec: ${cur.battery_soc_end.toFixed(0)} %
               </div>`
             : html`<div class="check muted">Brak decyzji dla bieżącej godziny.</div>`}
           ${f.ev.enabled
@@ -3469,10 +3473,10 @@ export class PowerPilotPanel extends LitElement {
       </div>
 
       <div class="card">
-        <div class="card-title">🔋 Bateria domowa — round-trip z liczników</div>
+        <div class="card-title">🔋 ESS — round-trip z liczników</div>
         ${!bat.available
           ? html`<div class="empty">
-              Potrzebne sensory ładowania i rozładowania baterii (ustawienia podstawowe).
+              Potrzebne sensory ładowania i rozładowania ESS (ustawienia podstawowe).
             </div>`
           : html`
               <div class="check muted">

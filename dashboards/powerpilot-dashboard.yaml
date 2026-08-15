@@ -28,7 +28,7 @@ cards:
   - type: custom:apexcharts-card
     header:
       show: true
-      title: PowerPilot — bateria i przepływy energii
+      title: PowerPilot — 🔋 ESS i przepływy energii
       show_states: false
     graph_span: 4d
     span:
@@ -52,7 +52,7 @@ cards:
             text: kWh
     series:
       - entity: sensor.powerpilot_optimization_plan
-        name: Końcowy SOC baterii (%)
+        name: 🔋 Końcowy SoC ESS (%)
         type: line
         yaxis_id: soc
         stroke_width: 2
@@ -143,7 +143,7 @@ cards:
             new Date(f.start).getTime(), f.sell_price
           ]);
       - entity: sensor.powerpilot_optimization_plan
-        name: Cena energii w baterii (po stratach)
+        name: 🔋 Cena energii w ESS (po stratach)
         type: line
         yaxis_id: price
         stroke_width: 2

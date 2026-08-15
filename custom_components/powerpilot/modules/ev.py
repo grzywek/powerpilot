@@ -305,6 +305,11 @@ class EVRequest:
     battery_kwh: float = 60.0
     current_soc: float | None = None
     available_hours: set[datetime] = field(default_factory=set)
+    # Hours available for only PART of their length (the car drives off
+    # mid-hour): hour → usable fraction (0..1]. Absent = the whole hour. The
+    # allocator scales that hour's charging yield by it, and for the running
+    # hour the value already accounts for the minutes elapsed.
+    hour_fraction: dict[datetime, float] = field(default_factory=dict)
     # Calendar-driven plans.
     forced_hours: set[datetime] = field(default_factory=set)
     targets: list[EVChargeTarget] = field(default_factory=list)
@@ -362,6 +367,10 @@ class EVModule(PowerPilotModule):
         # extended by travel time + margins) — the only source of
         # *unavailability*; absent that, every forecast hour is chargeable.
         self._unavailable_hours: set[datetime] = set()
+        # Hours only PARTLY available: the car drives off mid-hour, so charging
+        # can still run from the top of the hour until it leaves. Value = the
+        # usable fraction of the hour (0..1).
+        self._partial_hours: dict[datetime, float] = {}
         # Predicted per-hour drive drain (kWh) from calendar trips.
         self._trip_drain: dict[datetime, float] = {}
         self._request = EVRequest()
@@ -695,6 +704,7 @@ class EVModule(PowerPilotModule):
         self._trip_targets = []
         self._forced_hours = set()
         self._unavailable_hours = set()
+        self._partial_hours = {}
         self._trip_drain = {}
 
         calendar = self.coordinator.calendar
@@ -765,8 +775,24 @@ class EVModule(PowerPilotModule):
         pre-departure charge targets are added per CHAIN, not per trip — see
         :meth:`_apply_chain_targets`.
         """
-        # 1. Unavailability — every hour the away window touches.
-        hour = max(trip.depart, now).replace(minute=0, second=0, microsecond=0)
+        # 1. Unavailability — every hour the away window covers. The hour the
+        #    car drives off in is only PARTLY gone: leaving at 13:40 still
+        #    leaves 40 chargeable minutes, so it is kept as a fraction instead
+        #    of being written off whole. The RETURN hour stays unavailable —
+        #    its usable minutes sit at the END of the hour, which a charger
+        #    started at the top of the hour cannot use.
+        depart_hour = _hour_floor(trip.depart)
+        hour = _hour_floor(max(trip.depart, now))
+        if trip.depart > now and trip.depart > depart_hour:
+            # Only the stretch still ahead of us counts when the departure hour
+            # is the one already running.
+            usable_from = max(depart_hour, now)
+            fraction = (trip.depart - usable_from).total_seconds() / 3600.0
+            if fraction > 0:
+                self._partial_hours[depart_hour] = min(
+                    self._partial_hours.get(depart_hour, 1.0), fraction
+                )
+            hour = depart_hour + timedelta(hours=1)
         while hour < trip.return_end:
             self._unavailable_hours.add(hour)
             hour += timedelta(hours=1)
@@ -856,20 +882,55 @@ class EVModule(PowerPilotModule):
         # is not actionable (battery_kwh = 0 → EVRequest.is_actionable is False).
         battery_kwh = self._capacity or 0.0
 
-        available_hours = {
+        horizon_hours = {
             slot.start.replace(minute=0, second=0, microsecond=0)
             for slot in forecast.slots
-        } - self._unavailable_hours
+        }
+        available_hours = horizon_hours - self._unavailable_hours
 
         # The running hour is only plannable when the car can actually take
         # energy RIGHT NOW (unplugged / driven off → the phase headroom goes
         # back to the house battery for the rest of the hour). Future hours
         # stay available — the car comes back and the plug-flip listener
         # re-plans the moment it does; each cycle re-evaluates this hour.
-        if self.chargeable_now() is False:
-            available_hours.discard(
-                dt_util.now().replace(minute=0, second=0, microsecond=0)
-            )
+        now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        chargeable = self.chargeable_now()
+        if chargeable is False:
+            available_hours.discard(now_hour)
+        elif (
+            chargeable is True
+            and now_hour in horizon_hours
+            and now_hour not in available_hours
+        ):
+            # And the other way round: the plug is ground truth for the present
+            # while the calendar is only a forecast of absence. A car still
+            # plugged in at home CAN charge now, even in an hour the calendar
+            # wrote off because the trip was meant to have left already (left
+            # two hours late, came back early, event overran). Only the running
+            # hour is re-opened — whether the car is still here at 16:00 is
+            # genuinely unknown — so each hour re-opens as it becomes current
+            # and the car is still on the cable.
+            #
+            # Only hours the calendar actually EXCLUDED are re-opened: an hour
+            # the car is about to leave in is already available with a fraction
+            # (departure at 13:40 → 40 minutes), and that cap must survive —
+            # being plugged in right now says nothing about staying past 13:40.
+            available_hours.add(now_hour)
+            self._partial_hours.pop(now_hour, None)
+
+        # Fractions only mean anything for hours that survived as available.
+        partial_hours = {
+            hour: fraction
+            for hour, fraction in self._partial_hours.items()
+            if hour in available_hours
+        }
+
+        # A car sitting on the cable at home is not on the road, whatever the
+        # calendar predicted for this hour — its drive drain would otherwise
+        # pull the projected SoC down while the car demonstrably charges.
+        drain = dict(self._trip_drain)
+        if chargeable is True:
+            drain.pop(now_hour, None)
 
         # Explicit keyword plans take over routine sizing; automatic trip
         # targets do NOT — they are a floor on top of normal behaviour, so the
@@ -905,9 +966,10 @@ class EVModule(PowerPilotModule):
             battery_kwh=battery_kwh,
             current_soc=self._soc,
             available_hours=available_hours,
+            hour_fraction=partial_hours,
             forced_hours=set(self._forced_hours),
             targets=[*self._targets, *self._trip_targets],
-            drain_kwh=dict(self._trip_drain),
+            drain_kwh=drain,
             min_soc=self.min_soc,
             charge_ceiling_soc=self._charge_ceiling_soc(),
             prefer_contiguous=bool(self.config.get(CONF_EV_PREFER_CONTIGUOUS)),

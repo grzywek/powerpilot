@@ -431,6 +431,44 @@ def test_default_topup_uses_cheapest_hours() -> None:
     assert set(alloc) == {1, 3}
 
 
+def test_partial_hour_charges_only_until_departure() -> None:
+    """The hour the car drives off in yields only its usable minutes.
+
+    A 7 kW charger in an hour the car leaves 45 minutes into can add 5.25 kWh,
+    not 7 — and the automation must be told 45 minutes, not a full hour.
+    """
+    fc = _forecast([0.1] + [0.9] * 5)  # h0 far cheaper than anything after
+    req = EVRequest(
+        enabled=True,
+        charger_kw=7.0,
+        battery_kwh=60.0,
+        current_soc=20.0,
+        available_hours={s.start for s in fc.slots},
+        hour_fraction={BASE: 0.75},
+        forced_hours={BASE},
+    )
+    alloc = _optimizer()._plan_ev(fc, req)
+    assert round(alloc.added[BASE], 3) == 5.25
+    assert alloc.minutes[BASE] == 45
+
+
+def test_partial_hour_spills_the_rest_onto_the_next_hours() -> None:
+    """What the shortened hour can't take is charged elsewhere, not dropped."""
+    fc = _forecast([0.1, 0.2, 0.9, 0.9])
+    req = EVRequest(
+        enabled=True,
+        charger_kw=10.0,
+        battery_kwh=100.0,
+        current_soc=0.0,
+        available_hours={s.start for s in fc.slots},
+        hour_fraction={BASE: 0.5},  # 5 kWh instead of 10
+        targets=[EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=15.0)],
+    )
+    alloc = _hours(_optimizer()._plan_ev(fc, req))
+    assert alloc[0] == 5.0
+    assert round(sum(alloc.values()), 3) == 15.0
+
+
 def test_not_actionable_returns_empty() -> None:
     fc = _forecast([0.5] * 4)
     req = EVRequest(enabled=False, available_hours={s.start for s in fc.slots})
@@ -448,6 +486,7 @@ def _bare_module(**state) -> EVModule:
     module._trip_targets = []
     module._forced_hours = set()
     module._unavailable_hours = set()
+    module._partial_hours = {}
     module._trip_drain = {}
     module._capacity = state.get("capacity", 60.0)
     module._kwh_per_km = state.get("kwh_per_km")
@@ -752,7 +791,46 @@ def test_apply_trip_marks_away_hours_unavailable() -> None:
     offsets = sorted(
         int((h - BASE).total_seconds() // 3600) for h in module._unavailable_hours
     )
-    assert offsets == [8, 9, 10, 11, 12, 13]
+    # h8 is NOT written off: the car leaves at 8:45, so 45 minutes of it are
+    # still chargeable. Everything from the departure hour onwards is gone,
+    # including the return hour (its free minutes sit at the end of the hour,
+    # where a charger started at :00 cannot reach them).
+    assert offsets == [9, 10, 11, 12, 13]
+    assert module._partial_hours == {BASE + timedelta(hours=8): 0.75}
+
+
+def test_apply_trip_writes_off_an_hour_it_leaves_on_the_hour() -> None:
+    """Departing exactly at :00 leaves no usable minutes — no partial hour."""
+    module = _bare_module()
+    # Event 10–12 with no travel time or margin → away 10:00 – 12:00.
+    module._apply_trip(_trip(10, 12, 50.0, 0.0, 0.0), BASE)
+    offsets = sorted(
+        int((h - BASE).total_seconds() // 3600) for h in module._unavailable_hours
+    )
+    assert offsets == [10, 11]
+    assert module._partial_hours == {}
+
+
+def test_apply_trip_partial_hour_counts_only_the_time_still_ahead() -> None:
+    """Mid-hour, only the minutes between now and departure are chargeable."""
+    module = _bare_module()
+    now = BASE + timedelta(hours=8, minutes=15)
+    # Away 8:45 onwards, but it is already 8:15 → 30 usable minutes, not 45.
+    module._apply_trip(_trip(10, 12, 50.0, 45.0, 30.0), now)
+    assert module._partial_hours == {BASE + timedelta(hours=8): 0.5}
+
+
+def test_apply_trip_already_departed_writes_off_the_running_hour() -> None:
+    """Past its departure the whole running hour is away — the plug sensor, not
+    the calendar, is what can re-open it (see get_request)."""
+    module = _bare_module()
+    now = BASE + timedelta(hours=9, minutes=20)
+    module._apply_trip(_trip(10, 12, 50.0, 45.0, 30.0), now)
+    offsets = sorted(
+        int((h - BASE).total_seconds() // 3600) for h in module._unavailable_hours
+    )
+    assert offsets == [9, 10, 11, 12, 13]
+    assert module._partial_hours == {}
 
 
 def test_apply_trip_builds_drain_and_target() -> None:
@@ -893,6 +971,7 @@ def _module_with_state(**state) -> EVModule:
     module._trip_targets = state.get("trip_targets", [])
     module._forced_hours = state.get("forced_hours", set())
     module._unavailable_hours = state.get("unavailable_hours", set())
+    module._partial_hours = state.get("partial_hours", {})
     module._trip_drain = state.get("trip_drain", {})
     min_soc = state.get("min_soc")
     module.min_soc_entity = (
@@ -1484,3 +1563,78 @@ def test_unknown_availability_does_not_restrict_the_plan() -> None:
     fc = _now_forecast()
     req = _module_with_state(soc=20.0).get_request(fc)
     assert req.available_hours == {s.start for s in fc.slots}
+
+
+def test_still_plugged_reopens_an_hour_the_calendar_wrote_off() -> None:
+    """The calendar only predicts absence; the cable proves presence.
+
+    Left two hours later than the event said → the car is still on the charger
+    in an hour the trip window had written off. That hour is chargeable and
+    must come back, or the delay silently costs a cheap charging hour.
+    """
+    fc = _now_forecast()
+    now_hour = fc.slots[0].start
+    away = {s.start for s in fc.slots[:3]}  # calendar: gone for three hours
+    module = _module_with_state(soc=20.0, plugged=True, unavailable_hours=set(away))
+
+    req = module.get_request(fc)
+
+    assert now_hour in req.available_hours
+    # Only the running hour: whether the car is still here in two hours is
+    # genuinely unknown, so the calendar keeps the later hours.
+    assert fc.slots[1].start not in req.available_hours
+    assert fc.slots[2].start not in req.available_hours
+
+
+def test_still_plugged_keeps_the_cap_of_an_hour_about_to_end_in_a_departure() -> None:
+    """Being on the cable now says nothing about staying past 13:40.
+
+    Re-opening must only rescue hours the calendar EXCLUDED — an hour the car
+    leaves partway through is already available with a fraction, and that cap
+    has to survive or the plan buys minutes the car will not be there for.
+    """
+    fc = _now_forecast()
+    now_hour = fc.slots[0].start
+    module = _module_with_state(
+        soc=20.0, plugged=True, partial_hours={now_hour: 0.5}
+    )
+
+    req = module.get_request(fc)
+
+    assert now_hour in req.available_hours
+    assert req.hour_fraction == {now_hour: 0.5}
+
+
+def test_still_plugged_drops_the_running_hour_drive_drain() -> None:
+    """A car on the cable at home is not on the road, whatever the calendar
+    predicted — its drain must not pull the projected SoC down."""
+    fc = _now_forecast()
+    now_hour = fc.slots[0].start
+    later = fc.slots[2].start
+    module = _module_with_state(
+        soc=20.0,
+        plugged=True,
+        unavailable_hours={now_hour},
+        trip_drain={now_hour: 4.0, later: 3.0},
+    )
+
+    req = module.get_request(fc)
+
+    assert now_hour not in req.drain_kwh
+    assert req.drain_kwh == {later: 3.0}
+
+
+def test_partial_departure_hour_reaches_the_request() -> None:
+    """A mid-hour departure passes through as a fraction, not an all-or-nothing."""
+    fc = _now_forecast()
+    depart_hour = fc.slots[2].start
+    module = _module_with_state(
+        soc=20.0, partial_hours={depart_hour: 0.75, fc.slots[3].start: 0.5}
+    )
+    module._unavailable_hours = {fc.slots[3].start}  # a later trip took it whole
+
+    req = module.get_request(fc)
+
+    # The fraction survives for the hour that is still available, and is dropped
+    # for the one no longer in the plan at all.
+    assert req.hour_fraction == {depart_hour: 0.75}

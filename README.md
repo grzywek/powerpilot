@@ -80,7 +80,7 @@ flow (Settings → Devices & Services → PowerPilot → Configure → 🚗 EV).
 |-------|------|----------|
 | EV SoC sensor | `%` | current charge level — sizes how much energy is still needed |
 | EV target SoC sensor | `%` | the car's own charge target; becomes the default goal (instead of a fixed 80 %) |
-| Charger connected | on/off | **availability gate** — the car only charges while plugged in (overrides the location tracker) |
+| Charger connected | on/off | **availability gate for the running hour**, both ways: unplugged → this hour drops out of the plan; plugged → this hour is chargeable even if a calendar trip said the car would already be gone (overrides the location tracker) |
 | Charging now | on/off | plan-vs-reality check — warns when a charging window is due but the charger draws no power |
 | Energy added this session | `kWh` (increasing) | how much energy the current session has delivered (shown in the panel) |
 | Charger behind the meters | toggle | **off** = the charger taps in before the house meters (own metering point): grid import never sees EV charging, so the realized import and hour costs add the car's session energy back (÷ charging efficiency, skipping away-trip hours) |
@@ -92,6 +92,12 @@ With neither a "charger connected" sensor nor a location tracker, the car is
 assumed to be available. EV charging always runs at the **full** charger power
 (per-phase × phases) for any hour it's scheduled — never a throttled fraction —
 clipped only by the pack's 100 % ceiling on the final hour.
+
+A trip does not write off the hour it starts in: leaving at 13:40 still leaves
+40 chargeable minutes, so that hour is planned as a **partial** one (its yield
+and its charging minutes scale down accordingly). The hour the car comes back in
+stays out of the plan — its free minutes sit at the *end* of the hour, where a
+charger started at the top of the hour cannot reach them.
 
 ### Calendar plans
 

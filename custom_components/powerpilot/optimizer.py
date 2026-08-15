@@ -845,18 +845,18 @@ class Optimizer:
             return (
                 f"rozładowanie {delivered:.2f} kWh: cena {total_price:.3f} ≥ próg "
                 f"opłacalnego rozładowania {discharge_threshold:.3f} — taniej "
-                f"z baterii niż z sieci"
+                f"z ESS niż z sieci"
             )
         if total_price < charge_threshold:
             return (
                 f"cena {total_price:.3f} < próg ładowania {charge_threshold:.3f}, "
-                f"ale optymalizator nie ładuje (bateria pełna albo brak droższych "
+                f"ale optymalizator nie ładuje (ESS pełny albo brak droższych "
                 f"godzin do pokrycia tą energią) → passthrough"
             )
         if total_price > discharge_threshold:
             return (
                 f"cena {total_price:.3f} > próg rozładowania "
-                f"{discharge_threshold:.3f}, ale energia z baterii jest "
+                f"{discharge_threshold:.3f}, ale energia z ESS jest "
                 f"potrzebna na jeszcze droższe godziny → passthrough"
             )
         return (
@@ -940,9 +940,14 @@ class Optimizer:
         first_start = forecast.slots[0].start if forecast.slots else None
 
         def hour_cap(start: datetime) -> float:
-            if start == first_start:
-                return hour_cap_added * first_hour_frac
-            return hour_cap_added
+            # An hour the car drives off in is chargeable only up to departure.
+            # The request's fraction is authoritative where it exists — for the
+            # running hour it already folds in the minutes elapsed, so it must
+            # not be scaled by ``first_hour_frac`` on top.
+            fraction = ev_request.hour_fraction.get(start)
+            if fraction is None:
+                fraction = first_hour_frac if start == first_start else 1.0
+            return hour_cap_added * max(fraction, 0.0)
         battery_kwh = max(ev_request.battery_kwh, 0.0)
         # Highest SoC the planner may intentionally buy to. The car/charger is
         # steered off ``soc_limit_now`` and stops there, so energy planned past

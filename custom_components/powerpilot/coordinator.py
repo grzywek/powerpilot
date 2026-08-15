@@ -2727,6 +2727,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "connect_charger": False,
                 "charging_now": False,
                 "charge_start": None,
+                "charge_until": None,
                 "soc_limit": None,
                 "soc": None,
                 "charge_minutes": None,
@@ -2763,11 +2764,34 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             else charge_start_minutes
         )
 
+        # The window the charger should actually be held on for. The running
+        # hour is planned against the minutes it has LEFT — its budget is the
+        # tail of the hour, not its head — so anchoring the window at the top
+        # of the hour told the automation to charge minutes that had already
+        # elapsed ("start 21:00, 3 min" published at 21:57) while
+        # ``charging_now`` stayed true for the other fifty-odd.
+        #
+        # The anchor is when the plan was MADE, not now: those minutes were
+        # sized against the hour's remainder at that moment, and a window that
+        # slid with the wall clock would keep restarting itself and never
+        # finish. Future hours are unaffected — they are planned whole.
+        if charging_now and current is not None:
+            charge_start = max(plan.created_at or current.start, current.start)
+        if charge_start is not None and charge_minutes:
+            charge_until = min(
+                charge_start + timedelta(minutes=charge_minutes),
+                charge_start.replace(minute=0, second=0, microsecond=0)
+                + timedelta(hours=1),
+            )
+        else:
+            charge_until = None
+
         return {
             "enabled": True,
             "connect_charger": connect,
             "charging_now": charging_now,
             "charge_start": charge_start.isoformat() if charge_start else None,
+            "charge_until": charge_until.isoformat() if charge_until else None,
             "soc_limit": ev.soc_limit_now(),
             "soc": ev.soc,
             "charge_minutes": charge_minutes,

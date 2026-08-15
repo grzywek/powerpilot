@@ -1490,8 +1490,9 @@ rect.legend-mouseover-inactive,
           Ładuj teraz: <b>${this._evBool(e.control.charging_now,"tak","nie")}</b>
         </div>
         <div class="check">
-          Start ładowania:
-          <b>${e.control.charge_start?this._fmtRun(e.control.charge_start):"\u2014"}</b> ·
+          Okno ładowania:
+          <b>${e.control.charge_start?this._fmtRun(e.control.charge_start):"\u2014"}</b> →
+          <b>${e.control.charge_until?this._fmtRun(e.control.charge_until):"\u2014"}</b> ·
           Limit SoC: <b>${e.control.soc_limit!==null?`${e.control.soc_limit}%`:"\u2014"}</b> ·
           Minuty w godzinie:
           <b>${e.control.charge_minutes!==null?`${e.control.charge_minutes} min`:"\u2014"}</b>

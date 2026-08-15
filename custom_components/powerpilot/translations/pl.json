@@ -293,6 +293,9 @@
       "ev_charge_start": {
         "name": "🚗 EV początek ładowania"
       },
+      "ev_charge_until": {
+        "name": "🚗 EV koniec ładowania"
+      },
       "ev_soc_limit": {
         "name": "🚗 Limit ładowania EV (SoC)"
       },

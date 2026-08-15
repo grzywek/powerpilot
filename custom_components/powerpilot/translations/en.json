@@ -293,6 +293,9 @@
       "ev_charge_start": {
         "name": "EV next charge start"
       },
+      "ev_charge_until": {
+        "name": "EV charge until"
+      },
       "ev_soc_limit": {
         "name": "EV charge limit (SoC)"
       },

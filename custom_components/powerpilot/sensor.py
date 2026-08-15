@@ -24,6 +24,7 @@ from .const import (
     SENSOR_ESS_CHARGE_START,
     SENSOR_EV_CHARGE_MINUTES,
     SENSOR_EV_CHARGE_START,
+    SENSOR_EV_CHARGE_UNTIL,
     SENSOR_EV_SOC_LIMIT,
     SENSOR_INVERTER_MODE,
     SENSOR_NEXT_ACTION,
@@ -47,6 +48,7 @@ async def async_setup_entry(
             NextActionSensor(coordinator, entry),
             EssChargeStartSensor(coordinator, entry),
             EVChargeStartSensor(coordinator, entry),
+            EVChargeUntilSensor(coordinator, entry),
             EVSocLimitSensor(coordinator, entry),
             EVChargeMinutesSensor(coordinator, entry),
         ]
@@ -254,6 +256,30 @@ class EVChargeStartSensor(PowerPilotEntity, SensorEntity):
     def native_value(self):
         start = self.coordinator.ev_control().get("charge_start")
         return dt_util.parse_datetime(start) if start else None
+
+
+class EVChargeUntilSensor(PowerPilotEntity, SensorEntity):
+    """When the charger should be switched back OFF (None if nothing planned).
+
+    ``ev_charge_start`` alone is not enough to steer the charger: an hour the
+    plan only wants partly charged needs an end as well, and for the hour
+    already running the planned minutes are its *remainder*, so they cannot be
+    counted from the top of the hour. This is that end, already clamped to the
+    hour, so an automation can hold the charger on between the two timestamps
+    without doing the arithmetic itself.
+    """
+
+    _attr_translation_key = SENSOR_EV_CHARGE_UNTIL
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-end"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_EV_CHARGE_UNTIL)
+
+    @property
+    def native_value(self):
+        until = self.coordinator.ev_control().get("charge_until")
+        return dt_util.parse_datetime(until) if until else None
 
 
 class EVSocLimitSensor(PowerPilotEntity, SensorEntity):

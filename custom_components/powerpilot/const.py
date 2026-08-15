@@ -373,4 +373,5 @@ BINARY_EV_CHARGE: Final = "ev_charge"
 SENSOR_EV_CHARGE_START: Final = "ev_charge_start"  # next planned charge start (timestamp)
 SENSOR_EV_SOC_LIMIT: Final = "ev_soc_limit"  # target SoC the car should charge to (%)
 SENSOR_EV_CHARGE_MINUTES: Final = "ev_charge_minutes"  # planned charging minutes within the active/next charge hour
+SENSOR_EV_CHARGE_UNTIL: Final = "ev_charge_until"  # when to switch the charger OFF (timestamp)
 BINARY_EV_CONNECT_CHARGER: Final = "ev_connect_charger"  # charging planned within 24 h

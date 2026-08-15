@@ -102,7 +102,7 @@ _CHARGE_PRICE_BUCKET = Decimal("0.01")
 # Bumped whenever the EV allocation strategy changes. Surfaced in the debug dump
 # so it's obvious from a JSON paste whether the running code is the current
 # allocator or a stale import.
-EV_ALLOCATOR_VERSION = "early-energy-first-2026-07"
+EV_ALLOCATOR_VERSION = "pack-level-aware-2026-08"
 
 
 @dataclass
@@ -966,20 +966,92 @@ class Optimizer:
 
         allocation: dict[datetime, float] = {}
 
-        def capacity_left() -> float:
-            """Room to the SoC ceiling including predicted trip drain.
+        # Chronological spine for the pack-level check: every hour that can
+        # move the car's charge — a plannable slot or an hour of predicted
+        # driving.
+        timeline = sorted(
+            {slot.start for slot in forecast.slots} | set(ev_request.drain_kwh)
+        )
 
-            Drain frees room in the pack (the car returns from a trip lower
-            than it left), so the routine top-up after a trip may buy the trip
-            energy back — without this credit the allocator would treat the
-            pack as still full and skip the recharge.
+        def pack_levels(
+            extra: dict[datetime, float] | None = None,
+        ) -> list[tuple[datetime, float]]:
+            """Projected pack level (kWh) at the end of every timeline hour.
+
+            Drive drain lands before charging within an hour, matching the SoC
+            line published in ``_decide`` — the car leaves, then plugs back in.
+            """
+            level = soc0_kwh
+            out: list[tuple[datetime, float]] = []
+            for hour in timeline:
+                level = max(0.0, level - ev_request.drain_kwh.get(hour, 0.0))
+                level += allocation.get(hour, 0.0)
+                if extra:
+                    level += extra.get(hour, 0.0)
+                out.append((hour, level))
+            return out
+
+        def headroom(
+            start: datetime, extra: dict[datetime, float] | None = None
+        ) -> float:
+            """kWh addable in ``start`` without ever breaching the ceiling.
+
+            Energy put into an hour raises the projected level in every LATER
+            hour as well, so the binding limit is the tightest room across the
+            whole remaining horizon — not the room in ``start`` alone.
+
+            This is the constraint the allocator used to lack. Room was one
+            scalar that credited the *entire* horizon's trip drain as if it had
+            already happened, so a week of driving (82 kWh) read as room in a
+            pack that had 15 kWh free. A post-trip deficit could then be bought
+            in the cheap hours BEFORE the trip, where the pack is still full:
+            the energy was priced, loaded into the LP as house demand, and
+            never delivered — while the target it was bought for went unmet
+            because nothing was placed after the drain.
             """
             if battery_kwh <= 0:
                 return float("inf")
-            drained = sum(ev_request.drain_kwh.values())
             return max(
-                0.0, ceiling_kwh - soc0_kwh + drained - sum(allocation.values())
+                0.0,
+                min(
+                    (
+                        ceiling_kwh - level
+                        for hour, level in pack_levels(extra)
+                        if hour >= start
+                    ),
+                    default=ceiling_kwh,
+                ),
             )
+
+        def pack_caps(candidates: list) -> dict[datetime, float]:
+            """Per-hour caps that are *jointly* deliverable, cheapest hours first.
+
+            The ceiling constrains every prefix of the plan, so per-hour room
+            does not simply add up: five hours in front of a full pack each
+            have "room to the ceiling", but together they can only deliver it
+            once. Room is therefore handed out in price order — the cheapest
+            hour takes as much as the prefix limits allow, the next takes
+            what's left — which keeps the caps jointly feasible without
+            spending the room on whichever hour merely comes first.
+
+            Any partial fill of caps built this way is feasible too (less
+            energy can only lower the level), so the placement search
+            downstream needs no pack awareness of its own.
+            """
+            caps = {
+                slot.start: max(
+                    0.0, hour_cap(slot.start) - allocation.get(slot.start, 0.0)
+                )
+                for slot in candidates
+            }
+            if battery_kwh <= 0:
+                return caps
+            granted: dict[datetime, float] = {}
+            for slot in sorted(candidates, key=lambda s: (slot_price(s), s.start)):
+                granted[slot.start] = min(
+                    caps[slot.start], headroom(slot.start, granted)
+                )
+            return granted
 
         def select(
             deficit: float, candidates: list, room: float | None = None
@@ -1007,30 +1079,31 @@ class Optimizer:
             earliest-finishing placement wins. This order stops a contiguous
             block on a later day from outbidding still-cheap hours today.
             """
-            deficit = min(deficit, capacity_left() if room is None else room)
+            if room is not None:
+                deficit = min(deficit, room)
             if deficit <= _EPS:
                 return {}
+            # What each hour can still absorb: charger headroom AND room under
+            # the pack ceiling once the projected level is walked forward. An
+            # hour sitting in front of a full pack is dropped however cheap it
+            # looks.
+            #
             # Hours already carrying a partial allocation stay eligible with
             # their remaining headroom — an earlier small target (a trip floor)
             # must not fence the cheapest hour off from a later, bigger target
             # and scatter its block over pricier hours. Physically the charger
             # simply runs at full power through the union of the chosen hours.
+            room_by_hour = pack_caps(candidates)
             slots = sorted(
-                (
-                    s
-                    for s in candidates
-                    if hour_cap(s.start) - allocation.get(s.start, 0.0) > _EPS
-                ),
+                (s for s in candidates if room_by_hour[s.start] > _EPS),
                 key=lambda s: s.start,
             )
             if not slots:
                 return {}
-            caps = {
-                s.start: hour_cap(s.start) - allocation.get(s.start, 0.0)
-                for s in slots
-            }
+            caps = {s.start: room_by_hour[s.start] for s in slots}
             # Every variant must deliver the same energy or it isn't comparable
             # by cost (an under-filled variant would win on price alone).
+            # ``caps`` is jointly feasible, so its sum is genuinely deliverable.
             deliverable = min(deficit, sum(caps.values()))
 
             hour_step = timedelta(hours=1)
@@ -1209,11 +1282,9 @@ class Optimizer:
         for start in sorted(ev_request.forced_hours):
             if start not in ev_request.available_hours or start not in slots_by_start:
                 continue
-            if capacity_left() <= _EPS:
-                break  # pack full to the ceiling — later hours can't take more
-            take = min(hour_cap(start), capacity_left())
+            take = min(hour_cap(start), headroom(start))
             if take <= _EPS:
-                continue  # a spent current hour has no window left; later ones do
+                continue  # a spent current hour (or a full pack) has no window
             allocation[start] = take
 
         # 2. Deadline targets, earliest deadline first. Predicted trip drain
@@ -1226,10 +1297,21 @@ class Optimizer:
         #    the targets are skipped rather than seeded from a fabricated 0 %
         #    (which used to swing the plan by half a pack between cycles).
         def drain_before(moment: datetime) -> float:
+            """Predicted driving fully completed by ``moment``.
+
+            Only whole hours count. Drain is bucketed per clock hour while a
+            deadline lands mid-hour, and the straddling bucket is driving that
+            happens *after* the deadline — a trip deadline IS the departure, so
+            the hour the car leaves in is spent on the road, not before it.
+            Counting it charged the same journey twice: a trip target's
+            ``target_soc`` already covers the round trip (reserve + trip
+            energy), so a car sitting above its target was told to buy another
+            packful before setting off.
+            """
             return sum(
                 kwh
                 for start, kwh in ev_request.drain_kwh.items()
-                if start < moment
+                if start + timedelta(hours=1) <= moment
             )
 
         targets = sorted(ev_request.targets, key=lambda t: t.deadline)
@@ -1288,4 +1370,23 @@ class Optimizer:
             out.minutes[start] = min(
                 60, max(1, math.ceil(added / hour_cap_added * 60.0))
             )
+
+        # The ceiling is physical: the charger stops there, so energy planned
+        # above it is never delivered. It IS still paid for and still enters
+        # the LP as house load, though, which is why this must be loud. The SoC
+        # projection in ``_decide`` clamps to the ceiling and would otherwise
+        # absorb the mistake silently — a flat SoC line under full charge bars.
+        if battery_kwh > 0 and ev_request.charge_ceiling_soc is not None:
+            for hour, level in pack_levels():
+                if level > ceiling_kwh + 1e-3:
+                    _LOGGER.warning(
+                        "EV: plan przekracza pojemność paku o %.2f kWh o %s "
+                        "(%.1f%% > sufit %.1f%%) — ta energia nie trafiłaby do "
+                        "auta, a byłaby wyceniona i obciążyłaby plan domu.",
+                        level - ceiling_kwh,
+                        dt_util.as_local(hour).strftime("%d.%m %H:%M"),
+                        level / battery_kwh * 100.0,
+                        ev_request.charge_ceiling_soc,
+                    )
+                    break
         return out

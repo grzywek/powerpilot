@@ -1,0 +1,4 @@
+1. "Sterowanie — plan vs realizacja" ja bym chyba odbił realizacja -> plan, jakoś sensowniej mi się patrzy na 18 -> 25 niż 25 -> 18
+2. czy plan poprawnie obsłuży sytuację późniejszego odłączenia EV niż było w planie? np. mam w kalendarzu wyjazd o 13, a faktycznie wyjechałem o 15, czyli 2h dłużej EV był podłączony i dodaj soc EV
+3. musimy ujednolicić i wszędzie pisać SoC EV albo SoC ESS (zamiast magazyn, bateria itp) i jeszcze emoji do tego gdzie się da
+4. wydaje mi się, że przy EV tracimy ułamkowe godziny. np. mam wyjazd 13:40, więc on już chyba 13 oznacza jako niedostepną, a to jednak 40 minut ładowania prawdopodobnie jeszcze jako możliwość

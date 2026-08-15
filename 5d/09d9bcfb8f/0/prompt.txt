@@ -1,0 +1,14 @@
+@"/Users/dawid/Downloads/powerpilot-debug-2026-08-15-19-57-23.json"
+mam taką sytuację i nie rozumiem tego ładowania EV.
+
+teraz sensory każą mi ładować, mimo że w planie nic nie ma. jutro pokazują mi się 4 pełne słupki ładownaia EV, mimo że SoC wzrasta w tym czasie tylko 75 -> 95
+
+wtf
+
+---
+
+co zmienisz? nie rozumiem tego trochę
+
+---
+
+ok

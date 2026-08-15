@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "5d09d9bcfb8f",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "custom_components/powerpilot/optimizer.py",
+    "tests/test_ev_pack_ceiling.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5d/09d9bcfb8f/0/metadata.json",
+      "transcript": "/5d/09d9bcfb8f/0/full.jsonl",
+      "compact_transcript": "/5d/09d9bcfb8f/0/transcript.jsonl",
+      "content_hash": "/5d/09d9bcfb8f/0/content_hash.txt",
+      "prompt": "/5d/09d9bcfb8f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 186,
+    "cache_creation_tokens": 380871,
+    "cache_read_tokens": 15897668,
+    "output_tokens": 89312,
+    "api_call_count": 99
+  }
+}

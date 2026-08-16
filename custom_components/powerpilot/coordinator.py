@@ -61,7 +61,7 @@ from .const import (
 )
 from . import pricing
 from .forecast import ForecastBuilder
-from .models import Decision, Plan, tariff_for_day
+from .models import Decision, ESSRequest, Plan, tariff_for_day
 from .modules.ev import CHARGING_STATES, HOME_STATES, PLUGGED_STATES
 from .modules.snapshots import SnapshotStore
 from .modules import (
@@ -449,7 +449,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # hour, so a mid-hour re-run (restart, calendar edit, the EV getting
         # plugged/unplugged) is physically consistent and may legitimately
         # change the active hour's action — no frozen decision needed.
-        plan = optimizer.optimize(forecast, battery, ev_request, reminders)
+        # ``#ess`` tags steer the house battery the way ``#<keyword>`` ones
+        # steer the car; the calendar module parses both.
+        ess_request = ESSRequest(
+            targets=list(self.calendar.ess_targets),
+            forced_hours=set(self.calendar.ess_forced_hours),
+        )
+        plan = optimizer.optimize(
+            forecast, battery, ev_request, reminders, ess_request=ess_request
+        )
 
         current = self.current_decision(plan)
         if current is not None:

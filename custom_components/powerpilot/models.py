@@ -154,6 +154,22 @@ class Decision:
 
 
 @dataclass
+class ESSRequest:
+    """Calendar-driven instructions for the HOUSE battery (``#ess`` tags).
+
+    ``targets`` are ``(deadline, SoC %, label)`` — be at that level by then.
+    ``forced_hours`` are hours the user asked to charge in regardless of price.
+    Both are clamped/softened in the optimizer: the pack's own SoC band always
+    wins, because an instruction that contradicts physics must degrade into
+    "as much as fits", never into an infeasible model that takes the whole
+    house plan down with it.
+    """
+
+    targets: list[tuple[datetime, float, str]] = field(default_factory=list)
+    forced_hours: set[datetime] = field(default_factory=set)
+
+
+@dataclass
 class Forecast:
     """Ordered hourly horizon shared across the pipeline."""
 

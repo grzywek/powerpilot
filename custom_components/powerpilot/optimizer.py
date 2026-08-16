@@ -74,7 +74,7 @@ from homeassistant.util import dt as dt_util
 
 from .battery import BatteryModel
 from .const import ChargePower, InverterMode
-from .models import Decision, Forecast, Plan
+from .models import Decision, ESSRequest, Forecast, Plan
 from .modules.ev import EVRequest
 
 _LOGGER = logging.getLogger(__name__)
@@ -284,6 +284,7 @@ class Optimizer:
         battery: BatteryModel,
         ev_request: EVRequest | None = None,
         reminders: list[str] | None = None,
+        ess_request: ESSRequest | None = None,
     ) -> Plan:
         battery = battery.copy()  # never mutate the live state
         slots = forecast.slots
@@ -334,6 +335,8 @@ class Optimizer:
             ev_charger_kw=ev_charger_kw,
             charge_order_price=charge_order_price,
             fracs=fracs,
+            slots=slots,
+            ess_request=ess_request,
         )
 
         return self._build_plan(
@@ -416,9 +419,19 @@ class Optimizer:
         ev_charger_kw: float,
         charge_order_price: list[float] | None = None,
         fracs: list[float] | None = None,
+        slots: list | None = None,
+        ess_request: ESSRequest | None = None,
     ) -> tuple[list[float], list[float], list[float]]:
         cfg = self.config
         n = len(total_price)
+        # Calendar instructions for the house battery (``#ess`` tags). Both
+        # degrade gracefully: see the floor clamp and the objective bonus below.
+        ess_targets = ess_request.targets if ess_request is not None else []
+        ess_forced_hours = (
+            ess_request.forced_hours if ess_request is not None else set()
+        )
+        if slots is None:  # callers that only price a horizon pass no slots
+            ess_targets, ess_forced_hours = [], set()
         # Fraction of each slot that is actually plannable (slot 0 mid-hour is
         # the remainder of the running hour; see ``optimize``). Power limits
         # (kW) convert to energy bounds (kWh) through this factor; ``demand``
@@ -523,7 +536,39 @@ class Optimizer:
                 )
             # d-column is a 0/1 switch worth discharge_cap[t] kWh delivered.
             cost[d0 + t] = (-total_price[t] + wear + tv / deff) * discharge_cap[t]
+        # ``#ess`` hours: charge here whatever it costs. Expressed as an
+        # objective bonus rather than a lower bound on the charge columns —
+        # a hard floor collides with the pack's own SoC band the moment the
+        # battery is already full, and an infeasible model would take the
+        # WHOLE house plan down, not just this hour. As a preference it
+        # degrades into "charge as much as fits". The bonus only steers the
+        # solver; reported costs come from the realised flows in ``_decide``.
+        if ess_forced_hours:
+            bonus = max((abs(p) for p in total_price), default=0.0) + abs(wear) + 1e3
+            for t in range(n):
+                if slots[t].start in ess_forced_hours:
+                    for k in range(seg_n):
+                        cost[seg_col(t, k)] -= bonus
         h.changeColsCost(n_cols, np.arange(n_cols, dtype=np.int32), cost)
+
+        # Floors demanded by ``#ess_socNN``: the level after the last hour that
+        # ENDS by the deadline must reach the target. Clamped into the pack's
+        # own band and to what the inverter could physically deliver from
+        # e_min, so an over-ambitious tag becomes "as high as reachable"
+        # instead of an infeasible model.
+        floors: dict[int, float] = {}
+        for deadline, percent, _label in ess_targets:
+            hours = [
+                t
+                for t in range(n)
+                if slots[t].start + timedelta(hours=1) <= deadline
+            ]
+            if not hours:
+                continue
+            t = max(hours)
+            reachable = e0 + sum(charge_caps[k] * max(seg_eff) for k in range(t + 1))
+            want = min(capacity_kwh * max(0.0, min(100.0, percent)) / 100.0, e_max)
+            floors[t] = max(floors.get(t, 0.0), min(want, reachable))
 
         # SoC band on the running reservoir level after each hour.
         for t in range(n):
@@ -536,7 +581,7 @@ class Optimizer:
                 idx.append(d0 + k)
                 val.append(-discharge_cap[k] / deff)
             h.addRow(
-                e_min - e0,
+                max(e_min, floors.get(t, 0.0)) - e0,
                 e_max - e0,
                 len(idx),
                 np.array(idx, dtype=np.int32),

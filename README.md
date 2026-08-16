@@ -102,30 +102,31 @@ charger started at the top of the hour cannot reach them.
 ### Calendar plans
 
 Point PowerPilot at any Home Assistant `calendar.*` entity (Google Calendar,
-CalDAV/iCloud, Local Calendar, …) and pick a **keyword** (default `Kotek`). The
-keyword is your car's name in event titles; only events whose title starts with
-it are read. Two kinds of events:
+CalDAV/iCloud, Local Calendar, …). Everything is steered by **`#tags`** in the
+event title. The car's tag stem is your **keyword** (default `Kotek`), so the
+car reads `#kotek`; the house battery is always `#ess`.
 
-| Event title | Meaning |
-|-------------|---------|
-| `Kotek 100%` at 12:00–13:00 | **Deadline target** — be at 100 % SoC by the event **start** (12:00). The optimizer picks the cheapest available hours before that deadline. |
-| `Kotek 50%` | Same, but to 50 %. |
-| `Kotek` (no percentage) | **Forced window** — charge at full charger power for every hour the event covers, no SoC limit. |
+| Tag | Where | Meaning |
+|-----|-------|---------|
+| `#kotek_soc100` | event **without** a location | **Deadline** — be at 100 % SoC by the event's **start**. The optimizer picks the cheapest available hours before it. |
+| `#kotek_soc100` | event **with** a location (a trip) | **Deadline at departure** — be at 100 % when the car actually leaves, which is earlier than the event's start by the travel time. Raises the trip's automatic target; it can never lower it below what the drive needs. |
+| `#kotek` | event without a location | **Forced window** — charge the car at full charger power for every hour the event covers. |
+| `#ess_soc80` | any event | **Deadline** — the house battery at 80 % by the event's **start**. The battery never leaves, so there is no departure to aim at. |
+| `#ess` | any event | Charge the house battery in the event's hours regardless of price. A preference, not a hard rule: on a full pack it simply does nothing. |
+| `#ignore` | any event | PowerPilot skips the event entirely. |
+| `#continue` | event with a location | This stop is driven to **directly from the previous located event** (same nesting level) — e.g. Gliwice 15–16 and Katowice 17–18 `#continue` plan dom→Gliwice→Katowice→dom instead of two separate round trips, and the charge for the whole tour must be in the pack before the first departure. |
 
-So a **percentage** lets the optimizer choose *when* to charge (cheapest hours
-before the deadline), while a **bare** event lets you choose the hours yourself
-(charge flat-out during the window). Earlier deadlines are honoured before later
-ones, and charging never pushes the pack past 100 %. When the calendar has no
-matching upcoming events, PowerPilot simply tops the car up to the target SoC in
+So `_socNN` lets the optimizer choose *when* to charge (cheapest hours before
+the deadline), while a bare tag lets you choose the hours yourself. Tags are
+case-insensitive, a trailing `%` is tolerated (`#kotek_soc100%`) and a comma
+decimal works (`#kotek_soc87,5`). Several tags can share one event, e.g.
+`Babcia #kotek_soc100 #ess_soc80`. Earlier deadlines are honoured before later
+ones, and no target is ever planned past what the pack can physically hold.
+With no tagged events PowerPilot simply tops the car up to the target SoC in
 the cheapest hours.
 
-Events with a **location** become trips (the car is away, the drive drains the
-pack, a pre-departure charge target is added). Two summary tags steer this:
-
-| Tag in the event title | Meaning |
-|------------------------|---------|
-| `#ignore` | PowerPilot skips the event entirely. |
-| `#continue` | This stop is driven to **directly from the previous located event** (same nesting level) — e.g. Gliwice 15–16 and Katowice 17–18 `#continue` plan dom→Gliwice→Katowice→dom instead of two separate round trips, and the charge needed for the whole tour must be in the pack before the first departure. |
+Events with a **location** become trips: the car is away, the drive drains the
+pack, and a pre-departure charge target is added automatically.
 
 An event that fully contains other located events changes their base: sub-events
 of an all-day "Kraków" event drive from/back to Kraków, not home — and a

@@ -1,0 +1,38 @@
+v2.0? xd
+
+---
+
+@"/Users/dawid/Downloads/powerpilot-debug-2026-08-16-19-01-43.json"
+czemu planował tutaj powrót z Krakowa (Babcia) taki niski SoC? albo podwójnie policzył albo jakiś inny błąd
+
+---
+
+ok
+
+---
+
+Jest ograniczona błędem predykcji, nie długością odcinka — żadna metoda oparta na SoC tego nie usunie bez sygnału „auto jest w domu" - nie rozumiem
+
+---
+
+device_tracker.kotek_location_tracker
+
+---
+
+dziwne.. ja wróciłem do domu i nigdzie nie wychodziłem
+
+---
+
+ok
+
+---
+
+dałoby się jakoś logiczniej poukładać tę legendę?
+
+---
+
+po północy wyświetla się tak
+
+---
+
+commit & push

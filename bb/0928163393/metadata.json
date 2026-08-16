@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "bb0928163393",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "custom_components/powerpilot/frontend/powerpilot-panel.js",
+    "frontend/src/powerpilot-panel.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/bb/0928163393/0/metadata.json",
+      "transcript": "/bb/0928163393/0/full.jsonl",
+      "compact_transcript": "/bb/0928163393/0/transcript.jsonl",
+      "content_hash": "/bb/0928163393/0/content_hash.txt",
+      "prompt": "/bb/0928163393/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 595,
+    "cache_creation_tokens": 2720856,
+    "cache_read_tokens": 97590098,
+    "output_tokens": 260887,
+    "api_call_count": 320
+  }
+}

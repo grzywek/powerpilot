@@ -1,0 +1,74 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "bb0928163393",
+  "session_id": "323072fb-4475-4696-993e-3b6032760ee8",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-16T22:29:21.598694Z",
+  "branch": "main",
+  "checkpoints_count": 7,
+  "save_step_count": 1,
+  "files_touched": [
+    "custom_components/powerpilot/frontend/powerpilot-panel.js",
+    "frontend/src/powerpilot-panel.ts"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "19da74e38199",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 595,
+    "cache_creation_tokens": 2720856,
+    "cache_read_tokens": 97590098,
+    "output_tokens": 260887,
+    "api_call_count": 320
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01EZaGVKXh6xWNwuS7huM5aR",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "commit"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "19da74e38199",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 454,
+        "end": 455,
+        "entry_ids": [
+          "9fe7e46b-bd46-47d5-a0fe-a0c312771419"
+        ],
+        "tool_use_id": "toolu_01EZaGVKXh6xWNwuS7huM5aR"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01EZaGVKXh6xWNwuS7huM5aR"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: commit",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 7
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-16T22:29:21.441758Z",
+    "agent_lines": 17,
+    "agent_removed": 9,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 17,
+    "total_lines_changed": 26,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}

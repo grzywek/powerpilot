@@ -6,8 +6,7 @@
   "checkpoints_count": 7,
   "files_touched": [
     "custom_components/powerpilot/modules/ev.py",
-    "tests/test_ev.py",
-    "tests/test_ev_trip_drain.py"
+    "tests/test_ev.py"
   ],
   "sessions": [
     {
@@ -19,10 +18,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 590,
-    "cache_creation_tokens": 2718960,
-    "cache_read_tokens": 96013252,
-    "output_tokens": 259646,
-    "api_call_count": 317
+    "input_tokens": 592,
+    "cache_creation_tokens": 2719733,
+    "cache_read_tokens": 96538243,
+    "output_tokens": 259930,
+    "api_call_count": 318
   }
 }

@@ -1,0 +1,18 @@
+chodzi mi o to, że mam event XYZ w lokalizacji ABC i chcę mieć do wyjazdu 100%
+
+---
+
+tak #soc100 brzmi spoko
+
+i zastąpijmy Kotek 100%
+czyli będzie  #kotek_soc100 zarówno w evencie bez lokalizacji jak i w evencie z lokalizacją
+
+#ess_soc100
+
+a samo #ess lub samo #kotek ładuje w tej godzinie
+
+czyli finalnie mamy same tagi - podsumuj je wszystkie i sprawdźmy najpierw
+
+---
+
+commit & push

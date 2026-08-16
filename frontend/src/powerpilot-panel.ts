@@ -682,6 +682,13 @@ export class PowerPilotPanel extends LitElement {
     if (!this.hass) return;
     try {
       const { start, end, pastHours } = this._computeWindow();
+      // The "poprzednia godzina" card compares the hour before the current
+      // one, and in the live view the window starts at local midnight — so
+      // between 00:00 and 01:00 that hour sits on the far side of the day
+      // boundary and the card had nothing to show. Fetch one hour of extra
+      // history; the chart clips it via its own x-axis bounds, and nothing
+      // sums over series.hours, so it changes no figure on screen.
+      const seriesStart = new Date(start.getTime() - 3600_000);
       const [plan, status, log, profiles, series] = await Promise.all([
         this.hass.callWS({ type: "powerpilot/plan" }),
         this.hass.callWS({ type: "powerpilot/status" }),
@@ -689,8 +696,8 @@ export class PowerPilotPanel extends LitElement {
         this.hass.callWS({ type: "powerpilot/profiles" }),
         this.hass.callWS({
           type: "powerpilot/series",
-          past_hours: pastHours,
-          start: start.toISOString(),
+          past_hours: pastHours + 1,
+          start: seriesStart.toISOString(),
           end: end.toISOString(),
           // `forecast_lead` picks how far out the past "prognoza" comparison is
           // read from (0 = the freshest plan made as each hour began).
@@ -1627,8 +1634,10 @@ export class PowerPilotPanel extends LitElement {
       if (seen.has(day)) continue;
       seen.add(day);
       const midnight = new Date(day + "T00:00:00").getTime();
-      // Skip if midnight is before the first hour in series.
-      const firstTs = new Date(s.hours[0].start).getTime();
+      // Anchor on the DISPLAYED window, not on the series: the series is
+      // fetched one hour wider (see _refresh) and keying off its first hour
+      // would draw a day line flush against the chart's left edge.
+      const firstTs = this._computeWindow().start.getTime();
       if (midnight <= firstTs) continue;
       const d = new Date(midnight);
       annotations.push({

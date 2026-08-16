@@ -1472,16 +1472,27 @@ def test_no_reminder_when_target_reachable() -> None:
 
 
 class _States:
-    def __init__(self, mapping: dict[str, str]) -> None:
+    """Entity states with a ``last_changed``, so freshness can be compared.
+
+    A value may be a bare state (all readings equally fresh) or a
+    ``(state, minutes_ago)`` pair.
+    """
+
+    def __init__(self, mapping: dict[str, object]) -> None:
         self._mapping = mapping
 
     def get(self, entity_id: str):
         value = self._mapping.get(entity_id)
-        return SimpleNamespace(state=value) if value is not None else None
+        if value is None:
+            return None
+        state, ago = value if isinstance(value, tuple) else (value, 0)
+        return SimpleNamespace(
+            state=state, last_changed=BASE - timedelta(minutes=ago)
+        )
 
 
 def _presence_module(
-    states: dict[str, str], location: str | None, extras: list[str]
+    states: dict[str, object], location: str | None, extras: list[str]
 ) -> EVModule:
     module = object.__new__(EVModule)
     module.hass = SimpleNamespace(states=_States(states))
@@ -1522,6 +1533,59 @@ def test_combined_home_unavailable_entity_reads_as_unknown_not_away() -> None:
 def test_combined_home_none_when_nothing_known() -> None:
     module = _presence_module({}, location="device_tracker.car", extras=[])
     assert module._combined_home() is None
+
+
+def test_combined_home_stale_away_cannot_veto_a_fresher_car_tracker() -> None:
+    """The reported case: a phone stuck on "not_home" since lunchtime.
+
+    The car's own tracker saw it arrive hours later; a presence proxy is only
+    a stand-in for that reading, so an OLDER one must not override it.
+    """
+    module = _presence_module(
+        {
+            "device_tracker.car": ("home", 170),  # arrived ~3 h ago
+            "person.owner": "home",
+            "device_tracker.phone": ("not_home", 450),  # stuck since lunch
+        },
+        location="device_tracker.car",
+        extras=["person.owner", "device_tracker.phone"],
+    )
+    assert module._combined_home() is True
+
+
+def test_combined_home_fresher_away_still_vetoes_a_stale_car_tracker() -> None:
+    """The case the proxies exist for: a car tracker that polls rarely."""
+    module = _presence_module(
+        {
+            "device_tracker.car": ("home", 600),
+            "device_tracker.phone": ("not_home", 20),
+        },
+        location="device_tracker.car",
+        extras=["device_tracker.phone"],
+    )
+    assert module._combined_home() is False
+
+
+def test_combined_home_car_tracker_away_is_never_overridden() -> None:
+    """A phone at home says nothing about where the CAR is."""
+    module = _presence_module(
+        {
+            "device_tracker.car": ("not_home", 300),
+            "device_tracker.phone": ("home", 5),
+        },
+        location="device_tracker.car",
+        extras=["device_tracker.phone"],
+    )
+    assert module._combined_home() is False
+
+
+def test_combined_home_without_a_car_tracker_needs_every_proxy_home() -> None:
+    module = _presence_module(
+        {"person.owner": "home", "device_tracker.phone": ("not_home", 450)},
+        location=None,
+        extras=["person.owner", "device_tracker.phone"],
+    )
+    assert module._combined_home() is False
 
 
 # ---------------------------------------------------------------------------

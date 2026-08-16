@@ -669,6 +669,23 @@ class EVModule(PowerPilotModule):
             return None
         return value in true_states
 
+    def _read_presence_at(
+        self, entity_id: str | None
+    ) -> tuple[bool, datetime] | None:
+        """Presence read paired with when the entity last changed.
+
+        The timestamp is what lets :meth:`_combined_home` tell a fresh reading
+        from a stale one. Entities without it (test doubles, exotic
+        integrations) fall back to "now" — the cautious end, since an unknown
+        age must not let a reading silently outrank a dated one.
+        """
+        home = self._read_presence(entity_id)
+        if home is None:
+            return None
+        state = self.hass.states.get(entity_id)
+        changed = getattr(state, "last_changed", None) if state else None
+        return home, changed or dt_util.now()
+
     def _read_presence(self, entity_id: str | None) -> bool | None:
         """Tri-state presence read: ``None`` when unset/unknown/unavailable.
 
@@ -689,18 +706,40 @@ class EVModule(PowerPilotModule):
     def _combined_home(self) -> bool | None:
         """Combine the car tracker with the extra presence entities.
 
-        Car trackers often poll rarely, so a fresh "not home" from any
-        configured presence entity beats a stale "home" from the car: away
-        wins, home requires every known reading to agree. ``None`` when no
-        entity has a usable state.
+        The car's own tracker is the only DIRECT reading of where the car is.
+        The presence entities are stand-ins for it, there because car trackers
+        often poll rarely: a fresh "not home" from a phone should beat a stale
+        "home" from the car.
+
+        Freshness is the whole point, and it has to be checked — comparing the
+        readings alone (every one must say home) lets the *least* up-to-date
+        entity veto the most authoritative one. A phone stuck on "not home"
+        since lunchtime outvoted a car tracker that had watched the car pull
+        into the garage three hours earlier, and the car sat unplugged with no
+        "plug it in" reminder because PowerPilot thought it wasn't there.
+
+        So a proxy may only override the car tracker with a reading that is
+        not older than it. Equal ages keep the cautious answer (away wins).
+        A car tracker reporting "not home" stands on its own: a phone being
+        home says nothing about where the car is. ``None`` when no entity has
+        a usable state.
         """
-        readings = [self._read_presence(self.config.get(CONF_EV_LOCATION_SENSOR))]
-        for entity_id in self.config.get(CONF_EV_PRESENCE_ENTITIES) or []:
-            readings.append(self._read_presence(entity_id))
-        known = [r for r in readings if r is not None]
-        if not known:
-            return None
-        return all(known)
+        car = self._read_presence_at(self.config.get(CONF_EV_LOCATION_SENSOR))
+        proxies = [
+            reading
+            for entity_id in self.config.get(CONF_EV_PRESENCE_ENTITIES) or []
+            if (reading := self._read_presence_at(entity_id)) is not None
+        ]
+        if car is None:
+            if not proxies:
+                return None
+            return all(home for home, _ in proxies)
+        car_home, car_changed = car
+        if not car_home:
+            return False
+        return not any(
+            not home and changed >= car_changed for home, changed in proxies
+        )
 
     def chargeable_now(self) -> bool | None:
         """Can the car physically take energy from the home charger right now?

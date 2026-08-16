@@ -85,6 +85,7 @@ CHARGING_STATES = {"on", "true", "charging"}
 # Wallboxes/cars report the cable in many dialects; "charging" implies plugged.
 PLUGGED_STATES = {"on", "true", "connected", "plugged", "plugged_in", "charging"}
 
+
 def _hour_floor(moment: datetime) -> datetime:
     return moment.replace(minute=0, second=0, microsecond=0)
 
@@ -108,6 +109,25 @@ def _spread_energy(start: datetime, end: datetime, kwh: float) -> dict[datetime,
     hours = _hours_between(start, end)
     per_hour = kwh / len(hours)
     return {hour: per_hour for hour in hours}
+
+
+def _remaining_leg(
+    start: datetime, end: datetime, kwh: float, now: datetime
+) -> tuple[datetime, float] | None:
+    """The part of a driving leg still ahead of ``now``, or ``None`` if none is.
+
+    Energy already spent on the road is already in the SoC the plan starts
+    from, so only the remainder may be forecast. Split linearly in time — the
+    same even spread :func:`_spread_energy` assumes when it buckets a leg by
+    the hour.
+    """
+    if end <= start:
+        return None
+    if now <= start:
+        return start, kwh
+    if now >= end:
+        return None
+    return now, kwh * (end - now).total_seconds() / (end - start).total_seconds()
 
 
 def _trip_energy_distance_km(trip: Trip) -> float | None:
@@ -358,6 +378,9 @@ class EVModule(PowerPilotModule):
         self._plugged: bool | None = None
         self._targets: list[EVChargeTarget] = []
         self._trip_targets: list[EVChargeTarget] = []
+        # Per in-progress trip: the SoC seen on the first cycle after it left,
+        # so the drive already done can be discounted from what is forecast.
+        self._trip_soc_baseline: dict[str, tuple[float, float]] = {}
         self._forced_hours: set[datetime] = set()
         # Hours the car is away from home (calendar trips: located events
         # extended by travel time + margins) — the only source of
@@ -716,6 +739,7 @@ class EVModule(PowerPilotModule):
         for trip in calendar.trips:
             self._apply_trip(trip, now)
         self._apply_chain_targets(calendar.trips, now)
+        self._prune_trip_baselines(calendar.trips, now)
 
     def _parse_keyword_event(
         self, event: CalendarEvent, keyword: str, now: datetime
@@ -813,14 +837,85 @@ class EVModule(PowerPilotModule):
             return
         outbound_kwh = (outbound_km or 0.0) * self._kwh_per_km
         return_kwh = (return_km or 0.0) * self._kwh_per_km
-        for bucket, kwh in _spread_energy(
-            trip.depart, trip.event_start, outbound_kwh
-        ).items():
-            self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + kwh
-        for bucket, kwh in _spread_energy(
-            trip.event_end, trip.return_end, return_kwh
-        ).items():
-            self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + kwh
+        # Only the driving still AHEAD may be forecast. The plan starts from
+        # the car's live SoC, and that reading already carries every kilometre
+        # covered so far, so projecting a leg the car is part-way through
+        # subtracts the same drive twice — once in the sensor, once here.
+        legs = [
+            (_remaining_leg(trip.depart, trip.event_start, outbound_kwh, now),
+             trip.event_start),
+            (_remaining_leg(trip.event_end, trip.return_end, return_kwh, now),
+             trip.return_end),
+        ]
+        ahead = [(leg, end) for leg, end in legs if leg is not None]
+        if not ahead:
+            return
+        by_calendar = sum(leg[1] for leg, _ in ahead)
+
+        # Calendar time alone is not enough: it forecasts WHEN the car drives,
+        # while the SoC sensor records what it actually did, and the two part
+        # company routinely — home early, left late, stuck in traffic. Measure
+        # against the pack as well. This is what the reported case needed: the
+        # car drove home an hour before its return bucket, so by the calendar
+        # the leg had barely started while the pack had already paid for it in
+        # full — 31 % projected as 3 %.
+        remaining = self._trip_remaining_kwh(trip, now, by_calendar)
+        if remaining <= 1e-9:
+            return
+
+        # Placement stays the calendar's job — it is the only thing that knows
+        # which hours the driving falls in. Scale the still-ahead legs to the
+        # reconciled total.
+        scale = remaining / by_calendar if by_calendar > 1e-9 else 0.0
+        for (start, kwh), leg_end in ahead:
+            for bucket, part in _spread_energy(start, leg_end, kwh * scale).items():
+                self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + part
+
+    def _trip_remaining_kwh(
+        self, trip: Trip, now: datetime, by_calendar: float
+    ) -> float:
+        """Driving still to forecast, reconciled against the pack.
+
+        On the first cycle after departure the calendar's own figure stands and
+        is banked together with the SoC of that moment. From then on the pair
+        is the reference: whatever the pack has visibly given up since is
+        driving that has already happened, and forecasting it again would
+        subtract the same trip twice.
+
+        Falls back to ``by_calendar`` whenever there is nothing to reconcile
+        against — trip not started, SoC sensor asleep, capacity unknown, or
+        PowerPilot restarted mid-drive and never saw the pack beforehand.
+
+        A residual survives when the prediction and the drive disagree on
+        SIZE (21.8 kWh predicted, 19.1 kWh actually used): it is bounded by
+        that error, not by the length of the leg.
+
+        Charging away from home shows up as a negative drop and is floored at
+        zero rather than credited — this figure exists only to stop double
+        counting, not to track energy in.
+        """
+        if not self._capacity or self._soc is None:
+            return by_calendar
+        if now < trip.depart or now >= trip.return_end:
+            return by_calendar
+        key = trip.depart.isoformat()
+        seen = self._trip_soc_baseline.get(key)
+        if seen is None:
+            self._trip_soc_baseline[key] = (self._soc, by_calendar)
+            return by_calendar
+        baseline_soc, baseline_remaining = seen
+        spent = max(0.0, (baseline_soc - self._soc) / 100.0 * self._capacity)
+        return max(0.0, baseline_remaining - spent)
+
+    def _prune_trip_baselines(self, trips: list[Trip], now: datetime) -> None:
+        """Forget baselines for trips that are over (or vanished from the calendar)."""
+        live = {
+            trip.depart.isoformat()
+            for trip in trips
+            if trip.depart <= now < trip.return_end
+        }
+        for key in [k for k in self._trip_soc_baseline if k not in live]:
+            del self._trip_soc_baseline[key]
 
     def _apply_chain_targets(self, trips: list[Trip], now: datetime) -> None:
         """One pre-departure target per chain of trips.

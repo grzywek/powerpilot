@@ -490,6 +490,8 @@ def _bare_module(**state) -> EVModule:
     module._trip_drain = {}
     module._capacity = state.get("capacity", 60.0)
     module._kwh_per_km = state.get("kwh_per_km")
+    module._soc = state.get("soc")
+    module._trip_soc_baseline = {}
     module.min_soc_entity = (
         SimpleNamespace(native_value=state["min_soc"]) if "min_soc" in state else None
     )
@@ -980,6 +982,8 @@ def _module_with_state(**state) -> EVModule:
     # Capacity is learned at runtime; tests supply it directly.
     module._capacity = state.get("capacity", 60.0)
     module._kwh_per_km = state.get("kwh_per_km")
+    module._soc = state.get("soc")
+    module._trip_soc_baseline = {}
     module._drain_profile = state.get("drain_profile") or WeeklyAccumulator()
     module._request = EVRequest()
     return module

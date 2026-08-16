@@ -537,7 +537,7 @@ def _calendar_module(
 
 def test_parse_percent_event_is_deadline_target() -> None:
     module = _bare_module()
-    module._parse_keyword_event(_event("Kotek 100%", 4, 5), "Kotek", BASE)
+    module._parse_keyword_event(_event("#kotek_soc100", 4, 5), "Kotek", BASE)
     assert len(module._targets) == 1
     assert module._targets[0].target_soc == 100.0
     assert module._targets[0].deadline == BASE + timedelta(hours=4)
@@ -546,7 +546,7 @@ def test_parse_percent_event_is_deadline_target() -> None:
 
 def test_parse_bare_event_is_forced_window() -> None:
     module = _bare_module()
-    module._parse_keyword_event(_event("Kotek", 6, 9), "Kotek", BASE)
+    module._parse_keyword_event(_event("#kotek", 6, 9), "Kotek", BASE)
     assert module._targets == []
     offsets = sorted(int((h - BASE).total_seconds() // 3600) for h in module._forced_hours)
     assert offsets == [6, 7, 8]
@@ -554,14 +554,14 @@ def test_parse_bare_event_is_forced_window() -> None:
 
 def test_parse_percent_accepts_comma_decimal_and_spaces() -> None:
     module = _bare_module()
-    module._parse_keyword_event(_event("Kotek 55,5 %", 3, 4), "Kotek", BASE)
+    module._parse_keyword_event(_event("#kotek_soc55,5", 3, 4), "Kotek", BASE)
     assert module._targets[0].target_soc == 55.5
 
 
 def test_parse_skips_past_deadline() -> None:
     module = _bare_module()
     now = BASE + timedelta(hours=5)
-    module._parse_keyword_event(_event("Kotek 80%", 2, 3), "Kotek", now)
+    module._parse_keyword_event(_event("#kotek_soc80", 2, 3), "Kotek", now)
     assert module._targets == []
 
 
@@ -573,7 +573,7 @@ def test_parse_skips_non_matching_summary() -> None:
 
 def test_parse_custom_keyword_case_insensitive() -> None:
     module = _bare_module()
-    module._parse_keyword_event(_event("auto 75%", 4, 5), "Auto", BASE)
+    module._parse_keyword_event(_event("#AUTO_soc75", 4, 5), "Auto", BASE)
     assert module._targets[0].target_soc == 75.0
 
 

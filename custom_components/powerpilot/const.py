@@ -170,7 +170,7 @@ CONF_EV_BEHIND_METER: Final = "ev_behind_meter"
 # list (below); kept only so ``async_setup_entry`` can seed the new list once on
 # upgrade — nothing reads it at runtime anymore.
 CONF_EV_CALENDAR: Final = "ev_calendar"
-CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # event-summary trigger word (e.g. "Kotek")
+CONF_EV_CALENDAR_KEYWORD: Final = "ev_calendar_keyword"  # tag stem naming the car: "Kotek" → #kotek, #kotek_soc100
 # --- EV charging-hour placement preferences ---
 # The allocator's baseline is pure cost: cheapest hours win even when that
 # scatters charging (2 h on, 1 h gap, 2 h on). These options trade a bounded
@@ -193,7 +193,7 @@ CONF_EV_EARLY_MAX_EXTRA_PCT: Final = "ev_early_max_extra_pct"
 # --- Calendars (integration-wide, not EV-specific) ---
 # HA ``calendar.*`` entities read for planning (works with Google, CalDAV/
 # iCloud, Local Calendar, …). Events feed two consumers:
-# * EV keyword events ("Kotek 100%" = deadline target, bare "Kotek" = forced
+# * EV tag events ("#kotek_soc100" = deadline target, bare "#kotek" = forced
 #   window) — parsed by the EV module from *every* configured calendar.
 # * Events with a ``location`` become trips: the car is away for the event plus
 #   travel time (Google Maps) plus the margins below. Those hours are not

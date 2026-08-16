@@ -8,20 +8,22 @@ Three calendar-driven inputs feed the optimizer (events come from every
 calendar configured in the integration-wide ``CONF_CALENDARS`` list, read by
 the calendar module — which the registry updates *before* this one):
 
-* **Deadline targets** — a calendar event ``"<keyword> 100%"`` spanning e.g.
-  12:00–13:00 means *"the EV must be at 100 % SoC by 12:00"*. The optimizer is
-  free to pick the cheapest available hours before that deadline.
-* **Forced windows** — a bare calendar event ``"<keyword>"`` means *"charge at
-  full power in the event's hours"* (manual timing choice, still capped by the
-  active SoC target/limit — the car stops there anyway).
+* **Deadline targets** — ``#<keyword>_soc100`` on an event starting at 12:00
+  means *"the EV must be at 100 % SoC by 12:00"*. The optimizer is free to pick
+  the cheapest available hours before that deadline.
+* **Forced windows** — a bare ``#<keyword>`` means *"charge at full power in the
+  event's hours"* (manual timing choice, still capped by the active SoC
+  target/limit — the car stops there anyway).
 * **Trips** — events with a non-home ``location``. The calendar module turns
   them into away windows (event span extended by Google-Maps travel time plus
   the configured margins): those hours are *unavailable* for charging, the
   round trip drains the pack (learned kWh/km), and each trip adds an automatic
   deadline target — be at ``min SoC + round-trip energy`` before departure so
   the car always makes the trip with the safety reserve intact.
+  ``#<keyword>_socNN`` on a trip raises that target and is aimed at the
+  DEPARTURE, not the event's start.
 
-With no keyword events the module falls back to topping the car up to the
+With no tagged events the module falls back to topping the car up to the
 target SoC (from the target-SoC sensor, or :data:`DEFAULT_TARGET_SOC`) in the
 cheapest available hours — the original Stage-0 behaviour.
 """
@@ -29,7 +31,6 @@ cheapest available hours — the original Stage-0 behaviour.
 from __future__ import annotations
 
 import logging
-import re
 import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -73,7 +74,7 @@ from ..const import (
 from ..models import Forecast
 from ..profiles import WeeklyAccumulator
 from .base import PowerPilotModule
-from .calendar import CalendarEvent, Trip
+from .calendar import CalendarEvent, Trip, has_tag, is_trip_location, soc_tag
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,11 +84,6 @@ HOME_STATES = {"home", "on", "true", "connected"}
 CHARGING_STATES = {"on", "true", "charging"}
 # Wallboxes/cars report the cable in many dialects; "charging" implies plugged.
 PLUGGED_STATES = {"on", "true", "connected", "plugged", "plugged_in", "charging"}
-
-# Matches a percentage anywhere in the event-summary remainder, e.g. "100%",
-# "80 %", "55,5%".
-_PERCENT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
-
 
 def _hour_floor(moment: datetime) -> datetime:
     return moment.replace(minute=0, second=0, microsecond=0)
@@ -727,24 +723,25 @@ class EVModule(PowerPilotModule):
         summary = event.summary
         if not summary or not keyword:
             return
-        if not summary.lower().startswith(keyword.lower()):
-            return
 
-        remainder = summary[len(keyword) :].strip()
-        match = _PERCENT_RE.search(remainder)
-        if match:
-            # Deadline target: be at <percent> by the event start.
+        percent = soc_tag(summary, keyword)
+        if percent is not None:
+            # A located event is a trip, and what matters there is the SoC at
+            # DEPARTURE — earlier than the event's start by the travel time.
+            # Only the trip pass knows that moment, so leave it alone here.
+            if is_trip_location(event.location):
+                return
             if event.start <= now:
                 return  # deadline already passed — nothing to schedule
-            try:
-                percent = float(match.group(1).replace(",", "."))
-            except ValueError:
-                return
-            percent = max(0.0, min(100.0, percent))
             self._targets.append(
                 EVChargeTarget(deadline=event.start, target_soc=percent, label=summary)
             )
             return
+
+        if not has_tag(summary, keyword):
+            return
+        if is_trip_location(event.location):
+            return  # the car is away for exactly these hours — nothing to force
 
         # Forced window: charge at full power for every hour the event covers.
         hour = max(event.start, now).replace(minute=0, second=0, microsecond=0)
@@ -856,6 +853,13 @@ class EVModule(PowerPilotModule):
                 continue
             trip_soc = total_kwh / self._capacity * 100.0
             needed_soc = self.min_soc + trip_soc
+            # ``#<keyword>_socNN`` on any hop raises the whole chain's target:
+            # the car cannot charge at home once the head has left, so the
+            # demand has to be in the pack by then. It can only raise — a tag
+            # below what the driving needs would strand the car mid-trip.
+            tagged = [t.soc_target for t in chain if t.soc_target is not None]
+            if tagged:
+                needed_soc = max(needed_soc, max(tagged))
             label = " → ".join(t.label for t in chain)
             self._trip_targets.append(
                 EVChargeTarget(

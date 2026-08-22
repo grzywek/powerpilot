@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "ea5163fa7405",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "custom_components/powerpilot/modules/price_sources.py",
+    "custom_components/powerpilot/modules/prices.py",
+    "docs/HANDOVER.md",
+    "tests/test_pradcast_source.py",
+    "tests/test_price_module.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ea/5163fa7405/0/metadata.json",
+      "transcript": "/ea/5163fa7405/0/full.jsonl",
+      "compact_transcript": "/ea/5163fa7405/0/transcript.jsonl",
+      "content_hash": "/ea/5163fa7405/0/content_hash.txt",
+      "prompt": "/ea/5163fa7405/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 128,
+    "cache_creation_tokens": 373808,
+    "cache_read_tokens": 9943474,
+    "output_tokens": 82353,
+    "api_call_count": 64
+  }
+}

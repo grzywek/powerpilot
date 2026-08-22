@@ -123,8 +123,17 @@ Validate JSON with the miniconda python (`/opt/miniconda3/bin/python`); the base
 
 - Auth header: `X-API-Key: pcast_...`. Endpoints under `https://api.pradcast.pl`.
 - `/prices/date/{YYYY-MM-DD}` → `PriceResponse` (`prices[].price_kwh`, `horizon`
-  null = confirmed RDN, set = forecast; `confidence`, `level`).
-- `/prices/forecasts/{date}` → `{forecasts: {"D+1":{prices[...p10,p90]}, ...}}`.
+  null = confirmed RDN, set = forecast; `confidence`, `level`). This is the only
+  price endpoint the integration calls — one request per day, today..D+3. Without
+  a `source` filter it serves the binding TGE Fixing I prices when it has them
+  and the model forecast otherwise.
+- TGE publishes Fixing I for the **next day around 10:45**, so from ~11:00 every
+  hour of tomorrow should come back `horizon: null`. Until it does, the price
+  module tightens its refresh to 20 min and logs a warning — see
+  `PriceModule._awaiting_fixing`.
+- ⚠️ `/prices/forecasts/{date}` returns the D+1/D+2/D+3 forecasts **for that one
+  date** (generated 1/2/3 days earlier, for overlaying accuracy) — *not* prices
+  for the next three days. It must never be used to fill the forward horizon.
 - Range: 2026-06-01 .. D+3; confirmed hourly only ~last 7 days.
 - ⚠️ The API key was shared in chat during the session — **rotate it** and set the
   new key only in the integration's config (never in source).

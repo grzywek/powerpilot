@@ -11,75 +11,96 @@ from custom_components.powerpilot.const import CONF_PRADCAST_API_KEY
 from custom_components.powerpilot.modules.price_sources import (
     PRADCAST_HORIZON_DAYS,
     PradcastPriceSource,
-    PriceData,
 )
 
 
-async def test_forward_forecast_merge_ignores_horizons_beyond_api_price_window() -> None:
-    """Only D+1..D+3 may be treated as Pradcast price data."""
-    today = date(2026, 6, 29)
-    data = PriceData()
-    source = PradcastPriceSource(None, {})
-
-    async def _fake_fetch_forecasts(self, target_date):
-        return {
-            "D+1": [{"hour": 12, "buy": 1.1, "tge": 0.9}],
-            f"D+{PRADCAST_HORIZON_DAYS}": [{"hour": 13, "buy": 1.3, "tge": 1.0}],
-            f"D+{PRADCAST_HORIZON_DAYS + 1}": [
-                {"hour": 14, "buy": 1.4, "tge": 1.1}
-            ],
-        }
-
-    source.async_fetch_forecasts = MethodType(_fake_fetch_forecasts, source)
-
-    await source._merge_forward_forecasts(data, today)
-
-    d1 = dt_util.start_of_local_day(today + timedelta(days=1)) + timedelta(hours=12)
-    d3 = (
-        dt_util.start_of_local_day(today + timedelta(days=PRADCAST_HORIZON_DAYS))
-        + timedelta(hours=13)
-    )
-    d4 = (
-        dt_util.start_of_local_day(today + timedelta(days=PRADCAST_HORIZON_DAYS + 1))
-        + timedelta(hours=14)
-    )
-
-    assert data.buy[d1] == 1.1
-    assert data.buy[d3] == 1.3
-    assert d4 not in data.buy
+def _payload(day: date, horizon: str | None, price: float) -> dict:
+    return {
+        "date": day.isoformat(),
+        "source": "forecast_model" if horizon else "tge_fixing1",
+        "horizon": horizon,
+        "prices": [{"hour": hour, "price_kwh": price} for hour in range(24)],
+    }
 
 
-async def test_forecast_endpoint_ignores_horizons_beyond_api_price_window(
-    monkeypatch,
-) -> None:
-    """The overlay payload must stay limited to Pradcast's supported D+1..D+3."""
-    today = date(2026, 6, 29)
+async def test_fetch_asks_one_day_endpoint_per_horizon_day(monkeypatch) -> None:
+    """Today + D+1..D+3, one ``/prices/date/{date}`` call each."""
+    today = dt_util.now().date()
     source = PradcastPriceSource(None, {CONF_PRADCAST_API_KEY: "token"})
+    monkeypatch.setattr(
+        "custom_components.powerpilot.modules.price_sources.async_get_clientsession",
+        lambda hass: object(),
+    )
+    asked: list[date] = []
 
+    async def _fake_fetch_day(self, session, api_key, day):
+        asked.append(day)
+        # Confirmed for today + tomorrow, model forecast further out.
+        offset = (day - today).days
+        return _payload(day, None if offset <= 1 else f"D+{offset}", 0.5)
+
+    source._fetch_day = MethodType(_fake_fetch_day, source)
+
+    data = await source.async_fetch()
+
+    assert asked == [today + timedelta(days=n) for n in range(PRADCAST_HORIZON_DAYS + 1)]
+    assert len(data.buy) == 24 * (PRADCAST_HORIZON_DAYS + 1)
+    # Confirmed exactly where the payload carried no forecast horizon.
+    assert len(data.confirmed_hours) == 48
+    noon_tomorrow = dt_util.start_of_local_day(today + timedelta(days=1)) + timedelta(hours=12)
+    noon_d2 = dt_util.start_of_local_day(today + timedelta(days=2)) + timedelta(hours=12)
+    assert noon_tomorrow in data.confirmed_hours
+    assert noon_d2 in data.buy
+    assert noon_d2 not in data.confirmed_hours
+
+
+async def test_day_that_fails_contributes_no_prices(monkeypatch) -> None:
+    """A day the API cannot serve stays empty — never filled from another date."""
+    today = dt_util.now().date()
+    source = PradcastPriceSource(None, {CONF_PRADCAST_API_KEY: "token"})
     monkeypatch.setattr(
         "custom_components.powerpilot.modules.price_sources.async_get_clientsession",
         lambda hass: object(),
     )
 
-    async def _fake_get_json(self, session, api_key, url):
-        return {
-            "forecasts": {
-                "D+1": {
-                    "prices": [
-                        {"hour": 0, "price_kwh": 1.0, "p10": 0.8, "p90": 1.2}
-                    ]
-                },
-                f"D+{PRADCAST_HORIZON_DAYS + 1}": {
-                    "prices": [
-                        {"hour": 1, "price_kwh": 2.0, "p10": 1.8, "p90": 2.2}
-                    ]
-                },
-            }
-        }
+    async def _fake_fetch_day(self, session, api_key, day):
+        if day == today + timedelta(days=1):
+            return None
+        return _payload(day, None, 0.5)
 
-    source._get_json = MethodType(_fake_get_json, source)
+    source._fetch_day = MethodType(_fake_fetch_day, source)
 
-    horizons = await source.async_fetch_forecasts(today)
+    data = await source.async_fetch()
 
-    assert list(horizons) == ["D+1"]
-    assert horizons["D+1"][0]["buy"] == 1.0
+    tomorrow = dt_util.start_of_local_day(today + timedelta(days=1))
+    assert all(tomorrow + timedelta(hours=h) not in data.buy for h in range(24))
+    assert len(data.buy) == 24 * PRADCAST_HORIZON_DAYS
+
+
+async def test_retail_conversion_applies_markup_excise_and_vat(monkeypatch) -> None:
+    """The stored buy price is the gross retail price, TGE stays net."""
+    today = dt_util.now().date()
+    source = PradcastPriceSource(
+        None,
+        {
+            CONF_PRADCAST_API_KEY: "token",
+            "price_markup": 0.1,
+            "excise_kwh": 0.005,
+            "price_vat": 1.23,
+        },
+    )
+    monkeypatch.setattr(
+        "custom_components.powerpilot.modules.price_sources.async_get_clientsession",
+        lambda hass: object(),
+    )
+
+    async def _fake_fetch_day(self, session, api_key, day):
+        return _payload(day, None, 0.4) if day == today else None
+
+    source._fetch_day = MethodType(_fake_fetch_day, source)
+
+    data = await source.async_fetch()
+
+    hour = dt_util.start_of_local_day(today)
+    assert round(data.buy[hour], 6) == round((0.4 + 0.1 + 0.005) * 1.23, 6)
+    assert data.tge[hour] == 0.4

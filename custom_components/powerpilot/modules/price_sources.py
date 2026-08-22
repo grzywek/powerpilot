@@ -8,8 +8,11 @@ Two sources ship today:
 * :class:`SensorPriceSource` — reads HA price sensors and their hourly forecast
   attributes (Nordpool/Tibber-style).
 * :class:`PradcastPriceSource` — pulls confirmed RDN + D+1..D+3 forecasts from the
-  prądcast.pl API (https://api.pradcast.pl). Wholesale prices can be converted to
-  the retail price actually paid via an additive markup and a VAT multiplier.
+  prądcast.pl API (https://api.pradcast.pl). One ``/prices/date/{date}`` call per
+  day covers the whole horizon: it serves the binding TGE Fixing I prices once
+  they are published (~10:45 for the next day) and the model forecast otherwise.
+  Wholesale prices can be converted to the retail price actually paid via an
+  additive markup and a VAT multiplier.
 """
 
 from __future__ import annotations
@@ -44,19 +47,6 @@ PRADCAST_MAX_CONCURRENCY = 6
 _FORECAST_ATTRS = ("raw_today", "raw_tomorrow", "forecast", "prices", "today", "tomorrow")
 _START_KEYS = ("start", "hour", "from", "datetime", "time")
 _VALUE_KEYS = ("value", "price", "total", "cost")
-
-
-def _pradcast_horizon_offset(label: Any) -> int | None:
-    """Return a supported Pradcast D+n horizon offset."""
-    if not isinstance(label, str) or not label.startswith("D+"):
-        return None
-    try:
-        offset = int(label[2:])
-    except ValueError:
-        return None
-    if offset < 1 or offset > PRADCAST_HORIZON_DAYS:
-        return None
-    return offset
 
 
 @dataclass
@@ -150,42 +140,7 @@ class PradcastPriceSource(PriceSource):
     async def async_fetch(self) -> PriceData:
         today = dt_util.now().date()
         days = [today + timedelta(days=offset) for offset in range(PRADCAST_HORIZON_DAYS + 1)]
-        data = await self.async_fetch_days(days)
-        # Backfill forward horizon from /prices/forecasts/{today} for any day
-        # whose per-day endpoint returned nothing (Pradcast typically only
-        # publishes RDN for today+tomorrow as confirmed; D+2/D+3 only live
-        # under the multi-horizon forecast endpoint).
-        await self._merge_forward_forecasts(data, today)
-        return data
-
-    async def _merge_forward_forecasts(self, data: PriceData, today: date) -> None:
-        """Fill D+1..D+3 from the multi-horizon forecast endpoint as a backstop."""
-        try:
-            horizons = await self.async_fetch_forecasts(today)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Pradcast forecast backfill failed: %s", err)
-            return
-        if not horizons:
-            return
-        for horizon_label, entries in horizons.items():
-            # "D+1" -> today + 1 day, etc.
-            offset = _pradcast_horizon_offset(horizon_label)
-            if offset is None:
-                continue
-            day = today + timedelta(days=offset)
-            for entry in entries:
-                hour_idx = entry.get("hour")
-                buy = entry.get("buy")
-                if hour_idx is None or buy is None:
-                    continue
-                start = dt_util.start_of_local_day(day) + timedelta(hours=int(hour_idx))
-                # Don't overwrite confirmed/already-fetched hours.
-                if start in data.buy:
-                    continue
-                data.buy[start] = float(buy)
-                tge = entry.get("tge")
-                if tge is not None:
-                    data.tge[start] = float(tge)
+        return await self.async_fetch_days(days)
 
     async def async_fetch_days(self, days: list[date]) -> PriceData:
         """Fetch an explicit list of days (used for the forward horizon and backfill)."""
@@ -244,49 +199,6 @@ class PradcastPriceSource(PriceSource):
                 _LOGGER.debug("Pradcast fetch failed for %s: %s", url, err)
                 return None
         return None
-
-    async def async_fetch_forecasts(self, target_date: date) -> dict:
-        """Return horizon-indexed forecasts for a date (for the D+1..D+3 overlay).
-
-        Shape: ``{"D+1": [{"hour", "buy", "p10", "p90"}], "D+2": [...], ...}``
-        with retail conversion applied to price/p10/p90.
-        """
-        api_key = self.config.get(CONF_PRADCAST_API_KEY)
-        if not api_key:
-            return {}
-        markup = float(self.config.get(CONF_PRICE_MARKUP, 0.0) or 0.0)
-        vat = float(self.config.get(CONF_PRICE_VAT, 1.0) or 1.0)
-        excise = float(self.config.get(CONF_EXCISE_KWH, 0.0) or 0.0)
-        session = async_get_clientsession(self.hass)
-        payload = await self._get_json(
-            session, api_key, f"{PRADCAST_BASE}/prices/forecasts/{target_date.isoformat()}"
-        )
-        if not payload:
-            return {}
-
-        def _retail(value):
-            return (float(value) + markup + excise) * vat if value is not None else None
-
-        out: dict[str, list[dict]] = {}
-        for horizon, block in (payload.get("forecasts") or {}).items():
-            if _pradcast_horizon_offset(horizon) is None:
-                continue
-            series = []
-            for entry in block.get("prices", []) or []:
-                if entry.get("price_kwh") is None:
-                    continue
-                series.append(
-                    {
-                        "hour": int(entry["hour"]),
-                        "tge": float(entry["price_kwh"]),
-                        "buy": _retail(entry["price_kwh"]),
-                        "p10": _retail(entry.get("p10")),
-                        "p90": _retail(entry.get("p90")),
-                    }
-                )
-            if series:
-                out[horizon] = series
-        return out
 
     @staticmethod
     def _merge_day(

@@ -9,12 +9,16 @@ For hours the source no longer covers it falls back to the permanent
 weekday+hour averaged over the last 1/2/3 weeks of confirmed prices). The
 archive is seeded on first run with the last three weeks so estimates have
 history immediately.
+
+Reads all go through :meth:`PriceModule._resolve`, which applies the archive's
+layering rule in the other direction too: a price already settled as *certain*
+outranks a fetch that returns that hour as a forecast again.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from homeassistant.helpers.storage import Store
@@ -53,6 +57,14 @@ _LOGGER = logging.getLogger(__name__)
 # skipped). After this runs once, the forward fetch maintains the archive.
 _ARCHIVE_BACKFILL_DAYS = 365
 _ARCHIVE_RETENTION_DAYS = 365  # how long fetched prices stay in the archive
+
+# TGE publishes the binding RDN prices (Fixing I) for the next day at ~10:45.
+# Until every hour of tomorrow comes back confirmed, the source is re-asked on
+# this tighter cadence instead of the configured refresh interval — otherwise
+# the binding prices land whenever that interval happens to fall, which is up to
+# ``price_refresh_hours`` after they were published.
+_RDN_FIXING_PUBLISHED_AT = time(10, 45)
+_FIXING_RETRY_INTERVAL = timedelta(minutes=20)
 
 
 class PriceArchive:
@@ -285,19 +297,42 @@ class PriceModule(PowerPilotModule):
         hours = float(self.config.get(CONF_PRICE_REFRESH_HOURS, 3) or 3)
         return timedelta(hours=max(hours, 0.0))
 
+    def _awaiting_fixing(self, now: datetime) -> bool:
+        """Whether tomorrow's binding prices are published but not held yet.
+
+        Past the daily RDN publication moment every hour of tomorrow should be
+        ``certain``; while any of them is still a forecast the held data is
+        known to be behind the source, whatever the configured interval says.
+        Only Pradcast is judged against that clock — it serves TGE Fixing I
+        directly; a price sensor republishes on its own integration's schedule.
+        """
+        if self.config.get(CONF_PRICE_SOURCE) != PRICE_SOURCE_PRADCAST:
+            return False
+        if now.time() < _RDN_FIXING_PUBLISHED_AT:
+            return False
+        tomorrow = dt_util.start_of_local_day(now + timedelta(days=1))
+        return any(
+            tomorrow + timedelta(hours=index) not in self._data.confirmed_hours
+            for index in range(24)
+        )
+
     async def async_update(self) -> None:
         # Historical backfill is one-time (scheduled in async_setup); the update
         # path only fetches forward.
         now = dt_util.now()
         # Throttle the actual source hit: forecasts only change every few hours,
         # so the optimizer runs off cached prices in between. A fresh restart
-        # (empty buy data) always fetches immediately.
+        # (empty buy data) always fetches immediately, and so does the window
+        # right after the RDN fixing, when tomorrow is still on a forecast.
+        interval = self._refresh_interval()
+        if self._awaiting_fixing(now):
+            interval = min(interval, _FIXING_RETRY_INTERVAL)
         if (
             self._data.buy
             and self._last_source_fetch is not None
-            and (now - self._last_source_fetch) < self._refresh_interval()
+            and (now - self._last_source_fetch) < interval
         ):
-            next_fetch = self._last_source_fetch + self._refresh_interval()
+            next_fetch = self._last_source_fetch + interval
             self.log_info(
                 f"Ceny z pamięci podręcznej (następne pobranie ~{next_fetch.strftime('%H:%M')}). "
                 f"Archiwum: {len(self.archive)} godzin.",
@@ -334,41 +369,51 @@ class PriceModule(PowerPilotModule):
                 "archive_hours": len(self.archive),
             },
         )
+        if self._awaiting_fixing(now):
+            # Loud on purpose: past ~10:45 every hour of tomorrow should be
+            # binding, so a forecast still coming back means the source — not
+            # the refresh cadence — is behind.
+            self.log_warning(
+                f"Ceny RDN na jutro są publikowane ok. "
+                f"{_RDN_FIXING_PUBLISHED_AT.strftime('%H:%M')}, a źródło {source_label} "
+                f"wciąż zwraca prognozę. Ponowna próba za "
+                f"{int(_FIXING_RETRY_INTERVAL.total_seconds() // 60)} min.",
+                extra={"source": source_label, "awaiting_fixing": True},
+            )
+
+    def _resolve(self, hour) -> tuple[float | None, str | None]:
+        """The price for ``hour`` and its provenance — the one resolution order.
+
+        A **certain** price is final, so an archived binding price outranks the
+        live fetch even when that fetch returns the hour as a forecast again
+        (the archive applies the same rule on write). Otherwise the live fetch
+        wins — it carries the freshest forecast — and the permanent archive
+        covers what the fetch window no longer reaches: past hours, and the gap
+        between two source hits. ``(None, None)`` when no price is known.
+        """
+        archived = self.archive.get(hour)
+        if archived is not None and archived["type"] == PRICE_TYPE_CERTAIN:
+            return archived["energy"], PRICE_TYPE_CERTAIN
+        price = self._data.buy.get(hour)
+        if price is not None:
+            return price, (
+                PRICE_TYPE_CERTAIN
+                if hour in self._data.confirmed_hours
+                else PRICE_TYPE_FORECAST
+            )
+        if archived is not None:
+            return archived["energy"], archived["type"]
+        return None, None
 
     def price_at(self, hour) -> float | None:
-        # The live fetch window (``_data.buy``) only covers today→D+N; past hours
-        # roll out of it on the next fetch. The permanent archive retains them
-        # (same values, see ``_ingest_into_archive``), so fall back to it — this
-        # is what makes historical prices show on the chart. Mirrors
-        # ``contribute``'s archive fallback.
-        price = self._data.buy.get(hour)
-        if price is None:
-            archived = self.archive.get(hour)
-            if archived is not None:
-                return archived["energy"]
-        return price
+        return self._resolve(hour)[0]
 
     def is_confirmed(self, hour) -> bool:
-        if hour in self._data.confirmed_hours:
-            return True
-        archived = self.archive.get(hour)
-        return archived is not None and archived["type"] == PRICE_TYPE_CERTAIN
+        return self._resolve(hour)[1] == PRICE_TYPE_CERTAIN
 
     def price_type_at(self, hour) -> str | None:
-        """Provenance of the price :meth:`price_at` returns for ``hour``.
-
-        Mirrors the same live-fetch → archive resolution order, so the chart can
-        colour each hour by how trustworthy its price is. ``None`` when no price
-        is known at all.
-        """
-        if hour in self._data.confirmed_hours:
-            return PRICE_TYPE_CERTAIN
-        if hour in self._data.buy:
-            return PRICE_TYPE_FORECAST
-        archived = self.archive.get(hour)
-        if archived is not None:
-            return archived["type"]
-        return None
+        """Provenance of the price :meth:`price_at` returns, for the chart."""
+        return self._resolve(hour)[1]
 
     async def _ensure_initial_backfill(self) -> None:
         """One-time maximal historical backfill, run once at provider setup.
@@ -487,27 +532,21 @@ class PriceModule(PowerPilotModule):
     def contribute(self, forecast: Forecast) -> None:
         for slot in forecast.slots:
             hour = slot.start.replace(minute=0, second=0, microsecond=0)
-            price = self._data.buy.get(hour)
-            confirmed = hour in self._data.confirmed_hours
+            price, price_type = self._resolve(hour)
+            if price_type == PRICE_TYPE_FORECAST and hour not in self._data.buy:
+                # Served from the permanent archive — this hour sits between two
+                # source fetches, so the live window no longer covers it.
+                slot.tags.append("price_archived")
             if price is None:
-                # Fall back to the permanent archive (covers cached hours between
-                # source fetches), then to the estimated weekday+hour average.
-                archived = self.archive.get(hour)
-                if archived is not None:
-                    price = archived["energy"]
-                    confirmed = archived["type"] == PRICE_TYPE_CERTAIN
-                    if archived["type"] == PRICE_TYPE_FORECAST:
-                        slot.tags.append("price_archived")
-                else:
-                    # Estimated prices fill the tail (D+4..D+7) so the plan
-                    # reaches a full week: a 3-week weighted weekday+hour average.
-                    estimate, _ = self.archive.estimate(hour)
-                    if estimate is not None:
-                        price = estimate
-                        slot.tags.append("price_estimated")
+                # Estimated prices fill the tail (D+4..D+7) so the plan reaches
+                # a full week: a 3-week weighted weekday+hour average.
+                estimate, _ = self.archive.estimate(hour)
+                if estimate is not None:
+                    price = estimate
+                    slot.tags.append("price_estimated")
             if price is not None:
                 slot.buy_price = price
-            slot.price_confirmed = confirmed
+            slot.price_confirmed = price_type == PRICE_TYPE_CERTAIN
             if hour in self._data.levels:
                 slot.tags.append(f"price:{self._data.levels[hour]}")
             if hour in self._data.confidence:

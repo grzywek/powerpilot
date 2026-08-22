@@ -79,7 +79,7 @@ from .const import (
     PRICE_SOURCE_SENSOR,
     charge_curve_band_key,
 )
-from .hierarchy import PARENT_ROOT
+from .hierarchy import PARENT_ROOT, metered_sensors
 from .models import Tariff, TariffPeriod, ValidityRange
 
 _NUMBER = selector.NumberSelector
@@ -628,7 +628,9 @@ class PowerPilotOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         self._ensure_loaded()
-        devices = list(self._data.get(CONF_DEVICE_SENSORS) or [])
+        # Weather-dependent meters are sub-meters too, so they get a slot in the
+        # tree even when they are only listed as climate sensors.
+        devices = metered_sensors(self._data)
 
         if user_input is not None:
             parents: dict[str, str] = {}

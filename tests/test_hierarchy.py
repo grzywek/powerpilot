@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from custom_components.powerpilot.const import (
+    CONF_CLIMATE_SENSORS,
+    CONF_DEVICE_SENSORS,
+)
 from custom_components.powerpilot.hierarchy import (
     PARENT_ROOT,
     build_children,
     exclusive_series,
+    metered_sensors,
     normalize_parents,
 )
 
@@ -15,6 +20,7 @@ ROOT = "sensor.victron"
 APARTMENT = "sensor.apartment"
 WASHER = "sensor.washer"
 GARAGE = "sensor.garage_device"
+AC = "sensor.salon_klimka_energy"
 H = datetime(2026, 6, 15, 8)
 
 
@@ -95,3 +101,31 @@ def test_exclusive_clamps_negative_to_zero() -> None:
     series = {ROOT: {H: 1.0}, WASHER: {H: 2.0}}
     excl = exclusive_series(ROOT, [WASHER], None, series)
     assert excl[ROOT][H] == 0.0
+
+
+def test_metered_sensors_folds_in_climate_meters() -> None:
+    """A weather-dependent meter counts as a sub-meter, listed or not."""
+    assert metered_sensors({}) == []
+    assert metered_sensors({CONF_CLIMATE_SENSORS: [AC]}) == [AC]
+
+    # Configured devices keep their order; a climate-only meter is appended.
+    cfg = {CONF_DEVICE_SENSORS: [APARTMENT, WASHER], CONF_CLIMATE_SENSORS: [AC]}
+    assert metered_sensors(cfg) == [APARTMENT, WASHER, AC]
+
+    # Listing the same meter in both places must not duplicate it — a duplicate
+    # would subtract its energy twice in exclusive_series.
+    both = {CONF_DEVICE_SENSORS: [APARTMENT, AC], CONF_CLIMATE_SENSORS: [AC]}
+    assert metered_sensors(both) == [APARTMENT, AC]
+
+
+def test_climate_meter_is_excluded_from_the_base_load() -> None:
+    """The AC's energy leaves the root's exclusive series, so the climate
+    module's temperature forecast replaces it instead of stacking on it."""
+    series = {
+        ROOT: {H: 3.0},
+        AC: {H: 1.2},
+    }
+    devices = metered_sensors({CONF_CLIMATE_SENSORS: [AC]})
+    out = exclusive_series(ROOT, devices, None, series)
+    assert out[ROOT][H] == 1.8
+    assert out[AC][H] == 1.2

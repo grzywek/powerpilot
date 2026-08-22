@@ -4,7 +4,10 @@ Learns an hourly household consumption profile keyed by ``(weekday, hour)`` from
 the configured main consumption sensor, using Home Assistant long-term statistics
 (the recorder). Separately-metered devices (AC/heating, washer, boiler, iron, …)
 are broken out into their own weekly profiles, leaving a clean **base** (the
-uncontrollable background load).
+uncontrollable background load). The weather-dependent meters
+(``CONF_CLIMATE_SENSORS``) are broken out here as well, whether or not they are
+repeated in the device list — otherwise the climate module's temperature model
+would add their demand on top of a base that still contains it.
 
 Meters may be *nested* — a washing machine sub-meter sits inside an apartment
 sub-meter which sits inside the main (Victron output) sensor. The configured
@@ -38,12 +41,11 @@ from homeassistant.util import dt as dt_util
 from ..const import (
     CONF_CONSUMPTION_LEARN_DAYS,
     CONF_CONSUMPTION_SENSOR,
-    CONF_DEVICE_SENSORS,
     CONF_EV_CHARGE_METER_SENSOR,
     CONF_SENSOR_PARENTS,
     DOMAIN,
 )
-from ..hierarchy import exclusive_series
+from ..hierarchy import exclusive_series, metered_sensors
 from ..models import Forecast
 from ..profiles import WeeklyAccumulator
 from .base import PowerPilotModule
@@ -249,7 +251,7 @@ class ConsumptionModule(PowerPilotModule):
     def _current_topology(self) -> list:
         """JSON-friendly fingerprint of the meter tree the profile learns under."""
         main_sensor = self.config.get(CONF_CONSUMPTION_SENSOR)
-        device_sensors = list(self.config.get(CONF_DEVICE_SENSORS) or [])
+        device_sensors = metered_sensors(self.config)
         ev_meter = self.config.get(CONF_EV_CHARGE_METER_SENSOR)
         if ev_meter and ev_meter not in device_sensors:
             device_sensors.append(ev_meter)
@@ -286,7 +288,7 @@ class ConsumptionModule(PowerPilotModule):
             return
 
         learn_days = int(self.config.get(CONF_CONSUMPTION_LEARN_DAYS, 21))
-        device_sensors = list(self.config.get(CONF_DEVICE_SENSORS) or [])
+        device_sensors = metered_sensors(self.config)
         # Fold the EV charge meter into the exclusive tree so historical EV
         # charging is removed from the base load (it is planned separately by the
         # EV module). It is learned but NOT contributed to demand — see

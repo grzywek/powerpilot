@@ -27,7 +27,7 @@
           "grid_import_sensor": "Grid import sensor (kW or kWh)",
           "consumption_sensor": "Main sensor (inverter / output)",
           "weather_entity": "Weather entity",
-          "climate_sensors": "Weather-dependent consumption sensors (AC, heat pump…) — profiles learned from temperature",
+          "climate_sensors": "Weather-dependent consumption sensors (AC, heat pump…) — profiles learned from temperature; they also count as separately-metered devices",
           "climate_presence_sensors": "Home presence sensors (persons, phones, binary_sensor) — the temperature profile learns only from hours when somebody was home"
         }
       },
@@ -134,7 +134,7 @@
           "grid_import_sensor": "Grid import sensor (kW or kWh)",
           "consumption_sensor": "Main sensor (inverter / output)",
           "weather_entity": "Weather entity",
-          "climate_sensors": "Weather-dependent consumption sensors (AC, heat pump…) — profiles learned from temperature",
+          "climate_sensors": "Weather-dependent consumption sensors (AC, heat pump…) — profiles learned from temperature; they also count as separately-metered devices",
           "climate_presence_sensors": "Home presence sensors (persons, phones, binary_sensor) — the temperature profile learns only from hours when somebody was home"
         }
       },

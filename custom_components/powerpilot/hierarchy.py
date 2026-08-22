@@ -20,12 +20,35 @@ tested directly and reused by both the learner and the chart series builder.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
+from typing import Any
+
+from .const import CONF_CLIMATE_SENSORS, CONF_DEVICE_SENSORS
 
 # Sentinel parent value meaning "direct child of the main consumption sensor".
 # Stored in config instead of the root entity id so the mapping survives the
 # root sensor being swapped out.
 PARENT_ROOT = "__root__"
+
+
+def metered_sensors(config: Mapping[str, Any]) -> list[str]:
+    """Every separately-metered load: the device sensors plus the climate ones.
+
+    A weather-dependent meter (AC, heat pump) is a sub-meter like any other: its
+    energy has to be broken out of the main reading, or the climate module would
+    add its temperature-driven demand on top of a base that still contains it.
+    Picking a sensor as weather-dependent therefore implies "separately metered",
+    so it gets a weekly profile, a slot in the meter tree and its own panel
+    profile even when it is not repeated in the device list.
+    """
+    devices = list(config.get(CONF_DEVICE_SENSORS) or [])
+    seen = set(devices)
+    for entity_id in config.get(CONF_CLIMATE_SENSORS) or []:
+        if entity_id not in seen:
+            seen.add(entity_id)
+            devices.append(entity_id)
+    return devices
 
 
 def normalize_parents(

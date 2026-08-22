@@ -820,12 +820,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         """
         from collections import defaultdict
 
-        from .const import (
-            CONF_CONSUMPTION_SENSOR,
-            CONF_DEVICE_SENSORS,
-            CONF_SENSOR_PARENTS,
-        )
-        from .hierarchy import exclusive_series
+        from .const import CONF_CONSUMPTION_SENSOR, CONF_SENSOR_PARENTS
+        from .hierarchy import exclusive_series, metered_sensors
 
         now = dt_util.now()
         today = dt_util.start_of_local_day(now)
@@ -833,7 +829,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         end_date = now.date()
 
         main = self.config.get(CONF_CONSUMPTION_SENSOR)
-        device_ids = list(self.config.get(CONF_DEVICE_SENSORS) or [])
+        # Weather-dependent meters are sub-meters too — they carry their own
+        # profile chip (and its temperature heatmap) like every other device.
+        device_ids = metered_sensors(self.config)
+        climate_ids = set(self.climate.sensors)
 
         # Hourly energy per sensor over the window (one recorder read each).
         hourly: dict[str, dict] = {}
@@ -909,7 +908,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # Own (exclusive) energy — for a meter nesting sub-meters this excludes
             # the children, consistent with the optimizer and the learned heatmap.
             own = exclusive.get(eid, hourly.get(eid, {}))
-            profiles.append(_profile(eid, _name(eid), own, "mdi:flash"))
+            icon = "mdi:air-conditioner" if eid in climate_ids else "mdi:flash"
+            profiles.append(_profile(eid, _name(eid), own, icon))
 
         return {
             "generated_at": now.isoformat(),
@@ -933,7 +933,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_BATTERY_DISCHARGE_SENSOR,
             CONF_BUY_PRICE_SENSOR,
             CONF_CONSUMPTION_SENSOR,
-            CONF_DEVICE_SENSORS,
             CONF_EV_ENABLED,
             CONF_EV_SOC_SENSOR,
             CONF_GRID_IMPORT_SENSOR,
@@ -943,6 +942,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_WEATHER_ENTITY,
             PRICE_SOURCE_PRADCAST,
         )
+        from .hierarchy import metered_sensors
 
         now = dt_util.now().replace(minute=0, second=0, microsecond=0)
         win_start = now - timedelta(hours=48)
@@ -1107,13 +1107,18 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         # ---- Optional inputs ----
         optional_items: list[dict] = []
-        for eid in self.config.get(CONF_DEVICE_SENSORS) or []:
+        climate_ids = set(self.climate.sensors)
+        for eid in metered_sensors(self.config):
             di = await self.consumption.async_diagnose_sensor(eid, win_start, now)
             name = eid.split(".")[-1]
             optional_items.append(
                 {
                     "key": f"device:{eid}",
-                    "label": f"Urządzenie: {name}",
+                    "label": (
+                        f"Klimatyzacja/pompa: {name}"
+                        if eid in climate_ids
+                        else f"Urządzenie: {name}"
+                    ),
                     "required": False,
                     "entity_id": eid,
                     "detail": di,
@@ -1221,11 +1226,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_BATTERY_CHARGE_SENSOR,
             CONF_BATTERY_DISCHARGE_SENSOR,
             CONF_BUY_PRICE_SENSOR,
+            CONF_CLIMATE_SENSORS,
             CONF_CONSUMPTION_SENSOR,
             CONF_DEVICE_SENSORS,
             CONF_GRID_IMPORT_SENSOR,
             CONF_SOC_SENSOR,
         )
+        from .hierarchy import metered_sensors
 
         plan = self.data
         now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
@@ -1267,8 +1274,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             sid = self.config.get(key)
             if sid:
                 diag_targets.append((key, sid))
-        for sid in self.config.get(CONF_DEVICE_SENSORS) or []:
-            diag_targets.append((CONF_DEVICE_SENSORS, sid))
+        climate_ids = set(self.climate.sensors)
+        for sid in metered_sensors(self.config):
+            # Report each probe under the key it was configured with, so a
+            # climate-only meter is recognisable in the dump.
+            diag_targets.append(
+                (CONF_CLIMATE_SENSORS if sid in climate_ids else CONF_DEVICE_SENSORS, sid)
+            )
 
         sensor_reads: list[dict] = []
         for key, sid in diag_targets:
@@ -1611,7 +1623,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_BATTERY_CHARGE_SENSOR,
             CONF_BATTERY_DISCHARGE_SENSOR,
             CONF_CONSUMPTION_SENSOR,
-            CONF_DEVICE_SENSORS,
             CONF_EV_BEHIND_METER,
             CONF_EV_CHARGE_EFFICIENCY,
             CONF_EV_CHARGER_KW,
@@ -1621,7 +1632,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_GRID_IMPORT_SENSOR,
             CONF_SENSOR_PARENTS,
         )
-        from .hierarchy import exclusive_series
+        from .hierarchy import exclusive_series, metered_sensors
 
         real_now = dt_util.now()
         now = real_now.replace(minute=0, second=0, microsecond=0)  # current hour start
@@ -1672,7 +1683,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             if past_end > past_start
             else {}
         )
-        device_ids = list(self.config.get(CONF_DEVICE_SENSORS) or [])
+        device_ids = metered_sensors(self.config)
         device_real: dict[str, dict] = {}
         for eid in device_ids:
             if past_end > past_start:
@@ -2823,7 +2834,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_CHARGE_EFFICIENCY,
             CONF_CHARGE_EFFICIENCY_CURVE,
             CONF_CONSUMPTION_SENSOR,
-            CONF_DEVICE_SENSORS,
             CONF_DISCHARGE_EFFICIENCY,
             CONF_EV_ENERGY_ADDED_SENSOR,
             CONF_EV_SOC_SENSOR,
@@ -2836,6 +2846,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_WEATHER_ENTITY,
             DEFAULTS,
         )
+        from .hierarchy import metered_sensors
 
         now = dt_util.now().replace(minute=0, second=0, microsecond=0)
 
@@ -2876,8 +2887,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "inputs": {
                 "consumption": ent(CONF_CONSUMPTION_SENSOR),
                 "device_sensors": [
-                    {"entity_id": eid} for eid in (self.config.get(CONF_DEVICE_SENSORS) or [])
+                    {"entity_id": eid} for eid in metered_sensors(self.config)
                 ],
+                "climate_sensors": list(self.climate.sensors),
                 "battery_soc": ent(CONF_SOC_SENSOR),
                 "battery_charge": ent(CONF_BATTERY_CHARGE_SENSOR),
                 "battery_discharge": ent(CONF_BATTERY_DISCHARGE_SENSOR),

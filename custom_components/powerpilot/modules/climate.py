@@ -5,6 +5,11 @@ e.g. AC or heat-pump meters) consume energy as a function of the outside
 temperature, and forecasts each of them from the weather entity's hourly
 temperature forecast instead of the weekday+hour weekly average.
 
+Listing a sensor here implies it is separately metered: ``hierarchy.metered_sensors``
+folds it into the device set, so it is subtracted from the base load, gets a
+weekly profile (the fallback beyond the temperature forecast horizon) and shows
+up in the panel with its own profile alongside the temperature heatmap.
+
 Data model: hourly ``(temperature, kWh)`` pairs per sensor, folded once per
 settled day. When presence sensors are configured
 (``CONF_CLIMATE_PRESENCE_SENSORS``), hours with nobody home are left out of

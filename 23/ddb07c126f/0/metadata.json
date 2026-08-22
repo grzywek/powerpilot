@@ -1,0 +1,106 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "23ddb07c126f",
+  "session_id": "1de1b4ec-cba5-4778-a22c-d308d2b0233b",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-22T23:30:22.327465Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "custom_components/powerpilot/config_flow.py",
+    "custom_components/powerpilot/coordinator.py",
+    "custom_components/powerpilot/hierarchy.py",
+    "custom_components/powerpilot/modules/climate.py",
+    "custom_components/powerpilot/modules/consumption.py",
+    "custom_components/powerpilot/translations/en.json",
+    "custom_components/powerpilot/translations/pl.json",
+    "tests/test_consumption.py",
+    "tests/test_hierarchy.py"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "bbc68015ee5f",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 138,
+    "cache_creation_tokens": 138674,
+    "cache_read_tokens": 8985499,
+    "output_tokens": 38550,
+    "api_call_count": 69
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_01DBWwhDHZhzrd7JPg7v7iEP",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "commit"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "bbc68015ee5f",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 515,
+        "end": 516,
+        "entry_ids": [
+          "1fe8c1aa-e4f3-4079-998c-c9d27f8174f3"
+        ],
+        "tool_use_id": "toolu_01DBWwhDHZhzrd7JPg7v7iEP"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_01DBWwhDHZhzrd7JPg7v7iEP"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: commit",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-22T23:30:22.290088Z",
+    "agent_lines": 163,
+    "agent_removed": 30,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 163,
+    "total_lines_changed": 193,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 148,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84,
+        ".claude/settings.local.json": 9,
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 52
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 9,
+      "user_lines_removed": 0,
+      "agent_lines_added": 302,
+      "agent_lines_removed": 30,
+      "user_added_per_file": {
+        ".claude/settings.local.json": 9
+      }
+    }
+  ]
+}

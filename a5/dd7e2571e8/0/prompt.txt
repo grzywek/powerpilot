@@ -1,0 +1,11 @@
+w diagnostyce powinny się pokazywać wybrane kalendarze; a w status przy eventach dodajmy nazwę kalendarza z którego pochodzi ten event - trudno mi znaleźć je
+
+---
+
+do "Sterowanie — realizacja vs plan" dodajmy też soc ev, soc status, czy ma być podłączony, czy nie podłączony itp
+
+---
+
+i jeszcze tutaj + na wykresie w planie niech się pokazuje ile minut ma ładować EV i ile minut faktycznie ładowało;
+
+wykres dla obecnej godziny niech pokazuje prognozę, a nie realizację jednak; dopiero po zakończeniu godziny ma się zmienić na realizację

@@ -34,9 +34,22 @@ interface Plan {
   forecast: ForecastHour[];
 }
 
+/** A calendar configured as a planning source, with what it last delivered. */
+interface CalendarSource {
+  entity_id: string;
+  /** Friendly name, or null when HA no longer has the entity. */
+  name: string | null;
+  available: boolean;
+  events: number;
+  trips: number;
+}
+
 interface EVTrip {
   label: string;
   location: string;
+  /** Source calendar entity_id, and its friendly name when HA still has it. */
+  calendar: string;
+  calendar_name: string | null;
   event_start: string;
   event_end: string;
   depart: string;
@@ -50,6 +63,12 @@ interface EVPlan {
   enabled: boolean;
   available: boolean;
   home: boolean | null;
+  /** Charger cable actually in the car (live sensor), and whether the car is
+   *  chargeable right now at all — sent by the backend, needed by the
+   *  plan-vs-reality card to say "should be plugged in" against reality. */
+  plugged: boolean | null;
+  chargeable_now: boolean;
+  charge_ceiling_soc: number | null;
   soc: number | null;
   target_soc: number | null;
   energy_added_kwh: number | null;
@@ -75,9 +94,14 @@ interface EVPlan {
     // Trip targets: the reserve (EV min-SoC entity) + round-trip split.
     reserve_soc?: number | null;
     trip_soc?: number | null;
+    // Which calendar wrote this deadline — with several sources configured,
+    // the number alone doesn't say where to go and edit it.
+    calendar?: string;
+    calendar_name?: string | null;
   }[];
   forced_hours: string[];
   trips: EVTrip[];
+  calendars: CalendarSource[];
   planned_hours: { start: string; kwh: number }[];
   control: {
     connect_charger: boolean;
@@ -97,6 +121,7 @@ interface Status {
   consumption_devices: string[];
   ev_enabled: boolean;
   ev?: EVPlan;
+  calendars: CalendarSource[];
   modules: { domain: string; error: string | null }[];
   checks: { key: string; label: string; ok: boolean }[];
 }
@@ -207,6 +232,9 @@ interface SeriesHour {
   ev_charge_kwh: number | null;
   /** Planned charger runtime within the hour (minutes at full power). */
   ev_charge_minutes: number | null;
+  /** Measured charger runtime, from the recorder's 5-minute buckets — so a
+   *  multiple of 5, and null for hours that have not happened yet. */
+  ev_minutes_real: number | null;
   hour_cost: number | null;
   energy_cost: number | null;
   distribution_cost: number | null;
@@ -1283,6 +1311,7 @@ export class PowerPilotPanel extends LitElement {
       planOnly?: boolean;
       elapsed?: number | null;
       planSuffix?: string;
+      realSuffix?: string;
     } = {}
   ): TemplateResult | typeof nothing {
     const p = plan ?? null;
@@ -1302,7 +1331,7 @@ export class PowerPilotPanel extends LitElement {
       <span class="pv-vals">
         ${opts.planOnly
           ? html`<strong>${this._fmtNum(p, digits)}</strong> ${unit}${opts.planSuffix ?? ""}`
-          : html`<strong>${this._fmtNum(r, digits)}</strong>
+          : html`<strong>${this._fmtNum(r, digits)}</strong>${opts.realSuffix ?? ""}
               <span class="pv-arrow">→</span>
               ${this._fmtNum(p, digits)}${opts.planSuffix ?? ""} ${unit}
               ${ratio != null
@@ -1342,6 +1371,36 @@ export class PowerPilotPanel extends LitElement {
           ? html`<strong>${fmt(plan)}</strong>`
           : html`<strong>${fmt(real)}</strong> <span class="pv-arrow">→</span>
               ${fmt(plan)}`}
+      </span>
+    </div>`;
+  }
+
+  /** " (45 min)" for a charger runtime, or "" when it is unknown. Measured
+   *  values are a multiple of 5 (recorder buckets) — not rounded here, so the
+   *  granularity stays visible instead of pretending to the minute. */
+  private _minSuffix(minutes: number | null | undefined): string {
+    return minutes != null ? ` (${minutes} min)` : "";
+  }
+
+  /** Plan-vs-reality for a non-numeric state (charger connected, car at home).
+   *  Same shape as ``_socRow`` so the EV rows line up with the energy ones;
+   *  ``real === undefined`` means "not observable for this hour" and renders
+   *  the plan alone rather than a misleading "—" against it. */
+  private _stateRow(
+    label: string,
+    plan: string | null,
+    real?: string | null,
+    planOnly = false
+  ): TemplateResult | typeof nothing {
+    if (plan == null && real == null) return nothing;
+    const dash = (v: string | null | undefined) => v ?? "—";
+    return html`<div class="pv-row">
+      <span class="pv-label">${label}</span>
+      <span class="pv-vals">
+        ${planOnly || real === undefined
+          ? html`<strong>${dash(plan)}</strong>`
+          : html`<strong>${dash(real)}</strong> <span class="pv-arrow">→</span>
+              ${dash(plan)}`}
       </span>
     </div>`;
   }
@@ -1400,7 +1459,17 @@ export class PowerPilotPanel extends LitElement {
 
     const sPrev = this._seriesAt(prevMs);
     const sCur = this._seriesAt(curMs);
+    const sNext = this._seriesAt(nextMs);
     const pNext = this._planAt(nextMs);
+
+    // EV rows only make sense when the car is part of the plan at all.
+    const ev = this._status?.ev_enabled ? this._status?.ev : null;
+    // "Plugged in" is a live reading with no per-hour history, so it is only
+    // ever shown against the current hour — never inferred backwards from
+    // whether charging happened.
+    const plugNow = ev ? this._evBool(ev.plugged, "podłączona", "niepodłączona") : null;
+    const wantPlug = (kwh: number | null | undefined) =>
+      kwh == null ? null : kwh > 0.005 ? "podłączona" : "niepotrzebna";
 
     const elapsed = Math.max(0, Math.min(1, (Date.now() - curMs) / 3600_000));
     const elapsedMin = Math.round(elapsed * 60);
@@ -1412,10 +1481,20 @@ export class PowerPilotPanel extends LitElement {
             ${this._modeRow(sPrev.planned_mode ?? null, sPrev.inverter_mode)}
             ${this._pvRow("🔋 Ładowanie ESS", sPrev.forecast?.charge, sPrev.realized?.charge)}
             ${this._pvRow("🔋 Z ESS", sPrev.forecast?.discharge, sPrev.realized?.discharge)}
-            ${this._pvRow("🚗 Ładowanie EV", sPrev.forecast?.ev, sPrev.realized?.ev)}
+            ${this._pvRow("🚗 Ładowanie EV", sPrev.forecast?.ev, sPrev.realized?.ev, {
+              planSuffix: this._minSuffix(sPrev.ev_charge_minutes),
+              realSuffix: this._minSuffix(sPrev.ev_minutes_real),
+            })}
             ${this._pvRow("🏠 Zużycie domu", sPrev.consumption_forecast, sPrev.consumption_real)}
             ${this._pvRow("⚡ Pobór z sieci", sPrev.forecast?.grid, sPrev.realized?.grid)}
             ${this._socRow("🔋 SoC ESS na koniec", sPrev.forecast?.soc_end, sPrev.realized?.soc_end)}
+            ${ev
+              ? this._socRow(
+                  "🚗 SoC EV na koniec",
+                  sPrev.forecast?.ev_soc_end,
+                  sPrev.realized?.ev_soc_end
+                )
+              : nothing}
             ${this._revisionNote(sPrev)}
           `
         : html`<div class="muted">brak danych (wróć do „● teraz")</div>`;
@@ -1447,11 +1526,20 @@ export class PowerPilotPanel extends LitElement {
       ${this._pvRow("🔋 Z ESS", planDischarge, sCur?.realized?.discharge, { elapsed })}
       ${this._pvRow("🚗 Ładowanie EV", planEv, sCur?.realized?.ev, {
         elapsed,
-        planSuffix: planEvMin != null ? ` (${planEvMin} min)` : "",
+        planSuffix: this._minSuffix(planEvMin),
+        realSuffix: this._minSuffix(sCur?.ev_minutes_real),
       })}
       ${this._pvRow("🏠 Zużycie domu", planCons, sCur?.consumption_real, { elapsed })}
       ${this._pvRow("⚡ Pobór z sieci", planGrid, sCur?.realized?.grid, { elapsed })}
       ${this._socRow("🔋 SoC ESS: teraz → plan na koniec", planSocEnd, sCur?.soc ?? null)}
+      ${ev
+        ? html`${this._socRow(
+            "🚗 SoC EV: teraz → plan na koniec",
+            sCur?.forecast?.ev_soc_end,
+            sCur?.ev_soc ?? null
+          )}
+          ${this._stateRow("🚗 Ładowarka", wantPlug(planEv), plugNow)}`
+        : nothing}
       ${this._revisionNote(sCur)}
     `;
 
@@ -1464,11 +1552,20 @@ export class PowerPilotPanel extends LitElement {
           ${this._pvRow("🔋 Z ESS", pNext.battery_discharge_kwh, null, { planOnly: true })}
           ${this._pvRow("🚗 Ładowanie EV", pNext.ev_charge_kwh, null, {
             planOnly: true,
-            planSuffix: pNext.ev_charge_minutes != null ? ` (${pNext.ev_charge_minutes} min)` : "",
+            planSuffix: this._minSuffix(pNext.ev_charge_minutes),
           })}
           ${this._pvRow("🏠 Zużycie domu", this._forecastConsumptionAt(nextMs), null, { planOnly: true })}
           ${this._pvRow("⚡ Pobór z sieci", pNext.grid_buy_kwh, null, { planOnly: true })}
           ${this._socRow("🔋 SoC ESS na koniec", pNext.battery_soc, null, true)}
+          ${ev
+            ? html`${this._socRow(
+                "🚗 SoC EV na koniec",
+                sNext?.forecast?.ev_soc_end,
+                null,
+                true
+              )}
+              ${this._stateRow("🚗 Ładowarka", wantPlug(pNext.ev_charge_kwh), undefined, true)}`
+            : nothing}
         `
       : html`<div class="muted">poza horyzontem planu</div>`;
 
@@ -1494,6 +1591,20 @@ export class PowerPilotPanel extends LitElement {
             ? "ładuje" + (current.ev_charge_minutes != null ? ` (${current.ev_charge_minutes} min)` : "")
             : "—"
         )}
+        ${ev
+          ? html`${this._stat(
+              "🚗 SoC EV teraz",
+              ev.soc != null
+                ? ev.soc.toFixed(0) +
+                  " %" +
+                  (ev.soc_limit != null ? ` / ${ev.soc_limit.toFixed(0)} %` : "")
+                : "—"
+            )}
+            ${this._stat(
+              "🚗 Ładowarka",
+              `${plugNow} · ${this._evBool(ev.home, "w domu", "poza domem")}`
+            )}`
+          : nothing}
         ${this._stat(`Koszt horyzontu (${plan.hours.length} h)`, plan.total_cost.toFixed(2) + " PLN")}
       </div>
     </div>`;
@@ -1687,14 +1798,26 @@ export class PowerPilotPanel extends LitElement {
     const pairBar = (extract: (h: SeriesHour) => number | null) =>
       ts.map((t, i) => ({ x: t + HALF_HOUR, y: extract(hrs[i]) }));
 
+    // The running hour is only part realized. Drawing that stub next to whole
+    // hours reads as demand collapsing at "now", and the bar then grows through
+    // the hour — so the in-progress hour is drawn as its PLAN and flips to what
+    // actually happened only once the hour closes. The tooltip still carries
+    // both sides, so nothing is hidden.
+    const planned = (h: SeriesHour): boolean => h.partial === true;
+
     // Sum of sub-metered devices for an hour (real preferred, forecast fallback).
     const deviceSum = (h: SeriesHour): number =>
-      Object.values(h.devices_real ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0) ||
-      Object.values(h.devices_forecast ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0);
+      planned(h)
+        ? Object.values(h.devices_forecast ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0)
+        : Object.values(h.devices_real ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0) ||
+          Object.values(h.devices_forecast ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0);
 
     // Base household load = total consumption minus the sub-metered devices,
     // so stacking base + devices does not double-count.
     const baseConsumption = (h: SeriesHour): number | null => {
+      // The in-progress hour carries no whole-hour consumption forecast of its
+      // own; its plan's base load lives on the forecast side.
+      if (planned(h)) return h.forecast?.base ?? null;
       // Realized when present; otherwise the (possibly vintage-pinned)
       // forecast — a stale forecast lead blanks realized fields so the bars
       // draw the pinned plan instead of reality.
@@ -1706,11 +1829,20 @@ export class PowerPilotPanel extends LitElement {
     };
 
     const device = (eid: string) => (h: SeriesHour): number | null => {
+      if (planned(h)) return h.devices_forecast?.[eid] ?? null;
       const r = h.devices_real?.[eid];
       if (r != null) return r;
       const f = h.devices_forecast?.[eid];
       return f != null ? f : null;
     };
+
+    /** A stack component for one hour: the plan while the hour is running,
+     *  what was measured once it is over. */
+    const flow = (
+      key: "grid" | "discharge" | "ev" | "charge",
+      live: (h: SeriesHour) => number | null
+    ) => (h: SeriesHour): number | null =>
+      planned(h) ? (h.forecast?.[key] ?? null) : live(h);
 
     // Stack component definitions — the single source of truth for both the
     // chart series and the custom tooltip breakdown.
@@ -1722,8 +1854,8 @@ export class PowerPilotPanel extends LitElement {
     };
     const deviceIds = s.device_ids ?? [];
     const upRows: Row[] = [
-      { label: "⚡ Import z sieci", color: "#8e44ad", key: "grid", get: (h) => h.grid_buy_kwh },
-      { label: "🔋 ESS — rozładowanie", color: "#b0a14f", key: "discharge", get: (h) => h.battery_discharge_kwh },
+      { label: "⚡ Import z sieci", color: "#8e44ad", key: "grid", get: flow("grid", (h) => h.grid_buy_kwh) },
+      { label: "🔋 ESS — rozładowanie", color: "#b0a14f", key: "discharge", get: flow("discharge", (h) => h.battery_discharge_kwh) },
     ];
     const downRows: Row[] = [
       { label: "🏠 Zużycie bazowe", color: "#b5475d", key: "base", get: baseConsumption },
@@ -1733,8 +1865,8 @@ export class PowerPilotPanel extends LitElement {
         key: `dev:${eid}`,
         get: device(eid),
       })),
-      { label: "🚗 Ładowanie EV", color: "#15803d", key: "ev", get: (h) => h.ev_charge_kwh },
-      { label: "🔋 ESS — ładowanie", color: "#c98a3a", key: "charge", get: (h) => h.battery_charge_kwh },
+      { label: "🚗 Ładowanie EV", color: "#15803d", key: "ev", get: flow("ev", (h) => h.ev_charge_kwh) },
+      { label: "🔋 ESS — ładowanie", color: "#c98a3a", key: "charge", get: flow("charge", (h) => h.battery_charge_kwh) },
     ];
 
     // √-compressed bar heights: an EV-charge hour (10+ kWh) would otherwise
@@ -1743,12 +1875,9 @@ export class PowerPilotPanel extends LitElement {
     // share of the bar, so within-bar proportions stay honest. Axis labels
     // are squared back to real kWh and the tooltip reads raw values.
     const upTotalOf = (h: SeriesHour): number =>
-      (h.grid_buy_kwh ?? 0) + (h.battery_discharge_kwh ?? 0);
+      upRows.reduce<number>((a, r) => a + (r.get(h) ?? 0), 0);
     const downTotalOf = (h: SeriesHour): number =>
-      (baseConsumption(h) ?? 0) +
-      deviceSum(h) +
-      (h.ev_charge_kwh ?? 0) +
-      (h.battery_charge_kwh ?? 0);
+      downRows.reduce<number>((a, r) => a + (r.get(h) ?? 0), 0);
     const sqrtFactor = (total: number): number =>
       total > 1e-9 ? Math.sqrt(total) / total : 0;
 
@@ -2007,10 +2136,18 @@ export class PowerPilotPanel extends LitElement {
           const modeStr = modeMeta ? `  •  falownik: ${modeMeta.label}` : "";
           // Planned charger runtime for hours with EV charging (full power,
           // the automation stops the charger after this many minutes).
-          const evMinStr =
-            h.ev_charge_minutes != null && (h.ev_charge_kwh ?? 0) > 0.005
-              ? `  •  EV: ${h.ev_charge_minutes} min ładowania`
-              : "";
+          // Charger runtime, both sides. The plan commits to a DURATION, so the
+          // kWh alone cannot tell a short run from a slow one — this is the
+          // comparison that says which. Measured to 5-minute buckets; an hour
+          // that was measured and never ran reads "0 min", one with no
+          // statistics at all is simply left out.
+          const evMinBits = [
+            h.ev_charge_minutes ? `plan ${h.ev_charge_minutes} min` : null,
+            h.ev_minutes_real != null ? `realnie ${h.ev_minutes_real} min` : null,
+          ].filter(Boolean);
+          const evMinStr = evMinBits.length
+            ? `  •  🚗 ładowanie: ${evMinBits.join(" · ")}`
+            : "";
 
           // Trip away-windows covering this hour: the on-chart label is
           // truncated, so the tooltip carries the full event name + details
@@ -3080,6 +3217,14 @@ export class PowerPilotPanel extends LitElement {
     return value ? yes : no;
   }
 
+  /** Label for the calendar an entry came from: its friendly name, or the raw
+   * entity_id when HA no longer has the entity (a renamed/removed calendar
+   * must still be identifiable — that is exactly when you need to find it). */
+  private _calLabel(entityId?: string, name?: string | null): string {
+    if (!entityId) return "";
+    return name || entityId;
+  }
+
   /** Merge consecutive 1-hour forced slots into "HH:MM–HH:MM" ranges. */
   private _evForcedRanges(hours: string[]): string[] {
     const sorted = [...hours]
@@ -3148,12 +3293,28 @@ export class PowerPilotPanel extends LitElement {
         ${ev.energy_added_kwh !== null
           ? html`<div class="check">Dodano w sesji: <b>${ev.energy_added_kwh} kWh</b></div>`
           : nothing}
+        ${ev.calendars?.length
+          ? html`<div class="check">
+              <b>Kalendarze</b>
+              ${ev.calendars.map(
+                (c) => html`<span class=${"cal-src" + (c.available ? "" : " missing")}>
+                  ${this._calLabel(c.entity_id, c.name)} ·
+                  ${c.available ? `${c.events} wyd.` : "niedostępny"}
+                </span>`
+              )}
+            </div>`
+          : nothing}
         ${ev.trips?.length
           ? html`<div class="check"><b>Wyjazdy (kalendarz + Google Maps)</b></div>
               ${ev.trips.map(
                 (t) => html`<div class="check">
                   <span class="dot bad"></span>
                   <b>${t.label || t.location}</b>
+                  ${t.calendar
+                    ? html`<span class="cal-src"
+                        >${this._calLabel(t.calendar, t.calendar_name)}</span
+                      >`
+                    : nothing}
                   <span class="muted">
                     ${this._fmtRun(t.depart)} → ${this._fmtRun(t.return_end)}
                     ${t.distance_km != null
@@ -3172,6 +3333,11 @@ export class PowerPilotPanel extends LitElement {
                   <span class="dot ok"></span>${t.source === "trip" ? "min " : ""}${t.target_soc.toFixed(0)}% do
                   <b>${this._fmtRun(t.deadline)}</b>
                   ${t.label ? html`<span class="muted">${t.label}</span>` : nothing}
+                  ${t.calendar
+                    ? html`<span class="cal-src"
+                        >${this._calLabel(t.calendar, t.calendar_name)}</span
+                      >`
+                    : nothing}
                   ${t.reserve_soc != null && t.trip_soc != null
                     ? html`<span class="muted">
                         = rezerwa EV ${t.reserve_soc.toFixed(0)}% (encja „EV minimalna
@@ -4485,6 +4651,20 @@ export class PowerPilotPanel extends LitElement {
     }
     .diag-msg {
       margin-left: auto;
+    }
+    /* Which calendar an entry came from — a quiet chip next to the title, so
+       a trip or deadline can be traced back to the calendar to edit it in. */
+    .cal-src {
+      font-size: 11px;
+      color: var(--secondary-text-color);
+      background: var(--divider-color, rgba(127, 127, 127, 0.2));
+      border-radius: 6px;
+      padding: 1px 6px;
+      margin-left: 6px;
+      white-space: nowrap;
+    }
+    .cal-src.missing {
+      color: var(--error-color, #d33);
     }
     .diag-eid {
       font-family: monospace;

@@ -340,8 +340,14 @@ async def test_series_pre_meter_ev_adds_back_unmetered_charging(
     async def fake_partial(sensor, start, end):
         return None
 
+    async def fake_active_minutes(sensor, start, end):
+        return {}
+
     coordinator.consumption.async_range_kwh = fake_range
     coordinator.consumption.async_partial_kwh = fake_partial
+    # Third recorder-backed reader on the module — stubbed like the other two
+    # so the test stays isolated from the recorder.
+    coordinator.consumption.async_active_minutes = fake_active_minutes
 
     result = await coordinator.get_series(past_hours=2)
     row = next(h for h in result["hours"] if h["start"] == prev_hour.isoformat())

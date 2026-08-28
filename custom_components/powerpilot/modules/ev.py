@@ -303,6 +303,10 @@ class EVChargeTarget:
     target_soc: float
     label: str = ""
     source: str = "calendar"
+    # Source calendar entity_id. With several calendars configured, a deadline
+    # is otherwise untraceable: the panel shows the number but not where to go
+    # and edit it.
+    calendar: str = ""
     # Trip targets only: the two components of ``target_soc`` (reserve floor +
     # round-trip energy as % of the pack), so the UI can explain the number.
     reserve_soc: float | None = None
@@ -797,7 +801,12 @@ class EVModule(PowerPilotModule):
             if event.start <= now:
                 return  # deadline already passed — nothing to schedule
             self._targets.append(
-                EVChargeTarget(deadline=event.start, target_soc=percent, label=summary)
+                EVChargeTarget(
+                    deadline=event.start,
+                    target_soc=percent,
+                    label=summary,
+                    calendar=event.calendar,
+                )
             )
             return
 
@@ -1006,6 +1015,7 @@ class EVModule(PowerPilotModule):
                     # battery's config-flow minimum.
                     reserve_soc=self.min_soc,
                     trip_soc=trip_soc,
+                    calendar=head.calendar,
                 )
             )
 
@@ -1253,6 +1263,12 @@ class EVModule(PowerPilotModule):
                     # split, so the panel can explain where the % comes from.
                     "reserve_soc": target.reserve_soc,
                     "trip_soc": target.trip_soc,
+                    "calendar": target.calendar,
+                    "calendar_name": self.coordinator.calendar.calendar_name(
+                        target.calendar
+                    )
+                    if target.calendar
+                    else None,
                 }
                 for target in sorted(
                     [*self._targets, *self._trip_targets], key=lambda t: t.deadline
@@ -1261,6 +1277,9 @@ class EVModule(PowerPilotModule):
             "forced_hours": [hour.isoformat() for hour in sorted(self._forced_hours)],
             # Away windows (trips) for the chart shading + the EV card.
             "trips": self.trips_payload(),
+            # The calendars these targets/trips could have come from, so the
+            # card can name the sources even when they delivered nothing.
+            "calendars": self.coordinator.calendar.calendars_payload(),
         }
 
     def trips_payload(self) -> list[dict]:
@@ -1271,6 +1290,10 @@ class EVModule(PowerPilotModule):
             {
                 "label": trip.label,
                 "location": trip.location,
+                "calendar": trip.calendar,
+                "calendar_name": self.coordinator.calendar.calendar_name(trip.calendar)
+                if trip.calendar
+                else None,
                 "event_start": trip.event_start.isoformat(),
                 "event_end": trip.event_end.isoformat(),
                 "depart": trip.depart.isoformat(),

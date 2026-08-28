@@ -154,6 +154,10 @@ class Trip:
     previous trip's location (its ``origin_location``), so it cannot charge at
     home before this trip's own ``depart`` — the EV module folds the whole
     chain into one pre-departure target at the chain head instead.
+
+    ``calendar`` is the source calendar's entity_id, carried through from the
+    event so the panel can say *which* calendar an entry came from — with
+    several calendars configured, a trip is otherwise unfindable.
     """
 
     label: str
@@ -171,6 +175,7 @@ class Trip:
     return_distance_km: float | None = None
     return_duration_min: float | None = None
     continues: bool = False
+    calendar: str = ""  # source calendar entity_id
     # ``#<keyword>_socNN`` on the event: the SoC (%) the car must reach before
     # THIS trip departs, overriding the distance-derived floor. ``None`` = no
     # tag, so the automatic reserve+trip target applies.
@@ -447,6 +452,7 @@ class CalendarModule(PowerPilotModule):
                 return_distance_km=inbound.distance_km if inbound else None,
                 return_duration_min=inbound.duration_min if inbound else None,
                 continues=prev is not None,
+                calendar=event.calendar,
                 soc_target=soc_tag(event.summary, self._ev_tag_stem()),
             )
             trip_by_event[id(event)] = trip
@@ -548,15 +554,51 @@ class CalendarModule(PowerPilotModule):
             parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
         return dt_util.as_local(parsed)
 
+    # ------------------------------------------------------------------
+    # Panel / diagnostics payloads
+    # ------------------------------------------------------------------
+    def calendar_name(self, entity_id: str) -> str | None:
+        """Friendly name of a configured calendar, or ``None`` if HA has no
+        such entity (the entity was renamed or removed after being picked).
+
+        ``None`` is the honest answer — the caller decides how to show a
+        calendar that is configured but absent, and the diagnostics report
+        flags it as an error rather than papering over it with the raw id.
+        """
+        state = self.hass.states.get(entity_id)
+        return state.name if state is not None else None
+
+    def calendars_payload(self) -> list[dict]:
+        """One row per configured calendar: what it is and what it delivered.
+
+        ``events``/``trips`` are the counts from the last read, which is what
+        makes this answerable: "the calendar is selected but brought nothing"
+        looks completely different from "it was never selected".
+        """
+        rows: list[dict] = []
+        for entity_id in list(self.config.get(CONF_CALENDARS) or []):
+            rows.append(
+                {
+                    "entity_id": entity_id,
+                    "name": self.calendar_name(entity_id),
+                    "available": self.hass.states.get(entity_id) is not None,
+                    "events": sum(1 for e in self.events if e.calendar == entity_id),
+                    "trips": sum(1 for t in self.trips if t.calendar == entity_id),
+                }
+            )
+        return rows
+
     def plan_summary(self) -> dict:
         """Serialisable calendar snapshot for the panel."""
         return {
-            "calendars": list(self.config.get(CONF_CALENDARS) or []),
+            "calendars": self.calendars_payload(),
             "events": len(self.events),
             "trips": [
                 {
                     "label": t.label,
                     "location": t.location,
+                    "calendar": t.calendar,
+                    "calendar_name": self.calendar_name(t.calendar),
                     "event_start": t.event_start.isoformat(),
                     "event_end": t.event_end.isoformat(),
                     "depart": t.depart.isoformat(),

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from homeassistant.util import dt as dt_util
 
-from custom_components.powerpilot.modules.calendar import Trip
+from custom_components.powerpilot.modules.calendar import CalendarEvent, Trip
 from custom_components.powerpilot.modules.ev import EVModule
 
 NOW = dt_util.now().replace(minute=0, second=0, microsecond=0)
@@ -35,12 +35,15 @@ def _module(keyword: str = "Kotek") -> EVModule:
     return ev
 
 
-def _event(summary: str, hours_ahead: int = 5, length: int = 1, location: str = ""):
-    return SimpleNamespace(
+def _event(
+    summary: str, hours_ahead: int = 5, length: int = 1, location: str = ""
+) -> CalendarEvent:
+    return CalendarEvent(
         summary=summary,
         location=location,
         start=NOW + timedelta(hours=hours_ahead),
         end=NOW + timedelta(hours=hours_ahead + length),
+        calendar="calendar.rodzina",
     )
 
 
@@ -55,6 +58,7 @@ def _trip(soc_target: float | None, km: float = 50.0) -> Trip:
         outbound_distance_km=km,
         return_distance_km=km,
         soc_target=soc_target,
+        calendar="calendar.rodzina",
     )
 
 
@@ -138,3 +142,19 @@ def test_keyword_is_configurable() -> None:
     ev._parse_keyword_event(_event("#tesla_soc90"), "Tesla", NOW)
 
     assert ev._targets[0].target_soc == 90.0
+
+
+def test_deadline_remembers_which_calendar_wrote_it() -> None:
+    """Several calendars can carry #soc tags — the panel must say which one."""
+    ev = _module()
+    ev._parse_keyword_event(_event("#kotek_soc80"), "Kotek", NOW)
+
+    assert ev._targets[0].calendar == "calendar.rodzina"
+
+
+def test_trip_target_remembers_the_chain_head_calendar() -> None:
+    """The deadline IS the head's departure, so it is the head's calendar."""
+    ev = _module()
+    ev._apply_chain_targets([_trip(soc_target=None)], NOW)
+
+    assert ev._trip_targets[0].calendar == "calendar.rodzina"

@@ -67,6 +67,15 @@ _DEFAULT_DAILY_KWH = 12.0
 _POWER_UNITS = {"W": 0.001, "kW": 1.0}
 _ENERGY_UNITS = {"Wh": 0.001, "kWh": 1.0}
 
+# The recorder's short-term statistics are 5-minute buckets, which is the
+# finest resolution "how long did it actually run" can be answered at.
+STAT_BUCKET_MIN = 5
+# Below this per-bucket flow the sensor is idling, not running. 0.01 kWh in
+# 5 minutes is a 0.12 kW average — far under any real charger, far over the
+# jitter of a stationary counter.
+_ACTIVE_BUCKET_KWH = 0.01
+_ACTIVE_KW = 0.12
+
 
 class ConsumptionModule(PowerPilotModule):
     """Provides learned base + per-device consumption per hour."""
@@ -175,6 +184,90 @@ class ConsumptionModule(PowerPilotModule):
         if len(sums) < 2:
             return 0.0
         return max(0.0, sums[-1] - sums[0]) * _ENERGY_UNITS[unit]
+
+    async def async_active_minutes(
+        self, entity_id: str, start: datetime, end: datetime
+    ) -> dict[datetime, int]:
+        """``{hour_start: minutes}`` the sensor was actually flowing.
+
+        Counted from the recorder's 5-minute buckets, so every value is a
+        multiple of 5 — a measurement of how long the thing ran, at that
+        resolution. Deliberately NOT derived from the hour's energy and the
+        rated power: a charger that tapered would then read as having run for
+        half the time it really did, and the whole point of the number is to
+        catch the plan and reality disagreeing.
+
+        An hour appears with ``0`` when it was measured and nothing ran, and is
+        absent only when there are no statistics for it at all. Those are
+        different answers — "the charger stayed off" versus "we cannot say" —
+        and the panel shows them differently.
+        """
+        if end <= start:
+            return {}
+        unit = self._sensor_unit(entity_id)
+        kind = self._sensor_kind(unit)
+        if kind is None:
+            return {}
+        # One bucket of lead-in: an energy counter's first bucket has no
+        # predecessor to difference against, and would be lost otherwise.
+        rows = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start - timedelta(minutes=STAT_BUCKET_MIN),
+            end,
+            {entity_id},
+            "5minute",
+            None,
+            {"mean"} if kind == "power" else {"sum"},
+        )
+        series = rows.get(entity_id, [])
+        if not series:
+            return {}
+
+        out: dict[datetime, int] = {}
+
+        def _hour_of(row: dict) -> datetime | None:
+            hour = self._row_hour(row)
+            return None if hour < start or hour >= end else hour
+
+        def _seen(row: dict) -> None:
+            """This hour has statistics — its answer is 0, not "unknown"."""
+            hour = _hour_of(row)
+            if hour is not None:
+                out.setdefault(hour, 0)
+
+        def _active(row: dict) -> None:
+            hour = _hour_of(row)
+            if hour is not None:
+                out[hour] = min(60, out.get(hour, 0) + STAT_BUCKET_MIN)
+
+        if kind == "power":
+            factor = _POWER_UNITS[unit]
+            for row in series:
+                mean = row.get("mean")
+                if mean is None:
+                    continue
+                _seen(row)
+                if float(mean) * factor > _ACTIVE_KW:
+                    _active(row)
+            return out
+
+        factor = _ENERGY_UNITS[unit]
+        prev: float | None = None
+        for row in series:
+            total = row.get("sum")
+            if total is None:
+                prev = None
+                continue
+            total = float(total)
+            if prev is not None:
+                _seen(row)
+                # A negative delta is a counter reset (a new charging session),
+                # not flow — the next bucket judges what follows it.
+                if (total - prev) * factor > _ACTIVE_BUCKET_KWH:
+                    _active(row)
+            prev = total
+        return out
 
     async def async_diagnose_sensor(
         self, entity_id: str, start: datetime, end: datetime

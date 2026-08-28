@@ -62,6 +62,7 @@ from .const import (
 from . import pricing
 from .forecast import ForecastBuilder
 from .models import Decision, ESSRequest, Plan, tariff_for_day
+from .modules.calendar import CALENDAR_LOOKAHEAD_HOURS
 from .modules.ev import CHARGING_STATES, HOME_STATES, PLUGGED_STATES
 from .modules.snapshots import SnapshotStore
 from .modules import (
@@ -932,6 +933,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_BATTERY_CHARGE_SENSOR,
             CONF_BATTERY_DISCHARGE_SENSOR,
             CONF_BUY_PRICE_SENSOR,
+            CONF_CALENDARS,
             CONF_CONSUMPTION_SENSOR,
             CONF_EV_ENABLED,
             CONF_EV_SOC_SENSOR,
@@ -1168,6 +1170,50 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "Brak prognozy godzinowej (weather.get_forecasts type=hourly)"
                     )
         optional_items.append(weather_item)
+
+        # Calendars: which ones are actually selected, and what each of them
+        # brought in on the last read. Without this the report is silent about
+        # the single most common calendar problem — the right entity was never
+        # picked, or was picked and then renamed away.
+        configured_calendars = list(self.config.get(CONF_CALENDARS) or [])
+        if not configured_calendars:
+            optional_items.append(
+                {
+                    "key": "calendars",
+                    "label": "Kalendarze",
+                    "required": False,
+                    "entity_id": None,
+                    "detail": None,
+                    "status": "skip",
+                    "message": "Żaden kalendarz nie jest wybrany",
+                }
+            )
+        else:
+            for row in self.calendar.calendars_payload():
+                eid = row["entity_id"]
+                item: dict = {
+                    "key": f"calendar:{eid}",
+                    "label": f"Kalendarz: {row['name'] or eid}",
+                    "required": False,
+                    "entity_id": eid,
+                    "detail": row,
+                }
+                if not row["available"]:
+                    item["status"] = "error"
+                    item["message"] = "Encja niedostępna w HA (usunięta lub zmieniona?)"
+                elif row["events"]:
+                    item["status"] = "ok"
+                    item["message"] = (
+                        f"{row['events']} wydarzeń / {CALENDAR_LOOKAHEAD_HOURS} h"
+                        f" · wyjazdów z lokalizacją: {row['trips']}"
+                    )
+                else:
+                    item["status"] = "warn"
+                    item["message"] = (
+                        f"Brak wydarzeń w najbliższych {CALENDAR_LOOKAHEAD_HOURS} h"
+                    )
+                optional_items.append(item)
+
         if self.config.get(CONF_EV_ENABLED):
             optional_items.append(
                 await _sensor_item(
@@ -1718,6 +1764,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # Realized EV charging per hour from the session energy-added counter
         # (total_increasing; async_range_kwh already ignores session resets).
         ev_charge_real = await _read_opt(CONF_EV_ENERGY_ADDED_SENSOR)
+        # How long the charger actually ran each hour, measured in 5-minute
+        # buckets. The plan commits to a *duration* (ev_charge_minutes), so the
+        # kWh alone can't say whether it ran short or just charged slower.
+        ev_minutes_sensor = self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
+        ev_minutes_real: dict = {}
+        if ev_minutes_sensor and past_end > past_start:
+            ev_minutes_real = await self.consumption.async_active_minutes(
+                ev_minutes_sensor, past_start, past_end
+            )
 
         # Realized inverter mode from the measured battery flows (so the history
         # shows what the inverter *actually* did, not a plan). Charging wins ties.
@@ -2139,6 +2194,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     # Planned charging minutes from the plan made at this hour
                     # (tooltip context; blank for vintages predating capture).
                     "ev_charge_minutes": _fc(h, "ev_min"),
+                    "ev_minutes_real": ev_minutes_real.get(h),
                     "hour_cost": real_hour_cost,
                     "energy_cost": real_energy_cost,
                     "distribution_cost": real_dist_cost,
@@ -2179,6 +2235,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             cur_discharge = await _partial(CONF_BATTERY_DISCHARGE_SENSOR)
             cur_grid = await _partial(CONF_GRID_IMPORT_SENSOR)
             cur_ev = await _partial(CONF_EV_ENERGY_ADDED_SENSOR)
+            cur_ev_minutes = (
+                (
+                    await self.consumption.async_active_minutes(
+                        ev_minutes_sensor, now, real_now
+                    )
+                ).get(now)
+                if ev_minutes_sensor
+                else None
+            )
             if cur_grid is not None:
                 # Pre-meter EV tap (see _unmetered_ev_grid): the running hour's
                 # realized import and costs must include the ongoing charging.
@@ -2353,6 +2418,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "ev_charge_minutes": (
                         cur_dec.ev_charge_minutes if cur_dec is not None else None
                     ),
+                    "ev_minutes_real": cur_ev_minutes,
                     # Realized-so-far costs for the in-progress hour (partial flows).
                     "hour_cost": (
                         round(cur_grid * total_price, 4)
@@ -2513,6 +2579,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                             if pin_requested
                             else decision.ev_charge_minutes
                         ),
+                        "ev_minutes_real": None,
                         "hour_cost": round(decision.hour_cost, 4),
                         "energy_cost": round(decision.energy_cost, 4),
                         "distribution_cost": round(decision.distribution_cost, 4),
@@ -3058,6 +3125,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "consumption_devices": list(self.consumption.devices.keys()),
             "ev_enabled": self.ev.enabled,
             "ev": ev_summary,
+            # Configured calendars with per-source event/trip counts. Top-level
+            # because they feed the house battery's #ess tags too, not only EV.
+            "calendars": self.calendar.calendars_payload(),
             "modules": modules,
             "checks": checks,
         }

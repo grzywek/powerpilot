@@ -1,0 +1,1 @@
+zostaw wskazówki że te ahead itp wynikają przez github action które podnosi wersję; może lepiej robić to przez hooki? sam nie wiem

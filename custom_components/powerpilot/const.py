@@ -13,6 +13,15 @@ INTEGRATION_VERSION: Final[str] = json.loads(
 )["version"]
 
 # ---------------------------------------------------------------------------
+# Planning horizon
+# ---------------------------------------------------------------------------
+# How far ahead the plan ever reaches (7 days of hourly slots). Every source of
+# future information is read over this same window — prices (estimated past the
+# source's own D+1..D+3), and the calendar. They must not drift apart: a
+# shorter calendar read silently loses the events at the far end of the plan.
+PLANNING_HORIZON_HOURS: Final = 168
+
+# ---------------------------------------------------------------------------
 # Config / options keys
 # ---------------------------------------------------------------------------
 

@@ -45,6 +45,7 @@ from ..const import (
     CONF_TRAVEL_MARGIN_BEFORE_MIN,
     DEFAULTS,
     HOME_LOCATION_MARKERS,
+    PLANNING_HORIZON_HOURS,
 )
 from ..models import Forecast
 from ..travel import TravelInfo, TravelResolver
@@ -52,8 +53,10 @@ from .base import PowerPilotModule
 
 _LOGGER = logging.getLogger(__name__)
 
-# How far ahead calendar events are read (matches the optimizer horizon cap).
-CALENDAR_LOOKAHEAD_HOURS = 96
+# How far ahead calendar events are read — the whole plan horizon, never less.
+# A shorter read is invisible: the events simply never arrive, so the far end of
+# the plan is made as if the calendar were empty there.
+CALENDAR_LOOKAHEAD_HOURS = PLANNING_HORIZON_HOURS
 # Summary tags steering the trip builder (case-insensitive):
 # * ``#ignore`` — the event does not exist for PowerPilot at all.
 # * ``#continue`` — this located event starts where the PREVIOUS located event

@@ -12,6 +12,7 @@ from datetime import timedelta
 
 from homeassistant.util import dt as dt_util
 
+from .const import PLANNING_HORIZON_HOURS
 from .models import Forecast, HourSlot
 from .modules.base import ModuleRegistry
 
@@ -20,7 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 # Upper bound on how far we ever look ahead (7 days of hourly slots). Energy
 # prices beyond the source's forecast horizon (Pradcast: D+1..D+3) are filled
 # with the estimated weekday+hour average, so the plan reaches the full week.
-MAX_HORIZON_HOURS = 168
+MAX_HORIZON_HOURS = PLANNING_HORIZON_HOURS
 
 
 class ForecastBuilder:

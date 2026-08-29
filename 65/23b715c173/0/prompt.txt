@@ -1,0 +1,17 @@
+commit all & push
+
+---
+
+ok zrobiłem
+
+---
+
+In /Users/dawid/Code/powerpilot, `CalendarModule.plan_summary()` (custom_components/powerpilot/modules/calendar.py, around line 591) is never called anywhere in the integration — verified with a repo-wide grep: the only production caller of any `plan_summary` is `coordinator.py:3086`, which calls `self.ev.plan_summary()`. The calendar one is dead.
+
+It also duplicates `EVModule.trips_payload()` (custom_components/powerpilot/modules/ev.py) — both serialise the same `Trip` objects into near-identical dicts, so they have to be kept in sync by hand. This repo's AGENTS.md is explicit about "one correct path, no duplication".
+
+Decide with the user between:
+1. Delete `CalendarModule.plan_summary()` and the test that only exists to cover it (`tests/test_calendar_source.py::test_plan_summary_names_the_source_on_every_trip` — keep the rest of that file, it covers `calendars_payload()` which IS used).
+2. Keep it but make `EVModule.trips_payload()` delegate to it, so there is a single serialiser.
+
+Run the test suite (`.venv/bin/python -m pytest -q`) afterwards; it should stay green.

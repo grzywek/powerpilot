@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "6523b715c173",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "custom_components/powerpilot/modules/calendar.py",
+    "tests/test_calendar_source.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/65/23b715c173/0/metadata.json",
+      "transcript": "/65/23b715c173/0/full.jsonl",
+      "compact_transcript": "/65/23b715c173/0/transcript.jsonl",
+      "content_hash": "/65/23b715c173/0/content_hash.txt",
+      "prompt": "/65/23b715c173/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 52,
+    "cache_creation_tokens": 262811,
+    "cache_read_tokens": 7364166,
+    "output_tokens": 14264,
+    "api_call_count": 26
+  }
+}

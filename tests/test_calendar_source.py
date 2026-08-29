@@ -137,25 +137,3 @@ async def test_trip_carries_the_calendar_of_the_event_it_came_from() -> None:
     await module._build_trips()
 
     assert [t.calendar for t in module.trips] == ["calendar.rodzina"]
-
-
-async def test_plan_summary_names_the_source_on_every_trip() -> None:
-    module = _module({"calendar.rodzina": "Rodzina"}, ["calendar.rodzina"])
-    module.config = {**module.config, CONF_TRAVEL_MARGIN_BEFORE_MIN: 0.0,
-                     CONF_TRAVEL_MARGIN_AFTER_MIN: 0.0}
-    module.trips = [
-        Trip(
-            label="Babcia",
-            location="Kraków",
-            event_start=NOW,
-            event_end=NOW + timedelta(hours=2),
-            depart=NOW,
-            return_end=NOW + timedelta(hours=3),
-            calendar="calendar.rodzina",
-        )
-    ]
-
-    trip = module.plan_summary()["trips"][0]
-
-    assert trip["calendar"] == "calendar.rodzina"
-    assert trip["calendar_name"] == "Rodzina"

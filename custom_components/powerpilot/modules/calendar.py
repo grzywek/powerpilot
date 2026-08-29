@@ -587,31 +587,3 @@ class CalendarModule(PowerPilotModule):
                 }
             )
         return rows
-
-    def plan_summary(self) -> dict:
-        """Serialisable calendar snapshot for the panel."""
-        return {
-            "calendars": self.calendars_payload(),
-            "events": len(self.events),
-            "trips": [
-                {
-                    "label": t.label,
-                    "location": t.location,
-                    "calendar": t.calendar,
-                    "calendar_name": self.calendar_name(t.calendar),
-                    "event_start": t.event_start.isoformat(),
-                    "event_end": t.event_end.isoformat(),
-                    "depart": t.depart.isoformat(),
-                    "return_end": t.return_end.isoformat(),
-                    "distance_km": t.distance_km,
-                    "duration_min": t.duration_min,
-                    "origin_location": t.origin_location,
-                    "return_location": t.return_location,
-                    "outbound_distance_km": t.outbound_distance_km,
-                    "return_distance_km": t.return_distance_km,
-                    "outbound_duration_min": t.outbound_duration_min,
-                    "return_duration_min": t.return_duration_min,
-                }
-                for t in self.trips
-            ],
-        }

@@ -14,11 +14,13 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import Final
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.event import (
     async_track_point_in_time,
     async_track_state_change_event,
+    async_track_time_interval,
 )
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -26,6 +28,8 @@ from homeassistant.util import dt as dt_util
 
 from .battery import RECOVERY_MARGIN_SOC, BatteryModel, next_recovery_state
 from .const import (
+    CONF_BATTERY_CHARGE_SENSOR,
+    CONF_BATTERY_DISCHARGE_SENSOR,
     CONF_BATTERY_CAPACITY_KWH,
     CONF_BATTERY_WEAR_COST,
     CONF_CALENDARS,
@@ -60,6 +64,12 @@ from .const import (
     STORAGE_VERSION_SNAPSHOTS,
 )
 from . import pricing
+from .execution import (
+    EXECUTION_CHECK_INTERVAL,
+    GRID_MODES,
+    ExecutionWatch,
+    assess_execution,
+)
 from .forecast import ForecastBuilder
 from .models import Decision, ESSRequest, Plan, tariff_for_day
 from .modules.calendar import CALENDAR_LOOKAHEAD_HOURS
@@ -126,6 +136,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # Reserve-recovery latch (battery.next_recovery_state): on once the live
         # SoC fell below the minimum, off once it is back above the margin.
         self._ess_recovering = False
+        # Plan execution watchdog (execution.py): how long the planned mode has
+        # held, and the alarm the binary sensor mirrors (on: None = cannot say).
+        self._execution_watch = ExecutionWatch()
+        self.execution_alarm: dict = {"on": None, "reason": None, "mode": None, "since": None}
         self.events: deque = deque(maxlen=50)
         # What triggered the re-plan currently being computed (entity flips seen
         # by the reactive listener), and the entity → role map that names them.
@@ -377,6 +391,65 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             soc=soc,
             energy_cost=self._battery_energy_cost,
         )
+
+    @callback
+    def async_start_execution_monitor(self) -> CALLBACK_TYPE | None:
+        """Periodically check that the inverter follows the plan.
+
+        Needs the battery discharge counter — without it there is nothing to
+        measure and the alarm entity stays unknown.
+        """
+        if not self.config.get(CONF_BATTERY_DISCHARGE_SENSOR):
+            return None
+        return async_track_time_interval(
+            self.hass, self._async_check_execution, EXECUTION_CHECK_INTERVAL
+        )
+
+    async def _async_check_execution(self, _now: datetime | None = None) -> None:
+        now = dt_util.now()
+        decision = self.current_decision()
+        mode = decision.inverter_mode if decision is not None else None
+        start = self._execution_watch.observe(now, mode)
+        if mode not in GRID_MODES:
+            self._set_execution_alarm(False, None, mode)
+            return
+        if start is None:
+            return  # the mode has not held a whole window yet
+        discharged = await self.consumption.async_partial_kwh(
+            self.config[CONF_BATTERY_DISCHARGE_SENSOR], start, now
+        )
+        charge_sensor = self.config.get(CONF_BATTERY_CHARGE_SENSOR)
+        charged = (
+            await self.consumption.async_partial_kwh(charge_sensor, start, now)
+            if charge_sensor and mode == InverterMode.CHARGE
+            else None
+        )
+        verdict = assess_execution(mode, decision.charge_power_kw, discharged, charged)
+        if verdict is None:
+            return  # no statistics for the window — cannot say either way
+        self._set_execution_alarm(not verdict.ok, verdict.reason, mode)
+
+    def _set_execution_alarm(self, on: bool, reason: str | None, mode: str | None) -> None:
+        previous = self.execution_alarm
+        was_on = previous["on"] is True
+        since = (previous["since"] if was_on else dt_util.now()) if on else None
+        alarm = {"on": on, "reason": reason, "mode": mode, "since": since}
+        if alarm == previous:
+            return
+        self.execution_alarm = alarm
+        notification_id = f"{DOMAIN}_plan_not_executed_{self.entry.entry_id}"
+        if on and not was_on:
+            self.log_warning("execution", reason or "", extra={"mode": mode})
+            persistent_notification.async_create(
+                self.hass,
+                f"{reason}\n\nSprawdź automatyzację sterującą siecią i falownikiem.",
+                title="⚠️ PowerPilot: plan nie jest wykonywany",
+                notification_id=notification_id,
+            )
+        elif was_on and not on:
+            self.log_info("execution", "Falownik znów wykonuje plan.", extra={"mode": mode})
+            persistent_notification.async_dismiss(self.hass, notification_id)
+        self.async_update_listeners()
 
     def _soc_flips_recovery(self, state: str) -> bool:
         """Whether a new SoC reading would flip the reserve-recovery latch."""

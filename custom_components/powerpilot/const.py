@@ -378,6 +378,9 @@ SENSOR_NEXT_ACTION: Final = "next_action"
 # moment the ESS needs the grid (feed for a connect/disconnect automation).
 SENSOR_ESS_CHARGE_START: Final = "ess_charge_start"
 BINARY_EV_CHARGE: Final = "ev_charge"
+# Watchdog: the plan needs the grid but the pack drains / a planned charge is
+# not happening (see execution.py).
+BINARY_PLAN_NOT_EXECUTED: Final = "plan_not_executed"
 # EV control surface (the integration advises; an automation does the steering).
 SENSOR_EV_CHARGE_START: Final = "ev_charge_start"  # next planned charge start (timestamp)
 SENSOR_EV_SOC_LIMIT: Final = "ev_soc_limit"  # target SoC the car should charge to (%)

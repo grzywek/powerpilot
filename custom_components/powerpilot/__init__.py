@@ -202,6 +202,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unsub_reactive = coordinator.async_start_reactive_listeners()
     if unsub_reactive is not None:
         entry.async_on_unload(unsub_reactive)
+    # Watchdog: alarm when the inverter demonstrably ignores the plan.
+    unsub_execution = coordinator.async_start_execution_monitor()
+    if unsub_execution is not None:
+        entry.async_on_unload(unsub_execution)
     return True
 
 

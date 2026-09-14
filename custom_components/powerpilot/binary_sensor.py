@@ -13,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     BINARY_EV_CHARGE,
     BINARY_EV_CONNECT_CHARGER,
+    BINARY_PLAN_NOT_EXECUTED,
     DOMAIN,
 )
 from .coordinator import PowerPilotCoordinator
@@ -27,8 +28,40 @@ async def async_setup_entry(
         [
             EVChargeBinarySensor(coordinator, entry),
             EVConnectChargerBinarySensor(coordinator, entry),
+            PlanNotExecutedBinarySensor(coordinator, entry),
         ]
     )
+
+
+class PlanNotExecutedBinarySensor(PowerPilotEntity, BinarySensorEntity):
+    """ON when the inverter demonstrably does not follow the plan.
+
+    The plan needs the grid (charge / passthrough) but the pack drains, or a
+    planned charge is not reaching it — the automation that executes the plan
+    has failed. ``unknown`` until a full window was measured, and permanently
+    without a battery discharge counter configured.
+    """
+
+    _attr_translation_key = BINARY_PLAN_NOT_EXECUTED
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_icon = "mdi:alert-octagon"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, BINARY_PLAN_NOT_EXECUTED)
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.coordinator.execution_alarm.get("on")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        alarm = self.coordinator.execution_alarm
+        since = alarm.get("since")
+        return {
+            "reason": alarm.get("reason"),
+            "planned_mode": alarm.get("mode"),
+            "since": since.isoformat() if since else None,
+        }
 
 
 class EVChargeBinarySensor(PowerPilotEntity, BinarySensorEntity):

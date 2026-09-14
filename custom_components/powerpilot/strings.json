@@ -272,6 +272,9 @@
       },
       "ev_connect_charger": {
         "name": "EV connect charger"
+      },
+      "plan_not_executed": {
+        "name": "⚠️ Plan not executed"
       }
     }
   }

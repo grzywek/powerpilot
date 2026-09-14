@@ -309,6 +309,9 @@
       },
       "ev_connect_charger": {
         "name": "🚗 EV podłącz ładowarkę"
+      },
+      "plan_not_executed": {
+        "name": "⚠️ Plan nie jest wykonywany"
       }
     },
     "number": {

@@ -72,7 +72,7 @@ import highspy
 import numpy as np
 from homeassistant.util import dt as dt_util
 
-from .battery import BatteryModel
+from .battery import RECOVERY_MARGIN_SOC, BatteryModel
 from .const import ChargePower, InverterMode
 from .models import Decision, ESSRequest, Forecast, Plan
 from .modules.ev import EVRequest
@@ -443,7 +443,23 @@ class Optimizer:
         capacity_kwh = battery.capacity_kwh
         e_min = capacity_kwh * battery.min_soc / 100.0
         e_max = capacity_kwh * battery.max_soc / 100.0
-        e0 = min(max(battery.energy_kwh, e_min), e_max)
+        # Plan from the REAL level. A pack below its minimum modelled as sitting
+        # on the minimum never gets charged back — it drains to 0 % instead.
+        e0 = min(max(battery.energy_kwh, 0.0), e_max)
+        # Reserve recovery (below the minimum, or latched until the margin):
+        # the level may start under e_min but never falls below where it is,
+        # and every kWh short of the recovery target is penalised in every
+        # hour, so the solver charges back as fast as the inverter, the charge
+        # curve and the EV phase sharing allow — whatever the price — and does
+        # not discharge on the way. A penalty rather than a hard "reach it by
+        # hour k" bound, for the same reason as the ``#ess`` bonus below: a
+        # bound the physics cannot meet makes the model infeasible and takes
+        # the whole plan down.
+        recovering = battery.recovering or battery.soc < battery.min_soc
+        e_recover = min(
+            capacity_kwh * (battery.min_soc + RECOVERY_MARGIN_SOC) / 100.0, e_max
+        )
+        e_floor = min(e_min, e0)
         charge_price = (
             charge_order_price
             if charge_order_price is not None
@@ -581,7 +597,7 @@ class Optimizer:
                 idx.append(d0 + k)
                 val.append(-discharge_cap[k] / deff)
             h.addRow(
-                max(e_min, floors.get(t, 0.0)) - e0,
+                max(e_floor, floors.get(t, 0.0)) - e0,
                 e_max - e0,
                 len(idx),
                 np.array(idx, dtype=np.int32),
@@ -669,6 +685,40 @@ class Optimizer:
                     ),
                 )
 
+        # Reserve recovery shortfall r[t] ≥ e_recover − E[t]: one column per
+        # hour, appended after every other column and priced far above any
+        # price, wear or terminal value —
+        #   Σ_{k≤t} (Σ_s η_s·c[k,s] − cap[k]/η_dis·z[k]) + r[t] ≥ e_recover − e0
+        if recovering:
+            penalty = (
+                max((abs(p) for p in total_price), default=0.0)
+                + abs(tv)
+                + abs(wear)
+                + 1e3
+            )
+            r0 = h.getNumCol()
+            for t in range(n):
+                h.addVar(0.0, e_recover)
+                h.changeColCost(r0 + t, penalty)
+            for t in range(n):
+                idx = []
+                val = []
+                for k in range(t + 1):
+                    for s in range(seg_n):
+                        idx.append(seg_col(k, s))
+                        val.append(seg_eff[s])
+                    idx.append(d0 + k)
+                    val.append(-discharge_cap[k] / deff)
+                idx.append(r0 + t)
+                val.append(1.0)
+                h.addRow(
+                    e_recover - e0,
+                    inf,
+                    len(idx),
+                    np.array(idx, dtype=np.int32),
+                    np.array(val, dtype=np.float64),
+                )
+
         h.run()
         status = h.getModelStatus()
         if status != highspy.HighsModelStatus.kOptimal:
@@ -749,6 +799,13 @@ class Optimizer:
         # because of SoC limits or because the energy is needed elsewhere).
         charge_threshold = ceff * (deff * p_term - wear)
         discharge_threshold = p_term + wear
+        # Reserve recovery target (see ``_solve_lp``); hours starting under it
+        # explain themselves by the recovery, not by prices.
+        recover_soc = (
+            battery.min_soc + RECOVERY_MARGIN_SOC
+            if battery.recovering or battery.soc < battery.min_soc
+            else None
+        )
 
         decisions: list[Decision] = []
         for t, slot in enumerate(forecast.slots):
@@ -854,8 +911,19 @@ class Optimizer:
                 "soc_before": round(soc_before, 1),
                 "soc_after": round(battery.soc, 1),
                 "battery_energy_cost_before": round(cost_before, 4),
-                "reason": self._reason(
-                    mode, tp, charge_threshold, discharge_threshold, stored_kwh, delivered
+                "reason": (
+                    self._recovery_reason(
+                        mode, soc_before, recover_soc, battery.min_soc, stored_kwh
+                    )
+                    if recover_soc is not None and soc_before < recover_soc - _EPS
+                    else self._reason(
+                        mode,
+                        tp,
+                        charge_threshold,
+                        discharge_threshold,
+                        stored_kwh,
+                        delivered,
+                    )
                 ),
             }
             if fracs[t] < 1.0 - _EPS:
@@ -870,6 +938,18 @@ class Optimizer:
             decisions.append(decision)
 
         return Plan(forecast=forecast, decisions=decisions, created_at=dt_util.now())
+
+    @staticmethod
+    def _recovery_reason(
+        mode: str, soc_before: float, recover_soc: float, min_soc: float, stored: float
+    ) -> str:
+        head = (
+            f"odbudowa rezerwy: SoC {soc_before:.1f}% < {recover_soc:.0f}% "
+            f"(minimum {min_soc:.0f}% + {RECOVERY_MARGIN_SOC:.0f}%)"
+        )
+        if mode == InverterMode.CHARGE:
+            return f"{head} → ładowanie {stored:.2f} kWh niezależnie od ceny"
+        return f"{head}, ale w tej godzinie nie da się ładować → bez rozładowania"
 
     @staticmethod
     def _reason(

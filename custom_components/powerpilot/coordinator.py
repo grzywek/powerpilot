@@ -24,7 +24,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .battery import BatteryModel
+from .battery import RECOVERY_MARGIN_SOC, BatteryModel, next_recovery_state
 from .const import (
     CONF_BATTERY_CAPACITY_KWH,
     CONF_BATTERY_WEAR_COST,
@@ -95,6 +95,7 @@ _TRIGGER_LABELS: Final[dict[str, str]] = {
     "location": "lokalizacja auta",
     "presence": "obecność",
     "calendar": "kalendarz",
+    "reserve": "rezerwa ESS",
 }
 # Role → (states that read as "yes", word for yes, word for no). Mirrors the EV
 # module's own dialect sets, so the label matches what the planner concluded.
@@ -122,6 +123,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.entry = entry
         self.config: dict = {**DEFAULTS, **entry.data, **entry.options}
         self._battery_energy_cost = 0.0
+        # Reserve-recovery latch (battery.next_recovery_state): on once the live
+        # SoC fell below the minimum, off once it is back above the margin.
+        self._ess_recovering = False
         self.events: deque = deque(maxlen=50)
         # What triggered the re-plan currently being computed (entity flips seen
         # by the reactive listener), and the entity → role map that names them.
@@ -192,8 +196,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         entities fire on any change (their next-event attributes matter);
         presence/plug/charging entities only on an actual state flip, so GPS
         attribute chatter from phone trackers doesn't re-run the optimizer
-        every few minutes. ``async_request_refresh`` debounces bursts.
+        every few minutes. ``async_request_refresh`` debounces bursts. The ESS
+        SoC sensor re-plans only when it crosses the reserve-recovery latch
+        (below the minimum / back above the margin), so a drained pack is
+        charged back at once instead of at the next clock hour.
         """
+        soc_id = str(self.config.get(CONF_SOC_SENSOR) or "")
         calendar_ids = [str(e) for e in (self.config.get(CONF_CALENDARS) or [])]
         flip_ids = [
             str(e)
@@ -207,7 +215,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
             if e
         ]
-        entities = calendar_ids + flip_ids
+        entities = calendar_ids + flip_ids + ([soc_id] if soc_id else [])
         if not entities:
             return None
         presence_set = set(flip_ids)
@@ -220,6 +228,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 roles[str(entity_id)] = role
         for entity_id in self.config.get(CONF_EV_PRESENCE_ENTITIES) or []:
             roles.setdefault(str(entity_id), "presence")
+        if soc_id:
+            roles[soc_id] = "reserve"
         self._trigger_roles = roles
 
         @callback
@@ -230,6 +240,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             if new is None:
                 return
             if entity_id in presence_set and old is not None and old.state == new.state:
+                return
+            if entity_id == soc_id and not self._soc_flips_recovery(new.state):
                 return
             self._note_trigger(entity_id, new)
             self.hass.async_create_task(self.async_request_refresh())
@@ -361,9 +373,42 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             wear_cost=float(self.config[CONF_BATTERY_WEAR_COST]),
             min_soc=float(self.config[CONF_MIN_SOC]),
             max_soc=float(self.config[CONF_MAX_SOC]),
+            recovering=self._ess_recovering,
             soc=soc,
             energy_cost=self._battery_energy_cost,
         )
+
+    def _soc_flips_recovery(self, state: str) -> bool:
+        """Whether a new SoC reading would flip the reserve-recovery latch."""
+        try:
+            soc = float(state)
+        except (TypeError, ValueError):
+            return False
+        min_soc = float(self.config[CONF_MIN_SOC])
+        return next_recovery_state(soc, min_soc, self._ess_recovering) != self._ess_recovering
+
+    def _update_recovery_latch(self, soc: float) -> None:
+        """Advance the reserve-recovery latch from the live SoC; log each flip."""
+        min_soc = float(self.config[CONF_MIN_SOC])
+        recovering = next_recovery_state(soc, min_soc, self._ess_recovering)
+        if recovering == self._ess_recovering:
+            return
+        self._ess_recovering = recovering
+        target = min_soc + RECOVERY_MARGIN_SOC
+        extra = {"soc": soc, "min_soc": min_soc, "target_soc": target}
+        if recovering:
+            self.log_warning(
+                "optimizer",
+                f"SoC ESS {soc:.1f}% poniżej minimum {min_soc:.0f}% — odbudowa "
+                f"rezerwy: ładowanie do {target:.0f}% niezależnie od ceny.",
+                extra=extra,
+            )
+        else:
+            self.log_info(
+                "optimizer",
+                f"SoC ESS {soc:.1f}% ≥ {target:.0f}% — koniec odbudowy rezerwy.",
+                extra=extra,
+            )
 
     def _read_soc(self) -> float | None:
         """Live battery SoC (%) from the sensor, or ``None`` when unavailable.
@@ -439,6 +484,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             raise UpdateFailed(
                 "Czujnik SoC niedostępny — nie mogę policzyć planu bez stanu ESS."
             )
+
+        self._update_recovery_latch(soc)
 
         forecast = await self.hass.async_add_executor_job(self.forecast_builder.build)
         ev_request = self.ev.get_request(forecast)

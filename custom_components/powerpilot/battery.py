@@ -22,6 +22,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Once the pack has fallen below its minimum SoC it is charged back to this
+# many percentage points ABOVE the minimum before it may be used again — the
+# hysteresis keeps a drained pack from hovering right on the cut-off.
+RECOVERY_MARGIN_SOC = 3.0  # %
+
+
+def next_recovery_state(soc: float, min_soc: float, was_recovering: bool) -> bool:
+    """Reserve-recovery latch: set below ``min_soc``, cleared at the margin."""
+    if soc < min_soc:
+        return True
+    if soc >= min_soc + RECOVERY_MARGIN_SOC:
+        return False
+    return was_recovering
+
 
 @dataclass
 class BatteryModel:
@@ -33,6 +47,9 @@ class BatteryModel:
     wear_cost: float = 0.10  # PLN per kWh of usable throughput
     min_soc: float = 10.0  # %
     max_soc: float = 100.0  # %
+    # Reserve recovery latched by the coordinator (see ``next_recovery_state``).
+    # A pack below ``min_soc`` is always recovering, latch or not.
+    recovering: bool = False
 
     # Mutable state.
     soc: float = 50.0  # %
@@ -116,6 +133,7 @@ class BatteryModel:
             wear_cost=self.wear_cost,
             min_soc=self.min_soc,
             max_soc=self.max_soc,
+            recovering=self.recovering,
             soc=self.soc,
             energy_cost=self.energy_cost,
         )

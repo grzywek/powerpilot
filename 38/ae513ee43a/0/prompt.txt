@@ -1,0 +1,964 @@
+musimy wdrożyć obsługę drugiego licznika. oceń poniżej analizę innego agenta i powiedz kto powinien wdrożyć to rozwiązanie - ty, czy ten drugi agent. jeden model jest lepszy.
+
+
+
+# Przełączane zasilanie mieszkania i Tarcza Pstryk
+
+Status: projekt do uzgodnienia, 2026-09-12. Nie jest zaimplementowaną funkcją.
+
+Potwierdzone przez użytkownika: każdy licznik ma osobną Tarczę; oba mają
+taką samą taryfę (odpowiedź na pytanie obejmujące również dystrybucję).
+
+## Cel i instalacja
+
+Planer ma porównywać łączny koszt obu punktów poboru i proponować ręczne
+przełączenia mieszkania tylko wtedy, gdy oszczędność uzasadnia cały cykl.
+
+```text
+PPE 1 → Victron + bateria → garaż i pozostałe stałe odbiory
+                         → przełącznik → mieszkanie wraz z jego podlicznikami
+PPE 2 ───────────────────→ przełącznik
+```
+
+PPE 2 nie zasila baterii ani garażu. Victron może zasilać mieszkanie z baterii
+lub przepuszczać energię z PPE 1. Stan `victron` nie oznacza więc `battery`.
+Pozostałe odbiory przed falownikiem, w tym EV, muszą mieć jawne przypisanie do PPE.
+
+## Rozliczenie i sens ekonomiczny
+
+Według [regulaminu Tarczy Pstryk 2026](https://www.pstryk.pl/regulamin-tarcza-pstryk-2026)
+limit dotyczy miesięcznej średniej ważonej kosztu energii wraz z obsługą,
+brutto, bez dystrybucji. Regulamin podaje koniec promocji 31.12.2026.
+Niezależność rozliczeń obu PPE została potwierdzona przez użytkownika.
+
+Dla niezależnie rozliczanego PPE i miesiąca:
+
+```text
+E = import energii w całym miesiącu [kWh]
+C = koszt tej energii wraz z obsługą przed Tarczą [PLN brutto]
+K = min(C, limit × E) + dystrybucja zmienna + opłaty stałe
+```
+
+Limit obejmuje dokładnie składniki z umowy. Trzeba sprawdzić ich zgodność
+z obecnym `buy_price`, które obejmuje również akcyzę. Zmiany limitu i okres
+obowiązywania muszą być datowane, nie zapisane jako wieczna stała 0,61.
+
+Nie wolno zastąpić tego przez `sum(import[t] × min(cena[t], 0.61))`.
+Tarcza na PPE 1 musi działać również w wariancie bez przełączeń.
+
+Ilustracja, wyłącznie energia z obsługą, bez baterii i różnic dystrybucji:
+
+- 100 kWh po 0,30 zł i 10 kWh po 1,20 zł na PPE 1 kosztuje 42 zł.
+  Średnia 0,382 zł nie uruchamia Tarczy.
+- Po przeniesieniu drogiego poboru na osobno rozliczany, wcześniej nieużywany
+  PPE 2: PPE 1 kosztuje 30 zł, PPE 2 kosztuje 6,10 zł po Tarczy.
+- Oszczędność w tym przykładzie wynosi 5,90 zł.
+
+Jeżeli oba PPE kończą miesiąc powyżej limitu, a łączny import i dystrybucja
+pozostają takie same, samo przeniesienie kWh nie obniża kosztu energii.
+W rzeczywistej instalacji zmiana pracy baterii może zmienić import, straty
+i późniejsze zakupy, więc wymaga wspólnej optymalizacji.
+
+## Dane wymagane przed rekomendowaniem przełączeń
+
+1. Import PPE 1 i PPE 2 oraz kompletne pokrycie pomiarami od początku miesiąca.
+   Zużycie na wyjściu Victrona nie jest importem PPE 1.
+2. Koszt energii z obsługą przed Tarczą od początku miesiąca dla każdego PPE
+   albo kompletna historia importu i właściwych cen pozwalająca go wyliczyć.
+   Należy wybrać jedno źródło rozliczenia, bez zastępowania brakujących danych
+   zerami ani innym, słabszym źródłem.
+3. Sensor mieszkania mierzący jego zużycie w obu położeniach przełącznika.
+4. Rzeczywiste źródło zasilania oraz jego historia. Sposób pozyskania do ustalenia:
+   odczyt położenia albo jawnie wybrana deklaracja użytkownika w HA.
+   Brak telemetrii nie upoważnia do automatycznego przejścia na deklarację.
+5. Taryfa dystrybucyjna każdego PPE, okres obowiązywania Tarczy i sposób jej
+   rozliczania. Ta sama taryfa sprzedaży nie oznacza tej samej dystrybucji.
+6. Reguły dostępności osoby przełączającej według wybranych kalendarzy.
+
+Brak wymaganych danych daje niedostępną rekomendację z konkretną przyczyną.
+Brak pomiaru nie oznacza zerowego poboru; brak rekomendacji nie oznacza
+stwierdzonej nieopłacalności. Nie wolno zasilać nowego modelu istniejącymi
+zastępnikami ceny lub zużycia bez odrębnej zgody użytkownika.
+
+## Model zużycia i topologia
+
+Obecne `hierarchy.py` i `ConsumptionModule` zakładają jedno stałe drzewo
+pod głównym sensorem zużycia. To założenie nie działa po przełączeniu.
+
+- Profil mieszkania wraz z jego potomkami pozostaje niezależny od źródła.
+- Profil odbiorów stale za Victronem musi wykluczać mieszkanie tylko w tych
+  przedziałach historii, w których pomiar Victrona rzeczywiście je obejmował.
+- Przy zasilaniu z PPE 2 nie odejmujemy mieszkania od wyjścia Victrona.
+- Nie sumujemy ponownie podliczników zawartych już w sensorze mieszkania.
+- Przełączenia wewnątrz godziny wymagają zgodnego czasowo podziału pomiarów;
+  nie wolno przypisać całej godziny według stanu na jej końcu. Przy braku
+  rozdzielczości potrzebnej do podziału próbka nie nadaje się do uczenia.
+- Przepływy importu PPE, wyjścia Victrona, ładowania baterii i zużycia
+  mieszkania mają odrębne znaczenie w danych oraz na wykresie.
+
+## Kalendarz i ręczne wykonanie
+
+Istniejący `CalendarModule` udostępnia zdarzenia oraz wyjazdy z czasem dojazdu.
+Można wykorzystać ten odczyt, ale dostępność samochodu nie dowodzi dostępności
+użytkownika. Potrzebne są wybrane kalendarze i uzgodniona interpretacja zdarzeń.
+
+- Sprawdzamy możliwość wykonania każdego przełączenia, w tym powrotnego.
+- Pozostawanie na jednym źródle nie wymaga ciągłej obecności, chyba że
+  użytkownik wybierze taką dodatkową regułę.
+- Brak zdarzeń oznacza obecność tylko po jawnym przyjęciu takiej konwencji;
+  błąd odczytu kalendarza nigdy nie oznacza wolnego terminu.
+- Plan zaczyna się od potwierdzonego rzeczywistego stanu przełącznika.
+- Planowane przełączenie nie aktualizuje stanu rzeczywistego.
+- Po potwierdzeniu przełączenia, spóźnieniu lub zmianie kalendarza następuje
+  ponowne planowanie z faktycznego stanu i SoC.
+- Powrót z rozpoczętego cyklu nie wymaga ponownego osiągnięcia progu
+  opłacalności całego cyklu. Potrzebny jest zapis rozpoczętej operacji.
+
+## Optymalizacja i próg opłacalności
+
+Zmienne wyboru źródła mieszkania i jego zmian powinny być częścią modelu HiGHS
+razem z przepływami baterii. Przełączenie odciąża Victrona i może zachować
+energię dla garażu lub późniejszych godzin. Ograniczenia mocy obowiązują
+osobno dla przyłączy oraz falownika.
+
+Porównujemy dwa przeliczone warianty z tymi samymi danymi:
+
+1. Brak nowego cyklu ręcznych przełączeń, z poprawną Tarczą na obu PPE.
+2. Wykonalny harmonogram przełączeń, również z Tarczą na obu PPE.
+
+Po rozpoczęciu cyklu wariant odniesienia musi uwzględniać jego zakończenie,
+a nie zakładać ponownego startu z Victrona. Wynik obejmuje zakup energii,
+dystrybucję, straty i zużycie baterii oraz jawnie wyceniony stan końcowy baterii.
+Zachowana energia nie może być jednocześnie doliczona jako oszczędność
+rachunkowa i drugi raz jako korzyść z magazynu.
+
+Propozycja do uzgodnienia: próg 5 zł na cały cykl, minimum 2 godziny na źródle
+i najwyżej jeden nowy cykl dziennie. Te wartości nie są jeszcze zatwierdzone.
+Próg kwotowy jest podstawą; opcjonalny procent powinien mieć jawny mianownik
+i nie zastępować kwoty. Dla kosztu odniesienia <= 0 procent jest niedostępny.
+
+Próg dotyczy każdego dodatkowego cyklu, nie samej sumy zysków harmonogramu.
+Ocena marginalna wymaga ponownego przeliczenia planu po usunięciu danego cyklu;
+nie wolno sumować niezależnych lokalnych oszczędności przy wspólnej baterii
+i nieliniowym rozliczeniu miesięcznym. Remisy powinny premiować mniej zmian.
+
+## Nierozstrzygnięte: miesiąc a horyzont prognozy
+
+Obecny planer ma do 168 godzin. Rozliczenie Tarczy obejmuje pełny miesiąc,
+więc historia od jego początku plus tydzień prognozy nie wystarczą do
+wyliczenia końcowego rabatu. Późniejsze tanie zakupy mogą zmienić jego wysokość.
+
+Przed wdrożeniem rekomendacji trzeba uzgodnić podstawowy model prognozowania
+pozostałej części miesiąca oraz źródło jego danych. Nie implementujemy
+domyślnego przedłużenia średnią ceną, stałą ceną 0,61 ani ignorowania reszty
+miesiąca. Prognoza rozliczenia musi być opisana jako prognoza, z pokryciem
+danych i rozdzieleniem obserwacji od przewidywań. To nie jest obietnica rabatu.
+Przejście przez koniec miesiąca tworzy dwa niezależne okresy rozliczenia.
+
+## Proponowane encje i panel
+
+Nazwy robocze; identyfikatory HA zależą od nazwy urządzenia i rejestru encji.
+
+| Encja | Znaczenie |
+| --- | --- |
+| `sensor.powerpilot_apartment_supply_actual` | Potwierdzone `victron` / `meter_2`; niedostępne bez stanu |
+| `sensor.powerpilot_apartment_supply_recommended` | Zalecane źródło teraz |
+| `sensor.powerpilot_apartment_supply_plan` | Przedziały zasilania, daty przełączeń, status cyklu |
+| `sensor.powerpilot_apartment_next_switch` | Znacznik czasu; atrybuty: źródło docelowe, planowany powrót, identyfikator cyklu |
+| `binary_sensor.powerpilot_apartment_switch_required` | Wykonalne teraz przełączenie: stan rzeczywisty różny od zalecanego |
+| `binary_sensor.powerpilot_apartment_switch_available` | Dostępność osoby do wykonania zmiany |
+| `sensor.powerpilot_apartment_cycle_savings` | Prognozowana oszczędność całego cyklu w PLN |
+| `number.powerpilot_apartment_min_cycle_savings` | Ustawiany próg kwotowy |
+
+Oddzielne diagnostyki PPE: energia od początku miesiąca, koszt przed Tarczą,
+średnia ważona, prognozowany rabat, kompletność danych i okres rozliczeniowy.
+Panel pokazuje oś zasilania mieszkania obok pracy Victrona, porównanie kosztów
+wariantów i przyczynę braku rekomendacji. Powiadomienia mogą reagować na
+`switch_required` i źródło docelowe; identyfikator cyklu i etapu pozwala uniknąć
+powtórek przy każdym odświeżeniu planu. Integracja nie steruje przełącznikiem.
+
+## Zakres zmian i weryfikacja
+
+- `models.py`: przepływy obu PPE, stan i plan mieszkania, rozliczenia miesięcy.
+- Nowy moduł rozliczeń Tarczy: historia importu, koszt, okresy i kompletność.
+- `hierarchy.py`, `modules/consumption.py`: topologia zależna od rzeczywistego
+  zasilania, oddzielne profile stałych i przełączanych odbiorów.
+- `modules/calendar.py`: dostępność użytkownika według uzgodnionych reguł.
+- `optimizer.py`: źródło mieszkania, bilanse PPE, miesięczny koszt, cykle
+  przełączeń, porównanie z wariantem bez nowego cyklu.
+- `coordinator.py`, `modules/snapshots.py`, `websocket_api.py`: reakcje na stan,
+  historia źródła, rewizje i eksport z przyczynami rekomendacji.
+- `config_flow.py`, `const.py`, encje, tłumaczenia i panel: konfiguracja,
+  progi oraz plan i diagnostyka.
+
+Testy istotne dla poprawności: średnia miesięczna zamiast limitu godzinowego;
+Tarcza na obu PPE; brak zysku przy obu limitach i identycznych przepływach;
+zysk przy rozdzieleniu drogich zakupów; koniec miesiąca i ważności promocji;
+energia ujemnie wyceniona; niepełna historia; mieszkanie z podlicznikami na
+każdym źródle; przełączenie w środku godziny; garaż zawsze za Victronem;
+obecność przy obu zmianach; niewykonane przełączenie; restart w trakcie cyklu;
+próg całego cyklu i wiele cykli; porównywalny stan końcowy baterii; brak
+powiadomień przy niedostępnych danych.
+
+Otwarte ustalenia: pomiary i rzeczywisty stan, konwencja kalendarza,
+próg i ograniczenia cyklu, podstawowy model
+prognozy do końca miesiąca. Kod rekomendacji zależy od tych odpowiedzi.
+
+---
+
+ok to zadaj mi pytania jak coś jest niejasne
+
+---
+
+<task-notification>
+<task-id>b2rh8x76r</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/3cf3ccca-e25c-4968-a58a-43b4143f2b29/tasks/b2rh8x76r.output</output-file>
+<status>completed</status>
+<summary>Background command "Run baseline test suite" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a04a41145ecfe4ee9</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/3cf3ccca-e25c-4968-a58a-43b4143f2b29/tasks/a04a41145ecfe4ee9.output</output-file>
+<status>completed</status>
+<summary>Agent "Map test conventions and runner" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Findings.
+
+## 1. How tests are run
+
+**`/Users/dawid/Code/powerpilot/pytest.ini`** (whole file):
+```ini
+[pytest]
+asyncio_mode = auto
+pythonpath = .
+testpaths = tests
+```
+
+**`/Users/dawid/Code/powerpilot/requirements-test.txt`**:5-6 — only two deps: `pytest-homeassistant-custom-component` and `highspy&gt;=1.7`. Header comments (lines 1-4) document the exact flow: `python3 -m venv .venv &amp;&amp; source .venv/bin/activate`, `pip install -r requirements-test.txt`, `pytest -q`.
+
+- No `pyproject.toml`, `setup.cfg`, `tox.ini`, `Makefile`, `requirements.txt`, `.python-version`. No uv, no bun, no lockfiles.
+- `/Users/dawid/Code/powerpilot/scripts/` contains only `bump_version.py` and four `dev_*_test.py` manual dev scripts — **no test-runner script**.
+- **No CI test job.** `.github/workflows/` has exactly one file, `release.yml` (version bump + tag + GitHub Release on push to main). `release.yml:40` runs `python3 scripts/bump_version.py`; pytest is never invoked in CI.
+- Docs: `/Users/dawid/Code/powerpilot/docs/INSTALL_AND_VERIFY.md:23-25` and `/Users/dawid/Code/powerpilot/docs/HANDOVER.md:109-111,174` — same `source .venv/bin/activate &amp;&amp; pytest -q`.
+
+**`homeassistant` is really installed**, not stubbed: `/Users/dawid/Code/powerpilot/.venv/lib/python3.13/site-packages/` contains `homeassistant/` + `homeassistant-2026.2.3.dist-info`, `pytest_homeassistant_custom_component-0.13.316`, `pytest-9.0.0`, `pytest_asyncio-1.3.0`, `highspy-1.15.1`, `voluptuous`, plus `pytest_freezer`, `pytest_socket`, `pytest_sugar`, `pytest_timeout`, `pytest_xdist`, `pytest_cov`, `pytest_unordered`, `pytest_picked`, `pytest_github_actions_annotate_failures`. (Note `docs/HANDOVER.md:118` claims HA 2026.6.4 — stale, the venv has 2026.2.3.)
+
+**`/Users/dawid/Code/powerpilot/tests/conftest.py`** verbatim (11 lines):
+```python
+"""Pytest fixtures for PowerPilot integration tests."""
+
+import pytest
+
+pytest_plugins = "pytest_homeassistant_custom_component"
+
+
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(enable_custom_integrations):
+    """Enable loading custom_components/powerpilot in tests."""
+    yield
+```
+
+## 2. Optimizer tests
+
+Both files use plain module-level builder functions (no pytest fixtures), pure-`assert` style with float tolerances (`abs(x - y) &lt; 1e-6` / `&lt; 0.05`), no `pytest.approx`, no classes, no parametrize. Imports at `test_optimizer_efficiency.py:20-29` / `test_optimizer_partial_hour.py:15-24`.
+
+`/Users/dawid/Code/powerpilot/tests/test_optimizer_efficiency.py:31-69` (verbatim):
+```python
+H0 = dt_util.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+
+def _forecast(prices: list[float], demand: float = 0.0) -&gt; Forecast:
+    return Forecast(
+        slots=[
+            HourSlot(
+                start=H0 + timedelta(hours=i),
+                buy_price=p,
+                distribution_price_kwh=0.0,
+                base_consumption_kwh=demand,
+            )
+            for i, p in enumerate(prices)
+        ]
+    )
+
+
+def _battery(capacity: float = 10.0, soc: float = 0.0) -&gt; BatteryModel:
+    return BatteryModel(
+        capacity_kwh=capacity,
+        charge_efficiency=1.0,
+        discharge_efficiency=1.0,
+        wear_cost=0.0,
+        min_soc=0.0,
+        max_soc=100.0,
+        soc=soc,
+        energy_cost=0.0,
+    )
+
+
+def _config(**overrides) -&gt; OptimizerConfig:
+    kwargs = dict(
+        inverter_max_charge_kw=3.0,
+        inverter_max_discharge_kw=3.0,
+        charge_curve=ChargeCurve(default_kw=3.0),
+        terminal_price=2.0,  # high → filling the pack is always worthwhile
+    )
+    kwargs.update(overrides)
+    return OptimizerConfig(**kwargs)
+```
+
+Call shape: `Optimizer(_config(...)).optimize(_forecast([...]), _battery(...), _ev())` — e.g. `test_optimizer_efficiency.py:108-110`. Optional EV arg built by `_ev()` at `:72-81` (`EVRequest` with `available_hours={H0, H0+1h}`). Assertions read `plan.decisions[i].battery_charge_kwh / .charge_power_kw / .ev_charge_kwh / .trace["..."]`. One test pokes a private method directly: `Optimizer(_config())._efficiency_segments(0.95)` (`:136`, `:150`).
+
+`/Users/dawid/Code/powerpilot/tests/test_optimizer_partial_hour.py:26,42-66` (verbatim) — note it returns an `Optimizer`, not a config, and pins a frozen clock:
+```python
+NOW = datetime(2026, 8, 9, 14, 30, tzinfo=timezone.utc)  # half past the hour
+...
+def _optimizer(**overrides) -&gt; Optimizer:
+    cfg = dict(
+        inverter_max_charge_kw=3.0,
+        inverter_max_discharge_kw=3.0,
+        charge_curve=ChargeCurve(default_kw=3.0),
+        # A high terminal value makes charging worthwhile in every cheap hour.
+        terminal_price=2.0,
+    )
+    cfg.update(overrides)
+    return Optimizer(OptimizerConfig(**cfg))
+
+
+def _forecast(prices: list[float], consumption: float = 0.0) -&gt; Forecast:
+    start = NOW.replace(minute=0, second=0, microsecond=0)
+    return Forecast(
+        slots=[
+            HourSlot(
+                start=start + timedelta(hours=i),
+                buy_price=price,
+                distribution_price_kwh=0.0,
+                base_consumption_kwh=consumption,
+            )
+            for i, price in enumerate(prices)
+        ]
+    )
+```
+Every test here takes the `freezer` fixture (pytest-freezer, from the HA plugin) and calls `freezer.move_to(NOW)` first — `:69-70`, `:80-81`, `:89-90`, `:96-97`, `:107-108`, `:116-117`. `test_ev_allocation_caps_the_running_hour` (`:128`) calls the private `_optimizer()._plan_ev(fc, request, first_hour_frac=0.5)`.
+
+## 3. Price archive / price module — no Store, no fake hass
+
+Neither file touches `homeassistant.helpers.storage.Store` or a hass object at all.
+
+- `/Users/dawid/Code/powerpilot/tests/test_price_archive.py` instantiates the real `PriceArchive()` in-memory (`:23`, `:46`, …) and tests persistence only via `PriceArchive.from_dict(archive.to_dict())` roundtrips (`:63`, `:162-164`). Sole helper is `_hour()` at `:18-19`. Real `dt_util.utcnow()`.
+- `/Users/dawid/Code/powerpilot/tests/test_price_module.py` passes `None` as the hass argument and fakes only the coordinator.
+
+Fake helpers verbatim, `test_price_module.py:25-59`:
+```python
+@pytest.fixture(autouse=True)
+def _warsaw_time():
+    """The RDN publication hour is a local-time fact — pin the zone."""
+    original = dt_util.get_default_time_zone()
+    dt_util.set_default_time_zone(zoneinfo.ZoneInfo("Europe/Warsaw"))
+    yield
+    dt_util.set_default_time_zone(original)
+
+
+class _StubCoordinator:
+    """Just enough coordinator for a module: config + the log sinks."""
+
+    def __init__(self, config: dict | None = None) -&gt; None:
+        self.config = config or {}
+        self.messages: list[str] = []
+
+    def log_info(self, domain, message, extra=None) -&gt; None:
+        self.messages.append(message)
+
+    def log_warning(self, domain, message, extra=None) -&gt; None:
+        self.messages.append(message)
+
+
+def _module(config: dict | None = None) -&gt; PriceModule:
+    return PriceModule(
+        None,
+        _StubCoordinator({CONF_PRICE_SOURCE: PRICE_SOURCE_PRADCAST, **(config or {})}),
+    )
+```
+Other fakes: internal state is set by assignment (`module._data.buy[hour] = 9.99` at `:67`, `module._last_source_fetch = ...` at `:139`), the network source is monkeyless-patched by `module._build_source = lambda: _Source()` with a local `class _Source` exposing `async def async_fetch(self) -&gt; PriceData` (`:130-135`, `:153-158`). Time is pinned with `freeze_time("2026-08-22 12:00:00+02:00")` context managers (`:105`, `:110`, `:121`, `:137`, `:160`).
+
+## 4. Coordinator-level tests
+
+**`/Users/dawid/Code/powerpilot/tests/test_snapshots.py` does not fake a coordinator at all** — it tests `SnapshotStore()` standalone (`:9` import, `:46` etc.). Data helpers: `_rec(run_at, start=None, total_cost=1.0)` at `:12-28` returns a plain dict with keys `run_at/start/n/horizon_hours/total_cost/buy/dist/ptype/cons_fc/base_fc/mode/soc/grid/cost`; `_trip(label, depart, return_end, event_start=None, event_end=None)` at `:31-42`. Tests reach into privates `store._key(...)` (`:86`, `:98`, `:129`) and public `add/runs/get/nearest_run_at/prune/lead_value_at/origin_at`.
+
+**`/Users/dawid/Code/powerpilot/tests/test_websocket.py` uses a real coordinator**, built by booting the integration in a real HA loop — helper `_setup(hass)` at `:16-31`:
+```python
+async def _setup(hass: HomeAssistant) -&gt; None:
+    hass.states.async_set("sensor.soc", "55", {"unit_of_measurement": "%"})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={**DEFAULTS, CONF_SOC_SENSOR: "sensor.soc"},
+        title="PowerPilot",
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    async def _empty_recent_soc(*args):
+        return {}
+
+    coordinator._recent_soc = _empty_recent_soc
+```
+Minimal requirements: one `sensor.soc` state with `unit_of_measurement`, `{**DEFAULTS, CONF_SOC_SENSOR: "sensor.soc"}`, and stubbing `coordinator._recent_soc` to avoid recorder history. Tests then retrieve it via `hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]` (`:92-94`, `:145`, `:199`, `:254`) and either drive WS through the `hass_ws_client` fixture (`:36-77`) or call coordinator methods directly (`coordinator.get_series(...)` at `:120`, `:125`, `:166`, `:224`; `coordinator.snapshots.add({...})` at `:100-113`). A second, richer inline setup at `:304-332` adds `sensor.grid` / `sensor.ev_added` states plus `CONF_GRID_IMPORT_SENSOR`, `CONF_EV_ENERGY_ADDED_SENSOR`, `CONF_EV_BEHIND_METER`, `CONF_EV_CHARGE_EFFICIENCY`.
+
+The same `_setup` pattern (returning the coordinator) is in `/Users/dawid/Code/powerpilot/tests/test_plan_revisions.py:29-45`, and `MockConfigEntry` bootstraps also appear in `tests/test_init.py:60,94,123,142,161,202,271` and `tests/test_consumption.py:139`.
+
+For contrast, the one genuinely *hand-rolled* coordinator stub is `/Users/dawid/Code/powerpilot/tests/test_ev_control_window.py:22-43` — it borrows the real unbound method:
+```python
+class _Coordinator:
+    """``ev_control`` only touches the plan, the EV module and the clock."""
+
+    def __init__(self, plan: Plan) -&gt; None:
+        self.data = plan
+        self.ev = _EV()
+
+    def current_decision(self, plan=None, moment=None):
+        return (plan or self.data).decision_at(moment or dt_util.now())
+
+    def control(self) -&gt; dict:
+        return PowerPilotCoordinator.ev_control(self)
+```
+Minimal attributes: `.data` (a `Plan`), `.ev` (object with `enabled`, `soc`, `soc_limit_now()`), `.current_decision()`.
+
+## 5. Translation / strings.json consistency tests
+
+**None exist.** `grep -rn "strings\|translations\|pl.json\|en.json" tests/` returns zero hits. The files `custom_components/powerpilot/strings.json`, `custom_components/powerpilot/translations/en.json` and `translations/pl.json` (16.8K / 17.5K) are entirely untested — nothing verifies key parity between the three, nor that every `translation_key` used in `sensor.py` / `binary_sensor.py` / `number.py` / `config_flow.py` resolves.
+
+The closest existing asset-contract test is `/Users/dawid/Code/powerpilot/tests/test_brand_assets.py:27-30`, which checks packaged PNG dimensions via a hand-rolled `_png_size()` reader (`:13-24`) — a good structural template for a translations-parity test (`ROOT = Path(__file__).resolve().parents[1]`, pure filesystem, no hass).</result>
+<usage><subagent_tokens>66899</subagent_tokens><tool_uses>18</tool_uses><duration_ms>101317</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a48a1904711cc0f81</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/3cf3ccca-e25c-4968-a58a-43b4143f2b29/tasks/a48a1904711cc0f81.output</output-file>
+<status>completed</status>
+<summary>Agent "Map price archive + tail estimate API" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## 1. Price archive — storage, record shape, persistence, prune, read API
+
+**Class:** `/Users/dawid/Code/powerpilot/custom_components/powerpilot/modules/prices.py:70` `class PriceArchive:`
+
+**Storage key / version** — `prices.py:279-283` (inside `async_setup`):
+
+```python
+self._archive_store = Store(
+    self.hass,
+    STORAGE_VERSION_PRICE_ARCHIVE,
+    f"{DOMAIN}_{self.coordinator.entry.entry_id}_price_archive",
+)
+```
+`STORAGE_VERSION_PRICE_ARCHIVE: Final = 1` at `/Users/dawid/Code/powerpilot/custom_components/powerpilot/const.py:121`.
+
+**In-memory shape** — `prices.py:85-90`. Keys are UTC ISO hour strings (`PriceArchive._key`, `prices.py:92-98`, normalises to `as_utc(...).replace(minute=0,second=0,microsecond=0).isoformat()`).
+
+**Per-hour record fields** (`prices.py:142-168`):
+
+```python
+entry = {
+    "energy": energy,          # GROSS energy-side PLN/kWh — already (tge+markup+excise)*vat
+    "type": price_type,        # "certain" | "forecast"  (never "estimated")
+    "source": source,          # "pradcast" | "sensor"
+    "fetched_at": fetched_at,
+    "p10": p10,
+    "p90": p90,
+}
+...
+entry["fc_energy"] / entry["fc_fetched_at"]   # last forecast before settlement
+entry["formula"] = formula                    # the component stamp
+```
+
+Answering your question directly: it keeps **both**. `energy` is the assembled gross price, and `formula` (stamped by `_formula_for`, `prices.py:471-486`) keeps the components **and the rounding mode**:
+
+```python
+return {
+    "tge": float(tge),
+    "markup": float(self.config.get(CONF_PRICE_MARKUP, 0.0) or 0.0),
+    "excise": float(self.config.get(CONF_EXCISE_KWH, 0.0) or 0.0),
+    "vat": round(vat_mul - 1.0, 6),  # store as a rate (0.23), not a multiplier
+    "rounding": self.config.get(CONF_PRICE_ROUNDING, PRICE_ROUNDING_PER_BUCKET),
+}
+```
+Caveats: `formula` is `None` for the sensor source (no `tge`) and for legacy hours archived before the stamp existed — `get_price_archive` branches on exactly that (`coordinator.py:1505` vs `:1537`). `p10`/`p90` are in the signature but **no caller ever passes them** (only call sites are `prices.py:448-455` and `prices.py:506-513`), so they are always `None` today. Distribution is *not* in the archive — it lives in the tariff snapshot store.
+
+**Persistence:** `prices.py:519-522`
+
+```python
+async def _async_save_archive(self) -&gt; None:
+    if self._archive_store is None:
+        return
+    await self._archive_store.async_save(self.archive.to_dict())
+```
+Called only from `_ingest_into_archive` when something actually changed (`prices.py:515-517`) and at the end of the backfill (`prices.py:459`). Serialisation: `def to_dict(self) -&gt; dict[str, Any]:` `prices.py:249` → `{"entries": ..., "backfilled": ...}`; `def from_dict(cls, data: dict | None) -&gt; "PriceArchive":` `prices.py:252-258`.
+
+**Prune — it is 365 days, not 90.** `prices.py:59` `_ARCHIVE_RETENTION_DAYS = 365  # how long fetched prices stay in the archive`; `def prune(self) -&gt; None:` at `prices.py:208`, cutoff at `prices.py:209`. (The 90-day figure you may be remembering is a stale docstring in the *tariff* module: `/Users/dawid/Code/powerpilot/custom_components/powerpilot/modules/tariff.py:29` says "pruned to the last 90 days" while `tariff.py:52` is `_SNAPSHOT_RETENTION_DAYS = 365`.) Also relevant: the one-time backfill seeds up to `_ARCHIVE_BACKFILL_DAYS = 365` past days (`prices.py:58`, `_ensure_initial_backfill` at `prices.py:418`), Pradcast-only.
+
+**Public read methods — there is NO range accessor.** Only per-hour:
+
+- `prices.py:175` `def get(self, hour_start: datetime) -&gt; dict[str, Any] | None:`
+- `prices.py:172` `def __len__(self) -&gt; int:`
+- `prices.py:178` `def estimate(self, hour_start: datetime) -&gt; tuple[float | None, list[dict[str, Any]]]:`
+- Module-level, arbitrary hour, archive-backed: `prices.py:408` `def price_at(self, hour) -&gt; float | None:`, `prices.py:411` `def is_confirmed(self, hour) -&gt; bool:`, `prices.py:414` `def price_type_at(self, hour) -&gt; str | None:` — all three funnel through `prices.py:384` `def _resolve(self, hour) -&gt; tuple[float | None, str | None]:`.
+- Also `prices.py:220-225` `def remove_forecasts_not_in(self, valid_hours: set[datetime], source: str, from_hour: datetime,) -&gt; bool:` (write-side).
+
+For a month range you will have to loop hours yourself (`_entries` is private). The only range-ish API is the per-day `coordinator.get_price_archive(date_str)`.
+
+**Important for your module:** `_resolve` does **not** fall back to the estimate — `price_at()` returns `None` for any hour with no archive/live entry. The estimate fallback exists in only two places: `PriceModule.contribute` (`prices.py:540-546`) and `coordinator.get_price_archive` (`coordinator.py:1466`, `:1488`).
+
+## 2. The weighted 1/2/3-week estimate
+
+**Function:** `prices.py:178` `def estimate(self, hour_start: datetime) -&gt; tuple[float | None, list[dict[str, Any]]]:`. Core (`prices.py:186-206`):
+
+```python
+for weeks, weight in zip((1, 2, 3), ESTIMATE_WEEKLY_WEIGHTS):
+    past = hour_start - timedelta(days=7 * weeks)
+    entry = self.get(past)
+    breakdown.append({"weeks_ago": weeks, "weight": weight,
+                      "date": dt_util.as_local(past).date().isoformat(),
+                      "value": entry["energy"] if entry else None,
+                      "type": entry["type"] if entry else None})
+total_weight = sum(b["weight"] for b in breakdown if b["value"] is not None)
+if total_weight &lt;= 0:
+    return None, breakdown
+price = sum(b["value"] * b["weight"] for b in breakdown if b["value"] is not None) / total_weight
+```
+
+Weights: `const.py:125` `ESTIMATE_WEEKLY_WEIGHTS: Final = (0.5, 0.3, 0.2)`. Inputs are purely archive lookups at `hour - 7d/14d/21d` on the **gross** `energy` field, renormalised over available samples.
+
+**Arbitrary future hour: yes mechanically, but it degrades and then dies.** Nothing in `estimate()` restricts it to the 168 h horizon — it is a pure function of the archive. But for an hour N days ahead, the 1-week sample is `N-7` days ahead, etc. Since the archive only reaches ~D+3 into the future (Pradcast horizon, `price_sources.py:42` `PRADCAST_HORIZON_DAYS = 3`):
+
+- ≤ 7 days ahead → all three samples available (full quality, what the 168 h tail uses);
+- 7–14 days ahead → 2 samples; 14–21 days → 1 sample (the 3-week one), weight renormalised to 1.0;
+- &gt; ~24 days ahead → all three lookups land in the future → `(None, breakdown)`.
+
+So for "month end" you will get a single-sample estimate for most of the tail and `None` for anything beyond ~24 days out. Plan for that.
+
+**Horizon:** `const.py:22` `PLANNING_HORIZON_HOURS: Final = 168`, consumed via `/Users/dawid/Code/powerpilot/custom_components/powerpilot/forecast.py:24` `MAX_HORIZON_HOURS = PLANNING_HORIZON_HOURS`; `ForecastBuilder._trim_to_prices` (`forecast.py:43-57`) drops trailing unpriced slots.
+
+**How a slot is marked estimate vs forecast vs confirmed** — there is no enum field on `HourSlot`, it is a bool plus a tag:
+
+- `/Users/dawid/Code/powerpilot/custom_components/powerpilot/models.py:30` `price_confirmed: bool = False`
+- tag `"price_estimated"` appended at `prices.py:546`; tag `"price_archived"` at `prices.py:539` (served from archive, between fetches)
+- Re-derived centrally by `/Users/dawid/Code/powerpilot/custom_components/powerpilot/coordinator.py:474-481`:
+
+```python
+@staticmethod
+def _slot_ptype(slot) -&gt; str:
+    """Price provenance for a forecast slot (mirrors the prices module)."""
+    if slot.price_confirmed:
+        return PRICE_TYPE_CERTAIN
+    if "price_estimated" in slot.tags:
+        return PRICE_TYPE_ESTIMATED
+    return PRICE_TYPE_FORECAST
+```
+
+Constants `const.py:116-118` (`"certain"`/`"forecast"`/`"estimated"`); compacted to single chars for snapshots via `PTYPE_CODE` / `PTYPE_CODE_INV`, `const.py:280-285`.
+
+## 3. `PricesModule.contribute` and where the config values live
+
+`/Users/dawid/Code/powerpilot/custom_components/powerpilot/modules/prices.py:532` `def contribute(self, forecast: Forecast) -&gt; None:` — full body is `prices.py:532-553`:
+
+```python
+for slot in forecast.slots:
+    hour = slot.start.replace(minute=0, second=0, microsecond=0)
+    price, price_type = self._resolve(hour)
+    if price_type == PRICE_TYPE_FORECAST and hour not in self._data.buy:
+        slot.tags.append("price_archived")
+    if price is None:
+        estimate, _ = self.archive.estimate(hour)
+        if estimate is not None:
+            price = estimate
+            slot.tags.append("price_estimated")
+    if price is not None:
+        slot.buy_price = price
+    slot.price_confirmed = price_type == PRICE_TYPE_CERTAIN
+    if hour in self._data.levels:
+        slot.tags.append(f"price:{self._data.levels[hour]}")
+    if hour in self._data.confidence:
+        slot.tags.append(f"confidence:{self._data.confidence[hour]}")
+```
+
+`buy_price` is the **gross energy side** (markup + excise + VAT already folded in — assembled in `price_sources.py:221`: `retail = (float(price_kwh) + markup + excise) * vat`). Distribution is added separately by the tariff module; `HourSlot.total_price_kwh` (`models.py:56-69`) sums them and deliberately excludes the fixed monthly charge (`models.py:40` `distribution_fixed_hourly`).
+
+**Config keys** — `/Users/dawid/Code/powerpilot/custom_components/powerpilot/const.py:87-100`:
+
+```python
+CONF_PRICE_SOURCE: Final = "price_source"  # "sensor" | "pradcast"
+CONF_PRADCAST_API_KEY: Final = "pradcast_api_key"
+CONF_PRICE_MARKUP: Final = "price_markup"  # additive PLN/kWh (seller's net fee)
+CONF_PRICE_VAT: Final = "price_vat"  # multiplier applied after markup (e.g. 1.23)
+CONF_EXCISE_KWH: Final = "excise_kwh"  # additive PLN/kWh netto (akcyza)
+CONF_PRICE_ROUNDING: Final = "price_rounding"
+CONF_PRICE_REFRESH_HOURS: Final = "price_refresh_hours"
+```
+Rounding modes `const.py:102-110` (`PRICE_ROUNDING_PER_BUCKET`/`_TOTAL`/`_NONE`); defaults `const.py:300-305` (markup 0.0, VAT **1.0 multiplier**, excise 0.0, rounding `per_bucket`, refresh 3 h). Options UI: `/Users/dawid/Code/powerpilot/custom_components/powerpilot/config_flow.py:210` `def _price_schema(data: dict[str, Any]) -&gt; vol.Schema:` with the fields at `config_flow.py:216-252`. Note the unit mismatch: config VAT is a **multiplier** (1.23), archived `formula["vat"]` is a **rate** (0.23).
+
+Config is merged onto the coordinator at `coordinator.py:123`: `self.config: dict = {**DEFAULTS, **entry.data, **entry.options}`; `self.prices = PriceModule(hass, self)` at `coordinator.py:143`.
+
+## 4. Per-hour `energy_gross` breakdown helper + where the "realization" series reads archived prices
+
+**The breakdown assembler:** `/Users/dawid/Code/powerpilot/custom_components/powerpilot/pricing.py:27-36`
+
+```python
+def assemble(
+    *,
+    tge: float | None,
+    markup: float,
+    dist_net: float | None,
+    excise: float,
+    vat_rate: float,
+    rounding: str,
+    dist_vat_rate: float | None = None,
+) -&gt; dict[str, float | None]:
+```
+Returns `{"tge","markup","energy_net","distribution_net","excise","vat_rate","taxes","total","energy_gross","distribution_gross"}` (`pricing.py:81-92`); rounding branches at `pricing.py:66-79`. There is also `pricing.py:95` `def energy_gross(tge: float, markup: float, excise: float, vat_rate: float) -&gt; float:` — **currently unused anywhere in the codebase** (only `assemble` is called, from `coordinator.py:1511`).
+
+**The existing per-hour breakdown helper for past hours (panel/chart):** `/Users/dawid/Code/powerpilot/custom_components/powerpilot/coordinator.py:1424` `def get_price_archive(self, date_str: str | None) -&gt; dict:` — one calendar day, 24 rows, returns `{"date": ..., "hours": [...]}` (`coordinator.py:1557`). This is the closest thing to what your monthly module needs, per-day. Key mechanics:
+
+- archive hit → components rebuilt from the **frozen** `formula` (`coordinator.py:1479`, `:1505-1536`), producing `energy_price_kwh` (= `bd["energy_gross"]`), `distribution_price_kwh`, `total_price_kwh`, `tge_kwh`, `markup_kwh`, `distribution_net_kwh`, `excise_kwh`, `taxes_kwh`, `vat_rate`;
+- archive miss → `self.prices.archive.estimate(hour)` at `coordinator.py:1466`, `price_type = PRICE_TYPE_ESTIMATED`, `source = "estimate"`, `estimate_breakdown` = the three weekly samples;
+- estimated/legacy/sensor rows fall to the single-bucket branch at `coordinator.py:1537-1554` and there **fold `fixed_hourly_for` into the total** (the formula branch sets `"fixed_cost_hourly": None`, `coordinator.py:1526`) — an inconsistency to be aware of when summing a month;
+- net distribution is backed out of the gross snapshot: `dist_net = dist / (1.0 + dist_vat)` (`coordinator.py:1509-1510`).
+
+Exposed over WS as `powerpilot/prices` with optional `date`: `/Users/dawid/Code/powerpilot/custom_components/powerpilot/websocket_api.py:82-91`, registered at `websocket_api.py:182`.
+
+**Where the coordinator reads archived prices for realized/past series:**
+
+- `coordinator.py:1638-1645` `async def get_series(self, past_hours: int = 24, start: str | None = None, end: str | None = None, forecast_lead: int = 0, forecast_run_at: str | None = None,) -&gt; dict:` — the past-hour loop reads prices at `coordinator.py:2048-2049`:
+
+```python
+buy_price = self.prices.price_at(h)
+dist_price = self.tariff.snapshot_for(h)
+```
+  and builds realized PLN/h at `coordinator.py:2066-2080` (`real_hour_cost`, `real_energy_cost = g_real * buy_price`, `real_dist_cost`), emitted at `coordinator.py:2147-2151` alongside `price_confirmed` / `price_type`. Live/current hour uses `distribution_for` instead of `snapshot_for` (`coordinator.py:2266-2267`). Pinned-vintage override reads prices from the snapshot arrays instead (`coordinator.py:2613-2623`).
+- `coordinator.py:623` `async def get_accuracy(self, lead_hours: int = 24, days: int = 7) -&gt; dict:` — the only place that touches the archive dict directly for a past range, `coordinator.py:673-680`:
+
+```python
+arch = self.prices.archive.get(h) or {}
+act_p = (
+    arch.get("energy")
+    if arch.get("type") == PRICE_TYPE_CERTAIN
+    else None
+)
+```
+
+**Distribution side you will need for a full bill** — `/Users/dawid/Code/powerpilot/custom_components/powerpilot/modules/tariff.py`:
+`:484` `def snapshot_for(self, hour_start: datetime) -&gt; float | None:` (past hours, persisted), `:488` `def distribution_for(self, hour_start: datetime) -&gt; float | None:` (snapshot else live-resolved — works for any hour, past or future), `:505` `def vat_rate_for(self, hour_start: datetime) -&gt; float | None:`, `:515` `def fixed_hourly_for(self, hour_start: datetime) -&gt; float | None:` (monthly fixed spread over `days_in_month × 24`, gross). Tariff snapshot retention is 365 days (`tariff.py:52`).
+
+**Source-fetch data shape** (for reference when extending): `/Users/dawid/Code/powerpilot/custom_components/powerpilot/modules/price_sources.py:62-66`
+
+```python
+buy: dict[datetime, float] = field(default_factory=dict)
+tge: dict[datetime, float] = field(default_factory=dict)
+confirmed_hours: set[datetime] = field(default_factory=set)
+levels: dict[datetime, str] = field(default_factory=dict)
+confidence: dict[datetime, str] = field(default_factory=dict)
+```
+`price_sources.py:145` `async def async_fetch_days(self, days: list[date]) -&gt; PriceData:` is the arbitrary-day fetch (used by the backfill) — this is the entry point if you ever need to pull a month directly from the provider rather than the archive.</result>
+<usage><subagent_tokens>103184</subagent_tokens><tool_uses>42</tool_uses><duration_ms>229041</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a499157f02cd3ec4a</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/3cf3ccca-e25c-4968-a58a-43b4143f2b29/tasks/a499157f02cd3ec4a.output</output-file>
+<status>completed</status>
+<summary>Agent "Map coordinator pipeline, meters, entities" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have everything needed. Here is the map.
+
+## 1. `coordinator.py` — main refresh pipeline
+
+**Module set + registry order** — `/Users/dawid/Code/powerpilot/custom_components/powerpilot/coordinator.py:141-166`. A new module gets instantiated there and appended to the `for module in (...)` tuple (order = contribute order). `self.forecast_builder = ForecastBuilder(self.registry)` at `:166`.
+
+**The pipeline** — `coordinator.py:415-473`:
+
+```python
+async def _async_update_data(self) -&gt; Plan:
+    await self.registry.async_update_all()          # :416
+    trigger = self._consume_trigger() or (...)      # :422
+    soc = self._read_soc()                          # :430
+    forecast = await self.hass.async_add_executor_job(self.forecast_builder.build)  # :445
+    ev_request = self.ev.get_request(forecast)      # :446
+    reminders = self.registry.collect_reminders()   # :447
+    battery = self._build_battery(soc)              # :449
+    optimizer = self._build_optimizer()             # :450
+    ess_request = ESSRequest(targets=..., forced_hours=...)  # :458
+    plan = optimizer.optimize(forecast, battery, ev_request, reminders, ess_request=ess_request)  # :462
+```
+`soc is None` → returns previous `self.data` (or `UpdateFailed`) at `:431-443`. Then `_maybe_record_snapshot(forecast, plan, trigger)` `:470`, `_record_event(plan)` `:471`, `return plan` `:472`.
+
+**`self.data` is a `Plan`** (`DataUpdateCoordinator[Plan]`, `:118`). Sensors read `self.coordinator.data` / `coordinator.current_decision()`. `Plan`/`Decision` shapes: `/Users/dawid/Code/powerpilot/custom_components/powerpilot/models.py:73-228` (`Decision.as_dict` `:129-153`, `Plan.as_dict` `:211-228`, `Plan.total_cost = sum(d.hour_cost + d.fixed_cost)` `:205-209`).
+
+**BatteryModel assembly** — `coordinator.py:356-366`:
+```python
+def _build_battery(self, soc: float) -&gt; BatteryModel:
+    return BatteryModel(
+        capacity_kwh=float(self.config[CONF_BATTERY_CAPACITY_KWH]),
+        charge_efficiency=..., discharge_efficiency=..., wear_cost=...,
+        min_soc=..., max_soc=..., soc=soc, energy_cost=self._battery_energy_cost,
+    )
+```
+
+**OptimizerConfig assembly** — `coordinator.py:386-413` (`inverter_max_charge_kw`, `inverter_max_discharge_kw`, `charge_curve=ChargeCurve(...)`, `connection_power_kw = phases*voltage*fuse/1000`, `phase_capacity_kw`, `charge_efficiency_curve`, `min_charge_power_kw`). `OptimizerConfig` dataclass: `/Users/dawid/Code/powerpilot/custom_components/powerpilot/optimizer.py:187-211` — note the existing `terminal_price: float | None = None` field as precedent for a new price term.
+
+**`self.config`** is a flat merged dict: `coordinator.py:123` — `self.config: dict = {**DEFAULTS, **entry.data, **entry.options}`. Options changes reload the entry (`__init__.py:220-222`).
+
+**Reactive listener** — `coordinator.py:186-237`. Watched entities = `CONF_CALENDARS` list + `CONF_EV_LOCATION_SENSOR`, `CONF_EV_PLUG_SENSOR`, `CONF_EV_CHARGING_SENSOR`, `CONF_EV_PRESENCE_ENTITIES` (`:197-210`). Calendar entities fire on *any* change; the flip set (`presence_set`, `:213`) is skipped when `old.state == new.state` (`:232`). Handler calls `_note_trigger` then `async_request_refresh` (`:234-235`); returns `async_track_state_change_event(self.hass, entities, _on_state_change)` at `:237`. Registered in `/Users/dawid/Code/powerpilot/custom_components/powerpilot/__init__.py:202-204`. Trigger labels/roles: `coordinator.py:87-106`.
+
+**Snapshot recording** — `_maybe_record_snapshot` `coordinator.py:550-622`; the columnar record dict literal is `:581-620` (parallel arrays: `buy`, `dist`, `ptype`, `cons_fc`, `base_fc`, `mode`, `soc`, `ev_soc`, `grid`, `charge`, `charge_pw`, `dischg`, `ev`, `ev_min`, `cost`, `bcost`, `trips`). A new per-hour series (ppe import, cap price) is added as one more parallel array here.
+
+## 2. Hourly kWh from a `total_increasing` sensor
+
+`/Users/dawid/Code/powerpilot/custom_components/powerpilot/modules/consumption.py`:
+
+```python
+async def async_recent_kwh(self, entity_id: str, hours: int) -&gt; dict:          # :133
+async def async_range_kwh(self, entity_id: str, start: datetime, end: datetime
+                          ) -&gt; dict[datetime, float]:                          # :139-143
+async def async_partial_kwh(self, entity_id: str, start: datetime, end: datetime
+                            ) -&gt; float | None:                                 # :145
+async def async_active_minutes(self, entity_id: str, start: datetime, end: datetime
+                               ) -&gt; dict[datetime, int]:                       # :188
+async def _fetch_hourly_kwh(self, entity_id, start, end) -&gt; dict[datetime, float]:  # :446
+```
+
+- `async_range_kwh` is a thin public wrapper over `_fetch_hourly_kwh` (`:139-143`). The coordinator calls it as `self.consumption.async_range_kwh(...)` — there is **no** `async_range_kwh` on the coordinator; coordinator.py:1753 has a local `async def _read_opt(conf_key)` wrapper inside `get_series` that adds one hour of lead-in.
+- **Return shape**: `{hour_start_local_aware_datetime: kWh}`. Keys are produced by `_row_hour` (`:499-504`): the stat `start` (epoch float or datetime) → `dt_util.as_local(start).replace(minute=0, second=0, microsecond=0)` — **local tz-aware, floored to the hour**.
+- **Unit/kind detection** (`:506-521`): unit from the live state's `unit_of_measurement`; `W/kW` → `"power"`, `Wh/kWh` → `"energy"`; anything else → `None` and `_fetch_hourly_kwh` returns `{}` (`:450-453`). Factors at `:67-68`.
+- **Energy path** (`_energy_series`, `:482-497`) reads recorder `"hour"` statistics with `{"sum"}` and differences consecutive rows:
+
+```python
+if prev_sum is not None:
+    delta = total - prev_sum
+    if delta &gt;= 0:  # ignore meter resets
+        out[self._row_hour(row)] = delta * factor
+prev_sum = total
+```
+  Consequences for a `total_increasing` PPE meter: **the first row in the window has no predecessor and is dropped** (callers pass `start - timedelta(hours=1)` to compensate, e.g. `coordinator.py:1712`, `:1757`); a `sum is None` row resets `prev_sum` so the following hour is also dropped; a negative delta (counter reset) is **omitted entirely**. Power path (`_power_series`, `:472-480`) emits `mean × factor` per hour (1-h slots → kWh == avg kW).
+- **Missing hours are simply absent from the dict** — callers test `if h in main_real` (`coordinator.py:2154`). The one place that distinguishes "measured, zero" from "unknown" is `async_active_minutes`, which seeds `out.setdefault(hour, 0)` (`:233-237`, docstring `:200-203`).
+- `async_partial_kwh` (`:145-186`) covers the in-progress hour from `"5minute"` statistics: energy sensors do `max(0.0, sums[-1] - sums[0]) * factor` (`:183-186`), `None` = unreadable, `0.0` = nothing flowed.
+- Learning path: `_maybe_learn` `:358-418` (window `CONF_CONSUMPTION_LEARN_DAYS`, settled days only, `start_of_local_day`), `_fold_day` `:420-444` (requires ≥20 of 24 hours present).
+
+## 3. `CONF_EV_CHARGE_METER_SENSOR`
+
+It is **not read in `modules/ev.py`**. Readers:
+- `/Users/dawid/Code/powerpilot/custom_components/powerpilot/modules/consumption.py:348` (`_current_topology`), `:389` (`_maybe_learn` — folded into the exclusive tree so historical EV charging is subtracted from base), `:545` (`device_value` — learned but never added back to demand).
+- `/Users/dawid/Code/powerpilot/custom_components/powerpilot/coordinator.py:2698, 2717` inside `async_charging_efficiency` — the grid-side series:
+
+```python
+async def _series(conf_key: str) -&gt; tuple[str | None, dict]:      # coordinator.py:2707
+    eid = self.config.get(conf_key)
+    if not eid:
+        return None, {}
+    return eid, await self.consumption.async_range_kwh(eid, start, now)
+
+grid_eid, grid_series = await _series(CONF_EV_CHARGE_METER_SENSOR)  # :2717
+```
+So realized EV kWh per hour = `dict[datetime, float]` from `async_range_kwh`. The *pack-side* realized EV series in `get_series` uses `CONF_EV_ENERGY_ADDED_SENSOR` instead (`coordinator.py:1765`), plus `async_active_minutes` for runtime (`:1774-1776`). `__init__.py:64` lists `CONF_EV_CHARGE_METER_SENSOR` among hard setup dependencies. Const + doc: `const.py:164-169`.
+
+## 4. Entity patterns
+
+**Base class** — `/Users/dawid/Code/powerpilot/custom_components/powerpilot/sensor.py:58-80`:
+
+```python
+class PowerPilotEntity(CoordinatorEntity[PowerPilotCoordinator]):
+    _attr_has_entity_name = True
+    def __init__(self, coordinator, entry: ConfigEntry, key: str) -&gt; None:
+        super().__init__(coordinator)
+        self._key = key
+        self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)}, name="PowerPilot", ...)
+    @property
+    def plan(self) -&gt; Plan | None: return self.coordinator.data
+    @property
+    def current_decision(self): return self.coordinator.current_decision()
+```
+`binary_sensor.py:19` and `number.py:27` both import `PowerPilotEntity` from `.sensor`.
+
+**Conventions**: `_attr_translation_key = SENSOR_*` const, same string passed as the `key` positional → `unique_id = f"{entry_id}_{key}"`. Names live in `strings.json` / `translations/{pl,en}.json` under `entity.sensor.&lt;key&gt;.name`, `entity.binary_sensor.&lt;key&gt;.name`, `entity.number.&lt;key&gt;.name`. Diagnostic category example: `sensor.py:184` `_attr_entity_category = EntityCategory.DIAGNOSTIC` (on `NextActionSensor`).
+
+**Value sources**: three patterns — `self.current_decision.&lt;field&gt;` (`sensor.py:91-93, 113-118, 130-135`), `self.plan.&lt;...&gt;` (`sensor.py:149-176`, `:224-238`), and `self.coordinator.ev_control().get(...)` (`sensor.py:255-258, 279-282, 297-299, 319-321`; `binary_sensor.py:64`).
+
+**Registration**: `sensor.py:38-55`, `binary_sensor.py:22-31`, `number.py:30-36` — all take `coordinator = hass.data[DOMAIN][entry.entry_id]`. Platforms list: `const.py:10` — `PLATFORMS: Final = ["sensor", "binary_sensor", "number"]`.
+
+**Existing sensor keys** (`const.py:371-386`):
+
+| const | value | class |
+|---|---|---|
+| `SENSOR_INVERTER_MODE` | `inverter_mode` | `InverterModeSensor` (sensor.py:83) |
+| `SENSOR_CHARGE_POWER` | `charge_power` | `ChargePowerSensor` (:96) |
+| `SENSOR_BATTERY_ENERGY_COST` | `battery_energy_cost` | `BatteryEnergyCostSensor` (:121) |
+| `SENSOR_PLAN` | `plan` | `PlanSensor` (:138) |
+| `SENSOR_NEXT_ACTION` | `next_action` | `NextActionSensor` (:179, DIAGNOSTIC) |
+| `SENSOR_ESS_CHARGE_START` | `ess_charge_start` | `EssChargeStartSensor` (:207) |
+| `SENSOR_EV_CHARGE_START` | `ev_charge_start` | `EVChargeStartSensor` (:241) |
+| `SENSOR_EV_CHARGE_UNTIL` | `ev_charge_until` | `EVChargeUntilSensor` (:261) |
+| `SENSOR_EV_SOC_LIMIT` | `ev_soc_limit` | `EVSocLimitSensor` (:285) |
+| `SENSOR_EV_CHARGE_MINUTES` | `ev_charge_minutes` | `EVChargeMinutesSensor` (:302) |
+| `BINARY_EV_CHARGE` | `ev_charge` | binary_sensor.py:34 |
+| `BINARY_EV_CONNECT_CHARGER` | `ev_connect_charger` | binary_sensor.py:49 |
+| `NUMBER_EV_TARGET_SOC` | `ev_target_soc` | number.py:39 |
+| `NUMBER_EV_MIN_SOC` | `ev_min_soc` | number.py:82 |
+
+Caveat: `strings.json` is missing `entity.sensor.ev_charge_minutes` and the whole `entity.number` block; `translations/pl.json` and `en.json` have both.
+
+**Number write-back**: numbers do **not** write into options/config. `EVTargetSocNumber`/`EVMinSocNumber` are `RestoreNumber`s that keep the value in `_attr_native_value`, restore via `async_get_last_number_data()` (`number.py:57-62`, `:100-105`), register themselves on the module (`self.coordinator.ev.target_soc_entity = self`, `number.py:63`; `.min_soc_entity`, `:106`), deregister in `async_will_remove_from_hass` (`:69-72`, `:112-115`), and on write do:
+
+```python
+async def async_set_native_value(self, value: float) -&gt; None:   # number.py:74
+    self._attr_native_value = value
+    self.async_write_ha_state()
+    await self.coordinator.async_request_refresh()
+```
+Both also call `async_request_refresh()` in `async_added_to_hass` because the first refresh precedes platform setup (`:64-67`, `:107-110`). Rationale in `const.py:228-241`.
+
+## 5. Panel export per-hour series
+
+`/Users/dawid/Code/powerpilot/custom_components/powerpilot/websocket_api.py` — `powerpilot/series` → `coordinator.get_series(past_hours, start, end, forecast_lead, forecast_run_at)` (`:56-79`). Other commands: `plan`, `status`, `log`, `profiles`, `prices`, `accuracy`, `flow`, `efficiency`, `debug`, `diagnostics`, `consumption_stats`; registration list `:176-188`.
+
+`get_series` signature — `coordinator.py:1638-1645`. Top-level return — `coordinator.py:2666-2675`:
+```python
+return {
+    "now": real_now.isoformat(), "past_hours": past_hours,
+    "start": past_start.isoformat(), "end": series_end.isoformat(),
+    "device_ids": device_ids, "hours": hours, "trips": trips,
+    "forecast_pin": forecast_pin,
+}
+```
+
+Three `hours.append(...)` sites, all with the same key set:
+- past hours — `coordinator.py:2137-2206`
+- in-progress hour — `:2342-2430` (adds `"partial": True`, `"partial_until"`, `"hour_plan"`)
+- future plan slots — `:2544-2592`
+
+Per-hour keys: `start`, `is_past`, `realized`, `forecast`, `forecast_origin`, `revisions`, `revisions_dropped`, `ev_off_plan`, `buy_price`, `distribution_price_kwh`, `total_price_kwh`, `price_confirmed`, `price_type`, `consumption_real`, `consumption_forecast`, `base_consumption_forecast`, `soc`, `ev_soc`, `battery_soc_start`, `inverter_mode`, `planned_mode`, `battery_charge_kwh`, `battery_discharge_kwh`, `charge_power_kw`, `battery_energy_cost`, `grid_buy_kwh`, `ev_charge_kwh`, `ev_charge_minutes`, `ev_minutes_real`, `hour_cost`, `energy_cost`, `distribution_cost`, `battery_use_cost`, `fixed_cost`, `devices_real`, `devices_forecast`.
+
+The `realized`/`forecast` sub-objects come from the local `_side(...)` builder — `coordinator.py:1789-1830`:
+```python
+return {
+    "grid": _r(grid), "discharge": _r(discharge), "base": _r(base),
+    "ev": _r(ev), "charge": _r(charge), "devices": dev,
+    "soc_start": _r(soc_start, 1), "soc_end": _r(soc_end, 1),
+    "ev_soc_start": _r(ev_soc_start, 1), "ev_soc_end": _r(ev_soc_end, 1),
+}
+```
+Note `"fixed_cost": self.tariff.fixed_hourly_for(h)` at `:2202` — the closest existing analogue to a Tarcza per-hour charge. Pinned-vintage override block (must be extended for any new series that should follow the pin): `:2598-2653`.
+
+**`modules/snapshots.py`** — `SnapshotStore` is a plain storage helper, not a `PowerPilotModule`. Record shape documented in the module docstring `:12-24`. Readers a new array must work with: `value_at(hour, key)` `:142`, `lead_value_at(hour, key, lead_hours)` `:166`, `run0_at(run_hour, key)` `:207`, `origin_at` `:194`, `nearest_run_at` `:136`, `trips_overlapping` `:223`, `prune` `:274` (30 days, `_SNAPSHOT_RETENTION_DAYS` `:35`). All parallel arrays index off `rec["start"]` + hour offset (`:157-163`). Persisted by the coordinator via `_snapshots_payload` (`coordinator.py:320-332`) / `async_delay_save` (`:334-337`).
+
+`async_consumption_stats` (`coordinator.py:813-920`) is the existing "daily totals + month/week rollup" precedent — it buckets `async_range_kwh` output into local days and emits `week_total` / `month_total` / `*_change_pct` per profile (`:891-901`).
+
+## 6. `config_flow.py` — options flow organization
+
+`PowerPilotOptionsFlow` — `/Users/dawid/Code/powerpilot/custom_components/powerpilot/config_flow.py:480-493` (docstring draws the tariff sub-flow tree). State in `self._data` (`:496`), loaded from `{**config_entry.data, **config_entry.options}` (`:505-509`), committed only by `async_step_finish` → `self.async_create_entry(title="", data=self._data)` (`:545-547`).
+
+Menu — `:528-543`:
+```python
+return self.async_show_menu(
+    step_id="init",
+    menu_options=["core","hierarchy","charge_curve","prices","calendars","ev","tariff_list","reset_data","finish"],
+)
+```
+
+Step → schema map (each step does `self._data.update(user_input); return await self.async_step_init()`):
+
+| step | handler | schema |
+|---|---|---|
+| `core` | `:580-585` | `_core_schema` `:113-207` |
+| `hierarchy` | `:627-656` | `_hierarchy_schema` `:598-625` |
+| `charge_curve` | `:658-680` | `_charge_curve_schema` |
+| `prices` | `:682-687` | `_price_schema` `:210-254` |
+| `calendars` | `:689-696` | `_calendars_schema` `:257-282` |
+| `ev` | `:698-703` | `_ev_schema` `:285-…` |
+| `tariff_list` | `:707-761` | inline select list |
+| `tariff_form` | `:765-820` | inline `vol.Schema` |
+| `period_list`/`period_form`/`range_list`/`range_form` | `:824`, `:893`, `:955`, `:1023` | inline |
+| `reset_data` | `:551-576` | boolean confirm |
+
+Selector helpers: `_NUMBER = selector.NumberSelector` / `_NUM = selector.NumberSelectorConfig` (`:85-86`), `_entity(domain)` → `EntitySelector(EntitySelectorConfig(domain=domain))` (`:109-110`); multi-entity pickers inline `EntitySelectorConfig(domain="sensor", multiple=True)` (`:179-181`, `:192-194`, `:315-319`). Every schema uses the local `def d(key): return data.get(key, DEFAULTS.get(key))` idiom and `default=d(KEY) or vol.UNDEFINED` for optional entity pickers. Const keys are imported explicitly at `:18-81`; `DEFAULTS` lives in `const.py:287-320`; string keys in `strings.json`/`translations/*.json` under `options.step.&lt;step_id&gt;.{title,description,data}` and `options.step.init.menu_options`.
+
+**Natural home for Tarcza**: a new top-level `"billing"` (or `"tarcza"`) menu entry between `tariff_list` and `reset_data`, with a `tariff_list`-style list/form pair if Tarcza needs per-PPE rows (each PPE = a meter entity + annual cap + validity dates). Precedent for a repeated-record editor stored as a list of dicts in options is `CONF_TARIFFS` (`_tariffs()` `:511-513`, `_save_tariffs()` `:515-516`, model round-trip `Tariff.to_dict`/`from_dict`). Precedent for the validity-date sub-editor is `range_list`/`range_form` (`:955`, `:1023`) writing `ValidityRange`. Simple per-PPE sensor pickers + numeric caps would otherwise fit the flat-schema style of `_ev_schema`. Note `__init__.py:51-67` treats every configured entity key as a hard setup dependency — a new PPE sensor key should be added to `_ENTITY_CONFIG_KEYS` / `_ENTITY_LIST_CONFIG_KEYS` deliberately.
+
+## 7. `modules/tariff.py`
+
+Per-hour distribution price:
+```python
+def distribution_for(self, hour_start: datetime) -&gt; float | None:   # tariff.py:488
+def snapshot_for(self, hour_start: datetime) -&gt; float | None:       # :484
+def vat_rate_for(self, hour_start: datetime) -&gt; float | None:       # :505
+def fixed_hourly_for(self, hour_start: datetime) -&gt; float | None:   # :515
+@property
+def tariffs(self) -&gt; list[Tariff]                                   # :532-534
+```
+
+The fixed hourly cost (`:515-530`) — the direct model for a Tarcza monthly amount:
+```python
+tariff = tariff_for_day(self._tariffs, hour_start.date())
+if tariff is None: return None
+if not tariff.fixed_monthly_cost: return 0.0
+days = calendar.monthrange(hour_start.year, hour_start.month)[1]
+hours = days * 24
+return tariff.fixed_monthly_cost * (1.0 + tariff.vat_rate) / hours
+```
+
+Internal resolver: `_resolve_price(slot_dt, day_offset, day_on=None) -&gt; tuple[float|None, str|None, str|None]` (`:288-329`) — gross price is `(base_component_kwh + period.price_kwh) * (1 + vat_rate)` (`:311`, `:320`). `contribute` (`:245-284`) writes `slot.distribution_price_kwh` and `slot.distribution_fixed_hourly` (`:281`); current/past hours use a frozen snapshot, future hours resolve live (`:261-279`).
+
+**Validity-range checking** (reuse target for Tarcza dates) — `/Users/dawid/Code/powerpilot/custom_components/powerpilot/models.py`:
+```python
+@dataclass
+class ValidityRange:                      # :292
+    valid_from: date | None = None
+    valid_to: date | None = None
+    id: str = field(default_factory=lambda: uuid4().hex)
+    def contains(self, day: date) -&gt; bool:    # :305  — inclusive both ends, None = open
+```
+```python
+def is_active_on(self, day: date) -&gt; bool:        # Tariff, models.py:356
+    if not self.validity_ranges: return True
+    return any(r.contains(day) for r in self.validity_ranges)
+def earliest_active_start(self, day: date) -&gt; date | None:  # :361
+def tariff_for_day(tariffs: list[Tariff], day: date) -&gt; Tariff | None:  # :406 — latest valid_from wins
+```
+`Tariff.to_dict`/`from_dict` (`:368`, `:379`) show the storage round-trip, including the legacy-key back-compat pattern.
+
+## Optimizer objective (for a new price term)
+
+Objective documented at `/Users/dawid/Code/powerpilot/custom_components/powerpilot/optimizer.py:39-55`. Cost vector built in `_solve_lp` — `:527-552`:
+```python
+cost[seg_col(t, k)] = charge_price[t] + (wear - tv) * seg_eff[k] + tie   # :534
+cost[d0 + t] = (-total_price[t] + wear + tv / deff) * discharge_cap[t]   # :538
+```
+`_solve_lp` signature `:413-424`; price inputs assembled in `optimize` at `:312-328` (`energy_price`, `distribution`, `total_price`, `charge_order_price`, `ev_kwh`). Realized per-hour costs are recomputed in `_build_plan` from actual flows — `:831-835`:
+```python
+decision.energy_cost = grid_buy * energy_price[t]
+decision.distribution_cost = grid_buy * distribution[t]
+decision.hour_cost = decision.energy_cost + decision.distribution_cost
+decision.fixed_cost = slot.distribution_fixed_hourly or 0.0
+decision.battery_use_cost = delivered * decision.battery_energy_cost
+```
+A new term needs touching: `HourSlot` (models.py:19-69, add the per-hour field), the contributing module's `contribute`, `optimize`'s price assembly (`:312-328`), the `cost[...]` rows (`:534`, `:538`), `_build_plan` (`:831-835`) plus `Decision` + `as_dict` (models.py:113-153), the snapshot record (coordinator.py:581-620) and the `get_series` hour dicts (coordinator.py:2137, 2342, 2544) and pin override (`:2598-2653`).</result>
+<usage><subagent_tokens>185053</subagent_tokens><tool_uses>62</tool_uses><duration_ms>275356</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bffo71nqq</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/3cf3ccca-e25c-4968-a58a-43b4143f2b29/tasks/bffo71nqq.output</output-file>
+<status>completed</status>
+<summary>Background command "Run full suite after SoC refactor" completed (exit code 0)</summary>
+</task-notification>

@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "38ae513ee43a",
+  "strategy": "manual-commit",
+  "branch": "feat/tarcza-ppe1",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "README.md",
+    "custom_components/powerpilot/__init__.py",
+    "custom_components/powerpilot/binary_sensor.py",
+    "custom_components/powerpilot/config_flow.py",
+    "custom_components/powerpilot/const.py",
+    "custom_components/powerpilot/coordinator.py",
+    "custom_components/powerpilot/forecast.py",
+    "custom_components/powerpilot/models.py",
+    "custom_components/powerpilot/modules/billing.py",
+    "custom_components/powerpilot/modules/ev.py",
+    "custom_components/powerpilot/modules/prices.py",
+    "custom_components/powerpilot/modules/tariff.py",
+    "custom_components/powerpilot/optimizer.py",
+    "custom_components/powerpilot/sensor.py",
+    "custom_components/powerpilot/strings.json",
+    "custom_components/powerpilot/translations/en.json",
+    "custom_components/powerpilot/translations/pl.json",
+    "tests/test_billing.py",
+    "tests/test_billing_pipeline.py",
+    "tests/test_optimizer_tarcza.py",
+    "tests/test_price_cap.py",
+    "tests/test_translations.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/38/ae513ee43a/0/metadata.json",
+      "transcript": "/38/ae513ee43a/0/full.jsonl",
+      "compact_transcript": "/38/ae513ee43a/0/transcript.jsonl",
+      "content_hash": "/38/ae513ee43a/0/content_hash.txt",
+      "prompt": "/38/ae513ee43a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1232,
+    "cache_creation_tokens": 660670,
+    "cache_read_tokens": 11039403,
+    "output_tokens": 207392,
+    "api_call_count": 45
+  }
+}

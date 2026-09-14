@@ -29,6 +29,11 @@ from .const import (
     SENSOR_INVERTER_MODE,
     SENSOR_NEXT_ACTION,
     SENSOR_PLAN,
+    SENSOR_TARCZA_PPE1_AVERAGE,
+    SENSOR_TARCZA_PPE1_DISCOUNT,
+    SENSOR_TARCZA_PPE1_ENERGY,
+    SENSOR_TARCZA_PPE1_FORECAST_AVERAGE,
+    PPE_1,
     InverterMode,
 )
 from .coordinator import PowerPilotCoordinator
@@ -51,6 +56,10 @@ async def async_setup_entry(
             EVChargeUntilSensor(coordinator, entry),
             EVSocLimitSensor(coordinator, entry),
             EVChargeMinutesSensor(coordinator, entry),
+            TarczaEnergySensor(coordinator, entry),
+            TarczaAverageSensor(coordinator, entry),
+            TarczaForecastAverageSensor(coordinator, entry),
+            TarczaDiscountSensor(coordinator, entry),
         ]
     )
 
@@ -323,3 +332,133 @@ class EVChargeMinutesSensor(PowerPilotEntity, SensorEntity):
     @property
     def native_value(self) -> int | None:
         return self.coordinator.ev_control().get("charge_minutes")
+
+
+# ---------------------------------------------------------------------------
+# Monthly price cap ("Tarcza") diagnostics — PPE 1
+# ---------------------------------------------------------------------------
+
+
+class TarczaEntity(PowerPilotEntity):
+    """Shared lookups for the month-to-date settlement of PPE 1."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def period(self):
+        """Observed month-to-date position (``None`` when unavailable)."""
+        return self.coordinator.billing.periods.get(PPE_1)
+
+    @property
+    def outcome(self):
+        """The plan's month forecast for PPE 1 (``None`` without a plan)."""
+        plan = self.plan
+        if not plan:
+            return None
+        for outcome in plan.billing:
+            if outcome.period.ppe == PPE_1:
+                return outcome
+        return None
+
+    def _observed_attributes(self) -> dict:
+        period = self.period
+        if period is None:
+            return {"reasons": list(self.coordinator.billing.reasons)}
+        return period.as_dict()
+
+    def _forecast_attributes(self) -> dict:
+        outcome = self.outcome
+        if outcome is None:
+            return {"reasons": list(self.coordinator.billing.reasons)}
+        return outcome.as_dict()
+
+
+class TarczaEnergySensor(TarczaEntity, SensorEntity):
+    """Grid import of PPE 1 since the month started (observed, kWh)."""
+
+    _attr_translation_key = SENSOR_TARCZA_PPE1_ENERGY
+    _attr_icon = "mdi:transmission-tower-import"
+    _attr_native_unit_of_measurement = "kWh"
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_ENERGY)
+
+    @property
+    def native_value(self) -> float | None:
+        period = self.period
+        return period.energy_kwh if period is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self._observed_attributes()
+
+
+class TarczaAverageSensor(TarczaEntity, SensorEntity):
+    """Observed weighted-average energy price of PPE 1 this month, before the cap."""
+
+    _attr_translation_key = SENSOR_TARCZA_PPE1_AVERAGE
+    _attr_icon = "mdi:scale-balance"
+    _attr_native_unit_of_measurement = "PLN/kWh"
+    _attr_suggested_display_precision = 4
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_AVERAGE)
+
+    @property
+    def native_value(self) -> float | None:
+        period = self.period
+        return period.average_kwh if period is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self._observed_attributes()
+
+
+class TarczaForecastAverageSensor(TarczaEntity, SensorEntity):
+    """Forecast month-end weighted average of PPE 1 (observed + plan + tail).
+
+    ``unknown`` while the cap cannot be modelled — the attributes carry why.
+    """
+
+    _attr_translation_key = SENSOR_TARCZA_PPE1_FORECAST_AVERAGE
+    _attr_icon = "mdi:chart-timeline-variant"
+    _attr_native_unit_of_measurement = "PLN/kWh"
+    _attr_suggested_display_precision = 4
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_FORECAST_AVERAGE)
+
+    @property
+    def native_value(self) -> float | None:
+        outcome = self.outcome
+        if outcome is None or not outcome.available:
+            return None
+        return outcome.average_kwh
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self._forecast_attributes()
+
+
+class TarczaDiscountSensor(TarczaEntity, SensorEntity):
+    """Forecast discount the cap yields on PPE 1's energy bill this month (PLN)."""
+
+    _attr_translation_key = SENSOR_TARCZA_PPE1_DISCOUNT
+    _attr_icon = "mdi:cash-refund"
+    _attr_native_unit_of_measurement = "PLN"
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_DISCOUNT)
+
+    @property
+    def native_value(self) -> float | None:
+        outcome = self.outcome
+        if outcome is None or not outcome.available:
+            return None
+        return outcome.discount_pln
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self._forecast_attributes()

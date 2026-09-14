@@ -66,6 +66,30 @@ _ARCHIVE_RETENTION_DAYS = 365  # how long fetched prices stay in the archive
 _RDN_FIXING_PUBLISHED_AT = time(10, 45)
 _FIXING_RETRY_INTERVAL = timedelta(minutes=20)
 
+# How many weeks back the estimate may look for a same-weekday+hour sample. An
+# hour far past the source horizon (the billing month's tail) has its 1/2/3-week
+# samples in the unarchived future; those weeks are skipped — not counted as
+# gaps — and the three most recent ARCHIVED weeks are used instead.
+_ESTIMATE_MAX_WEEKS_BACK = 12
+
+
+def cap_price_of(entry: dict[str, Any] | None) -> float | None:
+    """Energy-side gross price without excise for an archived hour.
+
+    ``(tge + markup) × (1 + VAT)`` from the entry's frozen formula — the
+    components the seller's monthly price cap is settled on. ``None`` when the
+    entry carries no formula (sensor source / legacy hours): the split is
+    unknown, so no cap price is invented.
+    """
+    if not entry:
+        return None
+    formula = entry.get("formula")
+    if not formula or formula.get("tge") is None:
+        return None
+    return (float(formula["tge"]) + float(formula.get("markup") or 0.0)) * (
+        1.0 + float(formula.get("vat") or 0.0)
+    )
+
 
 class PriceArchive:
     """Per-hour energy-price archive with provenance.
@@ -85,6 +109,9 @@ class PriceArchive:
     def __init__(self) -> None:
         # {utc_iso_hour: {"energy","type","source","fetched_at","p10","p90"}}
         self._entries: dict[str, dict[str, Any]] = {}
+        # Latest archived hour, recomputed lazily after any mutation.
+        self._latest: datetime | None = None
+        self._latest_stale = True
         # Whether the one-time historical backfill has completed. Persisted so it
         # runs once at provider setup; afterwards the forward fetch maintains it.
         self.backfilled: bool = False
@@ -167,7 +194,23 @@ class PriceArchive:
             # Preserve a prior stamp if this refresh didn't supply one.
             entry["formula"] = existing["formula"]
         self._entries[key] = entry
+        self._latest_stale = True
         return True
+
+    def latest_hour(self) -> datetime | None:
+        """Start of the most recent archived hour (UTC), ``None`` when empty."""
+        if self._latest_stale:
+            latest: datetime | None = None
+            for key in self._entries:
+                try:
+                    stamp = datetime.fromisoformat(key)
+                except (ValueError, TypeError):
+                    continue
+                if latest is None or stamp > latest:
+                    latest = stamp
+            self._latest = latest
+            self._latest_stale = False
+        return self._latest
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -176,23 +219,47 @@ class PriceArchive:
         return self._entries.get(self._key(hour_start))
 
     def estimate(self, hour_start: datetime) -> tuple[float | None, list[dict[str, Any]]]:
-        """Weighted same-weekday+hour average from 1/2/3 weeks ago.
+        """Weighted same-weekday+hour average of the gross energy price.
 
-        Returns ``(price, breakdown)``. ``breakdown`` always lists the three
-        contributing weeks (date, weight, value, type) for the UI tooltip;
-        ``price`` is ``None`` when no historical sample exists. Weights are
-        renormalised over whatever samples are available.
+        Samples come from 1/2/3 weeks before ``hour_start``. Returns ``(price,
+        breakdown)``; ``breakdown`` lists the contributing weeks (date, weight,
+        value, type) for the UI tooltip and ``price`` is ``None`` when no sample
+        exists. Weights are renormalised over whatever samples are available.
+
+        For an hour beyond the archived future (the billing month's tail) the
+        nearest weeks have no data *by construction* — those are skipped, not
+        treated as gaps, and the three most recent archived weeks are used.
         """
+        return self._estimate(hour_start, lambda entry: entry.get("energy"))
+
+    def estimate_cap_price(
+        self, hour_start: datetime
+    ) -> tuple[float | None, list[dict[str, Any]]]:
+        """Same estimator as :meth:`estimate`, over the excise-free cap price."""
+        return self._estimate(hour_start, cap_price_of)
+
+    def _estimate(
+        self, hour_start: datetime, value_of
+    ) -> tuple[float | None, list[dict[str, Any]]]:
         breakdown: list[dict[str, Any]] = []
-        for weeks, weight in zip((1, 2, 3), ESTIMATE_WEEKLY_WEIGHTS):
+        latest = self.latest_hour()
+        weeks = 0
+        while (
+            len(breakdown) < len(ESTIMATE_WEEKLY_WEIGHTS)
+            and weeks < _ESTIMATE_MAX_WEEKS_BACK
+        ):
+            weeks += 1
             past = hour_start - timedelta(days=7 * weeks)
             entry = self.get(past)
+            if entry is None and latest is not None and dt_util.as_utc(past) > latest:
+                continue  # past the archive's reach: structurally absent, not a gap
+            value = value_of(entry) if entry else None
             breakdown.append(
                 {
                     "weeks_ago": weeks,
-                    "weight": weight,
+                    "weight": ESTIMATE_WEEKLY_WEIGHTS[len(breakdown)],
                     "date": dt_util.as_local(past).date().isoformat(),
-                    "value": entry["energy"] if entry else None,
+                    "value": value,
                     "type": entry["type"] if entry else None,
                 }
             )
@@ -216,6 +283,7 @@ class PriceArchive:
             if stamp >= cutoff:
                 kept[key] = value
         self._entries = kept
+        self._latest_stale = True
 
     def remove_forecasts_not_in(
         self,
@@ -244,6 +312,7 @@ class PriceArchive:
                 continue
             kept[key] = value
         self._entries = kept
+        self._latest_stale = True
         return changed
 
     def to_dict(self) -> dict[str, Any]:
@@ -255,6 +324,7 @@ class PriceArchive:
         if data:
             archive._entries = dict(data.get("entries") or {})
             archive.backfilled = bool(data.get("backfilled"))
+            archive._latest_stale = True
         return archive
 
 
@@ -405,6 +475,26 @@ class PriceModule(PowerPilotModule):
             return archived["energy"], archived["type"]
         return None, None
 
+    def cap_price_at(self, hour) -> float | None:
+        """Excise-free gross energy price for ``hour`` (see ``cap_price_of``).
+
+        Same resolution order as :meth:`_resolve`: an archived certain price
+        wins, then the live fetch (components from the fetch + current pricing
+        config), then the archive. ``None`` when the hour is unknown or its
+        components are (sensor source).
+        """
+        archived = self.archive.get(hour)
+        if archived is not None and archived["type"] == PRICE_TYPE_CERTAIN:
+            return cap_price_of(archived)
+        if hour in self._data.buy:
+            tge = self._data.tge.get(hour)
+            if tge is None:
+                return None
+            markup = float(self.config.get(CONF_PRICE_MARKUP, 0.0) or 0.0)
+            vat_mul = float(self.config.get(CONF_PRICE_VAT, 1.0) or 1.0)
+            return (float(tge) + markup) * vat_mul
+        return cap_price_of(archived)
+
     def price_at(self, hour) -> float | None:
         return self._resolve(hour)[0]
 
@@ -537,15 +627,19 @@ class PriceModule(PowerPilotModule):
                 # Served from the permanent archive — this hour sits between two
                 # source fetches, so the live window no longer covers it.
                 slot.tags.append("price_archived")
+            cap_price = self.cap_price_at(hour)
             if price is None:
                 # Estimated prices fill the tail (D+4..D+7) so the plan reaches
-                # a full week: a 3-week weighted weekday+hour average.
+                # a full week: a 3-week weighted weekday+hour average. The
+                # cap price is estimated the same way, over the same samples.
                 estimate, _ = self.archive.estimate(hour)
                 if estimate is not None:
                     price = estimate
                     slot.tags.append("price_estimated")
+                    cap_price, _ = self.archive.estimate_cap_price(hour)
             if price is not None:
                 slot.buy_price = price
+            slot.cap_price_kwh = cap_price
             slot.price_confirmed = price_type == PRICE_TYPE_CERTAIN
             if hour in self._data.levels:
                 slot.tags.append(f"price:{self._data.levels[hour]}")

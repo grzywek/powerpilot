@@ -23,11 +23,11 @@ partial discharge across hours. This is a deliberate simplification: it trades a
 marginally cheaper fractional plan for one that maps cleanly onto a single
 per-hour inverter setpoint.
 
-The stored energy (kWh) evolves as a prefix sum::
+The stored energy (kWh) is an explicit state column per hour::
 
-    E[t] = E0 + Σ_{k≤t} (c[k]·η_ch − d[k]/η_dis)
+    E[t] = E[t-1] + c[t]·η_ch − d[t]/η_dis          (E[-1] = E0)
 
-and is bounded by the usable SoC band ``[E_min, E_max]``. The household demand of
+bounded by the usable SoC band ``[E_min, E_max]``. The household demand of
 each hour is served either from the grid or from the battery (no export, so
 ``d[t] ≤ demand[t]``). The EV charger sits before the inverter and is always
 grid-fed; its per-hour energy ``ev[t]`` is planned separately into the cheapest
@@ -74,7 +74,15 @@ from homeassistant.util import dt as dt_util
 
 from .battery import RECOVERY_MARGIN_SOC, BatteryModel
 from .const import ChargePower, InverterMode
-from .models import Decision, ESSRequest, Forecast, Plan
+from .models import (
+    BillingOutcome,
+    BillingPeriod,
+    Decision,
+    ESSRequest,
+    Forecast,
+    MonthTail,
+    Plan,
+)
 from .modules.ev import EVRequest
 
 _LOGGER = logging.getLogger(__name__)
@@ -269,6 +277,26 @@ def _charge_curve_cuts(
     return cuts
 
 
+@dataclass
+class _CapPeriod:
+    """A billing period mapped onto the LP's hour indices."""
+
+    period: BillingPeriod
+    hours: list[int]
+
+
+@dataclass
+class _LPSolution:
+    """Per-hour flows the solver settled on (planning horizon + month tail)."""
+
+    charge: list[float]  # grid kWh into the battery
+    discharge: list[float]  # kWh delivered to the house from the battery
+    stored: list[float]  # post-loss kWh stored
+    grid: list[float]  # grid import
+    tail_ev: list[float]  # expected EV import placed in tail hours
+    periods: list[tuple[float, float, bool]]  # (energy, pre-cap cost, cap binds)
+
+
 class Optimizer:
     """Produces a cost-optimal :class:`Plan` via a HiGHS linear program."""
 
@@ -285,12 +313,28 @@ class Optimizer:
         ev_request: EVRequest | None = None,
         reminders: list[str] | None = None,
         ess_request: ESSRequest | None = None,
+        billing: list[BillingPeriod] | None = None,
+        tail: MonthTail | None = None,
     ) -> Plan:
+        """Plan the horizon; with ``billing`` also settle each month under its cap.
+
+        ``billing`` lists the billing periods (months under the seller's price
+        cap) the plan touches, with their observed month-to-date position;
+        ``tail`` carries the estimated hours from the end of the horizon to the
+        end of the last such month. Both are required together for the cap to
+        be modelled — the tail alone is meaningless and is ignored. Every hour
+        under a cap must carry ``cap_price_kwh`` and every tail hour a price;
+        the caller validates completeness and reports gaps, this method only
+        refuses to guess (``ValueError``).
+        """
         battery = battery.copy()  # never mutate the live state
         slots = forecast.slots
         n = len(slots)
         if n == 0:
             return Plan(forecast=forecast, decisions=[], created_at=dt_util.now())
+        tail_slots = list(tail.slots) if (tail is not None and billing) else []
+        all_slots = slots + tail_slots
+        total = len(all_slots)
 
         # The first slot covers the clock hour we are already inside — only its
         # REMAINDER is plannable. Every per-hour quantity of slot 0 (charge and
@@ -304,30 +348,57 @@ class Optimizer:
             first_frac = (
                 slots[0].start + timedelta(hours=1) - now
             ).total_seconds() / 3600.0
-        fracs = [first_frac] + [1.0] * (n - 1)
+        fracs = [first_frac] + [1.0] * (n - 1) + [1.0] * len(tail_slots)
 
         ev_alloc = self._plan_ev(forecast, ev_request, first_frac)
         ev_charger_kw = ev_request.charger_kw if ev_request else 0.0
 
-        # Per-hour prices and demand. Missing energy prices fall back to the
-        # median so the SoC chain stays continuous.
+        # Per-hour prices and demand. Missing energy prices inside the horizon
+        # fall back to the median so the SoC chain stays continuous; a tail
+        # hour without a price is a gap the caller should have reported.
         prices = [s.buy_price for s in slots if s.buy_price is not None]
         median_price = statistics.median(prices) if prices else 0.0
         energy_price = [
             s.buy_price if s.buy_price is not None else median_price for s in slots
         ]
-        distribution = [s.distribution_price_kwh or 0.0 for s in slots]
-        total_price = [energy_price[t] + distribution[t] for t in range(n)]
+        for slot in tail_slots:
+            if slot.buy_price is None:
+                raise ValueError(f"tail hour {slot.start.isoformat()} has no price")
+            energy_price.append(slot.buy_price)
+        distribution = [s.distribution_price_kwh or 0.0 for s in all_slots]
+        total_price = [energy_price[t] + distribution[t] for t in range(total)]
         charge_order_price = [_charge_order_price(price) for price in total_price]
         demand = [
             max(0.0, s.total_consumption_kwh) * fracs[t]
-            for t, s in enumerate(slots)
+            for t, s in enumerate(all_slots)
         ]
         # The LP and every cost see GRID energy; the pack-side ("added") energy
-        # and the fitted amps ride along into the plan for SoC/control.
+        # and the fitted amps ride along into the plan for SoC/control. The
+        # tail carries no planned EV hours — its expected EV import is placed
+        # by the solver itself.
         ev_kwh = [ev_alloc.grid.get(slots[t].start, 0.0) for t in range(n)]
+        ev_kwh += [0.0] * len(tail_slots)
 
-        charge, discharge, stored = self._solve_lp(
+        cap_price: list[float] | None = None
+        periods: list[_CapPeriod] = []
+        if billing:
+            cap_price = []
+            for slot in all_slots:
+                if slot.cap_price_kwh is None:
+                    raise ValueError(
+                        f"hour {slot.start.isoformat()} has no cap price"
+                    )
+                cap_price.append(slot.cap_price_kwh)
+            for period in billing:
+                hours = [
+                    t
+                    for t, slot in enumerate(all_slots)
+                    if period.month_start <= slot.start < period.month_end
+                ]
+                if hours:
+                    periods.append(_CapPeriod(period=period, hours=hours))
+
+        solution = self._solve_lp(
             battery=battery,
             total_price=total_price,
             demand=demand,
@@ -335,27 +406,57 @@ class Optimizer:
             ev_charger_kw=ev_charger_kw,
             charge_order_price=charge_order_price,
             fracs=fracs,
-            slots=slots,
+            slots=all_slots,
             ess_request=ess_request,
+            cap_price=cap_price,
+            periods=periods,
+            tail_start=n,
+            tail_ev_kwh=tail.ev_grid_kwh if (tail is not None and billing) else 0.0,
+            tail_ev_cap_kw=tail.ev_charger_kw if (tail is not None and billing) else 0.0,
         )
 
-        return self._build_plan(
+        plan = self._build_plan(
             forecast=forecast,
             battery=battery,
-            charge=charge,
-            discharge=discharge,
-            stored=stored,
-            energy_price=energy_price,
-            distribution=distribution,
-            total_price=total_price,
-            demand=demand,
-            ev_kwh=ev_kwh,
+            charge=solution.charge[:n],
+            discharge=solution.discharge[:n],
+            stored=solution.stored[:n],
+            energy_price=energy_price[:n],
+            distribution=distribution[:n],
+            total_price=total_price[:n],
+            demand=demand[:n],
+            ev_kwh=ev_kwh[:n],
             ev_alloc=ev_alloc,
-            charge_order_price=charge_order_price,
+            charge_order_price=charge_order_price[:n],
             ev_request=ev_request,
             reminders=reminders,
-            fracs=fracs,
+            fracs=fracs[:n],
+            cap_price=cap_price[:n] if cap_price is not None else None,
         )
+        plan.billing = self._billing_outcomes(periods, solution, n)
+        return plan
+
+    @staticmethod
+    def _billing_outcomes(
+        periods: list[_CapPeriod], solution: _LPSolution, horizon: int
+    ) -> list[BillingOutcome]:
+        """Month forecasts per billing period from the settled LP flows."""
+        outcomes: list[BillingOutcome] = []
+        for cp, (energy, cost, binds) in zip(periods, solution.periods):
+            planned = sum(solution.grid[t] for t in cp.hours if t < horizon)
+            tail_energy = sum(solution.grid[t] for t in cp.hours if t >= horizon)
+            outcomes.append(
+                BillingOutcome(
+                    period=cp.period,
+                    energy_kwh=energy,
+                    cost_pln=cost,
+                    cap_binds=binds,
+                    settled_cost_pln=min(cost, cp.period.limit_kwh * energy),
+                    planned_energy_kwh=planned,
+                    tail_energy_kwh=tail_energy,
+                )
+            )
+        return outcomes
 
     # ------------------------------------------------------------------
     # Linear program
@@ -421,9 +522,24 @@ class Optimizer:
         fracs: list[float] | None = None,
         slots: list | None = None,
         ess_request: ESSRequest | None = None,
-    ) -> tuple[list[float], list[float], list[float]]:
+        cap_price: list[float] | None = None,
+        periods: list[_CapPeriod] | None = None,
+        tail_start: int | None = None,
+        tail_ev_kwh: float = 0.0,
+        tail_ev_cap_kw: float = 0.0,
+    ) -> _LPSolution:
+        """Solve the MILP over ``len(total_price)`` hours.
+
+        With ``periods`` (billing months under a price cap) the energy part of
+        every grid kWh is settled per month as ``min(C_P, limit·E_P)``; without
+        them the model is the plain per-hour objective. Hours from
+        ``tail_start`` on are the accounting-only month tail: they carry no
+        planned EV load, but ``tail_ev_kwh`` of expected EV import is placed
+        among them by the solver (≤ ``tail_ev_cap_kw`` per hour).
+        """
         cfg = self.config
         n = len(total_price)
+        tail_start = n if tail_start is None else tail_start
         # Calendar instructions for the house battery (``#ess`` tags). Both
         # degrade gracefully: see the floor clamp and the objective bonus below.
         ess_targets = ess_request.targets if ess_request is not None else []
@@ -465,11 +581,17 @@ class Optimizer:
             if charge_order_price is not None
             else [_charge_order_price(price) for price in total_price]
         )
+        capped = bool(periods)
+        if capped and (cap_price is None or len(cap_price) != n):
+            raise ValueError("cap price required for every hour under a price cap")
+        # Energy-side price that moves into the monthly settlement. Without a
+        # cap nothing moves and the per-column costs are the full prices.
+        settled = cap_price if capped else [0.0] * n
 
         p_term = (
             cfg.terminal_price
             if cfg.terminal_price is not None
-            else (sum(total_price) / n if n else 0.0)
+            else (sum(total_price[:tail_start]) / tail_start if tail_start else 0.0)
         )
         # Value of one stored kWh left at the end: it later delivers ``deff`` kWh
         # to the house, displacing grid energy worth ``p_term`` each.
@@ -497,8 +619,27 @@ class Optimizer:
         def seg_col(t: int, k: int) -> int:
             return t * seg_n + k
 
+        min_charge = cfg.min_charge_power_kw or 0.0
         d0 = n * seg_n  # first discharge column
-        y0 = d0 + n  # first min-charge indicator column
+        s0 = d0 + n  # first reservoir-level (state) column
+        y0 = s0 + n  # first min-charge indicator column
+        g0 = y0 + (n if min_charge > _EPS else 0)  # first grid-import column
+        tail_n = n - tail_start
+        v0 = g0 + n  # first tail-EV column (one per tail hour)
+        p0 = v0 + tail_n  # first billing-period block (K, C, E, b per period)
+
+        def state_col(t: int) -> int:
+            return s0 + t
+
+        def grid_col(t: int) -> int:
+            return g0 + t
+
+        def tail_ev_col(t: int) -> int:
+            return v0 + (t - tail_start)
+
+        def period_cols(i: int) -> tuple[int, int, int, int]:
+            base = p0 + 4 * i
+            return base, base + 1, base + 2, base + 3  # K, C, E, b
 
         # Per-hour grid-side charge cap (kWh over the slot's plannable window).
         # During EV hours the battery may still charge — the real limit is
@@ -532,15 +673,81 @@ class Optimizer:
             min(demand[t], cfg.inverter_max_discharge_kw * fracs[t])
             for t in range(n)
         ]
+        # Tail hours are accounting-only: their switches stay continuous, so
+        # the month tail adds no branching to the search.
         for t in range(n):
             if discharge_cap[t] > _EPS:
                 h.addVar(0.0, 1.0)
-                h.changeColIntegrality(d0 + t, highspy.HighsVarType.kInteger)
+                if t < tail_start:
+                    h.changeColIntegrality(d0 + t, highspy.HighsVarType.kInteger)
             else:
                 h.addVar(0.0, 0.0)  # no demand → nothing to cover this hour
 
-        n_cols = d0 + n
-        cost = np.empty(n_cols, dtype=np.float64)
+        # Reservoir level E[t] after each hour as an explicit state column,
+        # bounded by the SoC band and any ``#ess_soc`` floor (added below once
+        # the floors are known). Linked hour-to-hour by a sparse transition
+        # row instead of the former prefix sums, so the model stays O(n) in
+        # nonzeros however long the horizon grows.
+        for t in range(n):
+            h.addVar(e_floor, e_max)
+
+        # Minimum charge power indicators y[t] (semi-continuous charge).
+        if min_charge > _EPS:
+            for t in range(n):
+                h.addVar(0.0, 1.0)
+                if t < tail_start:
+                    h.changeColIntegrality(y0 + t, highspy.HighsVarType.kInteger)
+
+        # Grid import g[t] = demand + EV + charge − discharge (+ tail EV), capped
+        # by the physical connection power straight on the column bound.
+        conn = cfg.connection_power_kw or 0.0
+        for t in range(n):
+            h.addVar(0.0, conn * fracs[t] if conn > 0 else inf)
+
+        # Expected EV import in the month's tail, placed by the solver.
+        tail_ev_cap = [0.0] * n
+        if tail_n > 0 and tail_ev_kwh > _EPS and tail_ev_cap_kw > _EPS:
+            for t in range(tail_start, n):
+                tail_ev_cap[t] = tail_ev_cap_kw * fracs[t]
+        placeable = sum(tail_ev_cap[tail_start:])
+        if tail_ev_kwh > placeable + _EPS:
+            _LOGGER.warning(
+                "Ogon miesiąca: oczekiwane ładowanie EV %.1f kWh nie mieści się "
+                "w %.1f kWh dostępnych na ładowarce — przycinam do tej wartości.",
+                tail_ev_kwh,
+                placeable,
+            )
+            tail_ev_kwh = placeable
+        for t in range(tail_start, n):
+            h.addVar(0.0, tail_ev_cap[t])
+
+        # Billing-period blocks: K (settled energy cost), C (pre-cap cost),
+        # E (import), b (1 = the cap binds). ``min(C, L·E)`` is concave, so
+        # minimising it needs the binary switch with a big-M on each branch.
+        periods = periods or []
+        big_m: list[float] = []
+        for i, cp in enumerate(periods):
+            limit = cp.period.limit_kwh
+            m_val = abs(cp.period.cost_pln - limit * cp.period.energy_kwh) + 1.0
+            for t in cp.hours:
+                g_max = demand[t] + ev_kwh[t] + charge_caps[t] + tail_ev_cap[t]
+                m_val += abs(settled[t] - limit) * g_max
+            big_m.append(m_val)
+            k_col, c_col, e_col, b_col = period_cols(i)
+            h.addVar(-inf, inf)  # K
+            h.addVar(-inf, inf)  # C
+            h.addVar(0.0, inf)  # E
+            h.addVar(0.0, 1.0)  # b
+            h.changeColIntegrality(b_col, highspy.HighsVarType.kInteger)
+
+        # Recovery shortfall r[t] ≥ e_recover − E[t] (one per hour, recovery only).
+        r0 = p0 + 4 * len(periods)
+        if recovering:
+            for t in range(n):
+                h.addVar(0.0, e_recover)
+
+        n_cols = r0 + (n if recovering else 0)
+        cost = np.zeros(n_cols, dtype=np.float64)
         for t in range(n):
             # Earliness tie-break: among equally priced hours prefer charging
             # in the earliest, so an unfinished charge extends into the cheap
@@ -548,10 +755,22 @@ class Optimizer:
             tie = _EARLY_TIE_BREAK * t
             for k in range(seg_n):
                 cost[seg_col(t, k)] = (
-                    charge_price[t] + (wear - tv) * seg_eff[k] + tie
+                    charge_price[t] - settled[t] + (wear - tv) * seg_eff[k] + tie
                 )
             # d-column is a 0/1 switch worth discharge_cap[t] kWh delivered.
-            cost[d0 + t] = (-total_price[t] + wear + tv / deff) * discharge_cap[t]
+            cost[d0 + t] = (
+                -(total_price[t] - settled[t]) + wear + tv / deff
+            ) * discharge_cap[t]
+        for t in range(tail_start, n):
+            cost[tail_ev_col(t)] = total_price[t] - settled[t]
+        for i in range(len(periods)):
+            cost[period_cols(i)[0]] = 1.0
+        if recovering:
+            # Dwarfs any price, wear or terminal value: no economic gain can
+            # justify leaving the reserve short for another hour.
+            penalty = max((abs(p) for p in total_price), default=0.0) + abs(tv) + abs(wear) + 1e3
+            for t in range(n):
+                cost[r0 + t] = penalty
         # ``#ess`` hours: charge here whatever it costs. Expressed as an
         # objective bonus rather than a lower bound on the charge columns —
         # a hard floor collides with the pack's own SoC band the moment the
@@ -586,19 +805,50 @@ class Optimizer:
             want = min(capacity_kwh * max(0.0, min(100.0, percent)) / 100.0, e_max)
             floors[t] = max(floors.get(t, 0.0), min(want, reachable))
 
-        # SoC band on the running reservoir level after each hour.
+        # Reservoir dynamics:
+        #   E[t] − E[t−1] − Σ_s η_s·c[t,s] + (cap[t]/η_dis)·z[t] = 0,  E[−1] = e0
+        # with the SoC band (and the calendar floors) as bounds on E[t].
         for t in range(n):
-            idx: list[int] = []
-            val: list[float] = []
-            for k in range(t + 1):
-                for s in range(seg_n):
-                    idx.append(seg_col(k, s))
-                    val.append(seg_eff[s])
-                idx.append(d0 + k)
-                val.append(-discharge_cap[k] / deff)
+            lo = max(e_floor, floors.get(t, 0.0))
+            h.changeColBounds(state_col(t), min(lo, e_max), e_max)
+            if recovering:
+                # E[t] + r[t] ≥ e_recover
+                h.addRow(
+                    e_recover,
+                    inf,
+                    2,
+                    np.array([state_col(t), r0 + t], dtype=np.int32),
+                    np.ones(2, dtype=np.float64),
+                )
+            idx = [seg_col(t, s) for s in range(seg_n)] + [d0 + t, state_col(t)]
+            val = [-seg_eff[s] for s in range(seg_n)] + [
+                discharge_cap[t] / deff,
+                1.0,
+            ]
+            rhs = e0
+            if t > 0:
+                idx.append(state_col(t - 1))
+                val.append(-1.0)
+                rhs = 0.0
             h.addRow(
-                max(e_floor, floors.get(t, 0.0)) - e0,
-                e_max - e0,
+                rhs,
+                rhs,
+                len(idx),
+                np.array(idx, dtype=np.int32),
+                np.array(val, dtype=np.float64),
+            )
+
+        # Grid balance: g[t] − Σ_k c[t,k] + cap[t]·z[t] − v[t] = demand + EV.
+        for t in range(n):
+            idx = [grid_col(t)] + [seg_col(t, k) for k in range(seg_n)] + [d0 + t]
+            val = [1.0] + [-1.0] * seg_n + [discharge_cap[t]]
+            if t >= tail_start:
+                idx.append(tail_ev_col(t))
+                val.append(-1.0)
+            rhs = demand[t] + ev_kwh[t]
+            h.addRow(
+                rhs,
+                rhs,
                 len(idx),
                 np.array(idx, dtype=np.int32),
                 np.array(val, dtype=np.float64),
@@ -616,20 +866,6 @@ class Optimizer:
                     np.ones(seg_n, dtype=np.float64),
                 )
 
-        # Connection-power limit on grid import.
-        if cfg.connection_power_kw and cfg.connection_power_kw > 0:
-            for t in range(n):
-                rhs = cfg.connection_power_kw * fracs[t] - demand[t] - ev_kwh[t]
-                idx = [seg_col(t, k) for k in range(seg_n)] + [d0 + t]
-                val = [1.0] * seg_n + [-discharge_cap[t]]
-                h.addRow(
-                    -inf,
-                    rhs,
-                    len(idx),
-                    np.array(idx, dtype=np.int32),
-                    np.array(val, dtype=np.float64),
-                )
-
         # SoC-dependent charge curve (only when actually configured). The power
         # bound converts to the slot's energy bound through its plannable
         # fraction: charge_energy[t] ≤ frac[t]·(slope·E[t−1] + intercept).
@@ -639,15 +875,14 @@ class Optimizer:
             for t in range(n):
                 idx = [seg_col(t, k) for k in range(seg_n)]
                 val = [1.0] * seg_n
-                for k in range(t):
-                    for s in range(seg_n):
-                        idx.append(seg_col(k, s))
-                        val.append(-slope * seg_eff[s] * fracs[t])
-                    idx.append(d0 + k)
-                    val.append(slope * discharge_cap[k] / deff * fracs[t])
+                rhs = fracs[t] * (intercept + slope * e0)
+                if t > 0:
+                    idx.append(state_col(t - 1))
+                    val.append(-slope * fracs[t])
+                    rhs = fracs[t] * intercept
                 h.addRow(
                     -inf,
-                    fracs[t] * (intercept + slope * e0),
+                    rhs,
                     len(idx),
                     np.array(idx, dtype=np.int32),
                     np.array(val, dtype=np.float64),
@@ -659,11 +894,7 @@ class Optimizer:
         #   Σ_k c[t,k] ≥ min_charge·y[t]  (and then at least the floor)
         # The floor is a POWER (kW), so the slot's energy floor scales with its
         # plannable fraction.
-        min_charge = cfg.min_charge_power_kw or 0.0
         if min_charge > _EPS:
-            for t in range(n):
-                h.addVar(0.0, 1.0)
-                h.changeColIntegrality(y0 + t, highspy.HighsVarType.kInteger)
             for t in range(n):
                 idx = [seg_col(t, k) for k in range(seg_n)]
                 # Σc - cap·y ≤ 0
@@ -685,45 +916,83 @@ class Optimizer:
                     ),
                 )
 
-        # Reserve recovery shortfall r[t] ≥ e_recover − E[t]: one column per
-        # hour, appended after every other column and priced far above any
-        # price, wear or terminal value —
-        #   Σ_{k≤t} (Σ_s η_s·c[k,s] − cap[k]/η_dis·z[k]) + r[t] ≥ e_recover − e0
-        if recovering:
-            penalty = (
-                max((abs(p) for p in total_price), default=0.0)
-                + abs(tv)
-                + abs(wear)
-                + 1e3
+        # Expected tail EV import: exactly ``tail_ev_kwh`` over the tail hours.
+        if tail_n > 0 and tail_ev_kwh > _EPS:
+            idx = [tail_ev_col(t) for t in range(tail_start, n)]
+            h.addRow(
+                tail_ev_kwh,
+                tail_ev_kwh,
+                len(idx),
+                np.array(idx, dtype=np.int32),
+                np.ones(len(idx), dtype=np.float64),
             )
-            r0 = h.getNumCol()
-            for t in range(n):
-                h.addVar(0.0, e_recover)
-                h.changeColCost(r0 + t, penalty)
-            for t in range(n):
-                idx = []
-                val = []
-                for k in range(t + 1):
-                    for s in range(seg_n):
-                        idx.append(seg_col(k, s))
-                        val.append(seg_eff[s])
-                    idx.append(d0 + k)
-                    val.append(-discharge_cap[k] / deff)
-                idx.append(r0 + t)
-                val.append(1.0)
-                h.addRow(
-                    e_recover - e0,
-                    inf,
-                    len(idx),
-                    np.array(idx, dtype=np.int32),
-                    np.array(val, dtype=np.float64),
-                )
+
+        # Monthly settlement per billing period:
+        #   C_P = C_mtd + Σ cap_price[t]·g[t]      E_P = E_mtd + Σ g[t]
+        #   K_P ≥ C_P − M·b_P                       K_P ≥ L·E_P − M·(1 − b_P)
+        # Minimising K_P with b_P free picks the cheaper branch, i.e.
+        # K_P = min(C_P, L·E_P) — the seller's month-end settlement.
+        for i, cp in enumerate(periods):
+            k_col, c_col, e_col, b_col = period_cols(i)
+            limit = cp.period.limit_kwh
+            idx = [c_col] + [grid_col(t) for t in cp.hours]
+            val = [1.0] + [-settled[t] for t in cp.hours]
+            h.addRow(
+                cp.period.cost_pln,
+                cp.period.cost_pln,
+                len(idx),
+                np.array(idx, dtype=np.int32),
+                np.array(val, dtype=np.float64),
+            )
+            idx = [e_col] + [grid_col(t) for t in cp.hours]
+            val = [1.0] + [-1.0] * len(cp.hours)
+            h.addRow(
+                cp.period.energy_kwh,
+                cp.period.energy_kwh,
+                len(idx),
+                np.array(idx, dtype=np.int32),
+                np.array(val, dtype=np.float64),
+            )
+            h.addRow(
+                0.0,
+                inf,
+                3,
+                np.array([k_col, c_col, b_col], dtype=np.int32),
+                np.array([1.0, -1.0, big_m[i]], dtype=np.float64),
+            )
+            h.addRow(
+                -big_m[i],
+                inf,
+                3,
+                np.array([k_col, e_col, b_col], dtype=np.int32),
+                np.array([1.0, -limit, -big_m[i]], dtype=np.float64),
+            )
 
         h.run()
         status = h.getModelStatus()
         if status != highspy.HighsModelStatus.kOptimal:
             raise RuntimeError(f"HiGHS did not find an optimal plan: {status}")
         sol = list(h.getSolution().col_value)
+
+        regimes: list[bool] = []
+        if periods:
+            # Polish: the big-M rows leave the settled cost slack of up to
+            # M × integrality tolerance, enough to scramble the micro-PLN
+            # tie-breaks. Pin every regime switch to the value it settled on
+            # and re-solve — with b fixed by bounds the settlement is exact.
+            for i in range(len(periods)):
+                b_col = period_cols(i)[3]
+                binds = sol[b_col] > 0.5
+                regimes.append(binds)
+                h.changeColBounds(b_col, 1.0 if binds else 0.0, 1.0 if binds else 0.0)
+            h.run()
+            status = h.getModelStatus()
+            if status != highspy.HighsModelStatus.kOptimal:
+                raise RuntimeError(
+                    f"HiGHS did not find an optimal plan (fixed cap regime): {status}"
+                )
+            sol = list(h.getSolution().col_value)
+
         charge = [
             sum(sol[seg_col(t, k)] for k in range(seg_n)) for t in range(n)
         ]
@@ -735,7 +1004,22 @@ class Optimizer:
         ]
         # d-columns are 0/1 switches; expand back to delivered energy.
         discharge = [discharge_cap[t] * sol[d0 + t] for t in range(n)]
-        return charge, discharge, stored
+        grid = [max(0.0, sol[grid_col(t)]) for t in range(n)]
+        tail_ev = [0.0] * n
+        for t in range(tail_start, n):
+            tail_ev[t] = max(0.0, sol[tail_ev_col(t)])
+        settled_periods: list[tuple[float, float, bool]] = []
+        for i in range(len(periods)):
+            _k_col, c_col, e_col, _b_col = period_cols(i)
+            settled_periods.append((sol[e_col], sol[c_col], regimes[i]))
+        return _LPSolution(
+            charge=charge,
+            discharge=discharge,
+            stored=stored,
+            grid=grid,
+            tail_ev=tail_ev,
+            periods=settled_periods,
+        )
 
     # ------------------------------------------------------------------
     # Replay the LP solution into Decisions + cost reporting
@@ -757,6 +1041,7 @@ class Optimizer:
         reminders: list[str] | None = None,
         stored: list[float] | None = None,
         fracs: list[float] | None = None,
+        cap_price: list[float] | None = None,
     ) -> Plan:
         cfg = self.config
         ceff = max(battery.charge_efficiency, _EPS)
@@ -931,6 +1216,8 @@ class Optimizer:
                 # the running hour — energies are for that window, powers (kW)
                 # are already normalised by it.
                 decision.trace["hour_fraction"] = round(fracs[t], 4)
+            if cap_price is not None:
+                decision.trace["cap_price"] = round(cap_price[t], 4)
 
             if t == 0 and reminders:
                 decision.reminders = list(reminders)

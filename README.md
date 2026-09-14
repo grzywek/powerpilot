@@ -153,6 +153,39 @@ set the SoC limit). It does not drive the charger itself.
 Charging always runs at the full charger power, so there is no separate
 power-setpoint entity — the automation just starts/stops the charger.
 
+## Monthly price cap (Tarcza)
+
+Some sellers cap the **monthly weighted-average** energy price (energy +
+handling fee, gross, excise and distribution excluded): at month end the bill
+per point of delivery is `min(cost, limit × kWh)`. That is a settlement over
+the whole month, not an hourly cap — and while it binds, every further kWh
+costs the limit whatever the hour, so battery arbitrage on the energy price
+stops paying and only distribution differences matter.
+
+PowerPilot models it end to end (options → *Tarcza*):
+
+- the month-to-date import of PPE 1 is read from the configured grid-import
+  meters (summed; an hour missing from any of them is unknown, never zero) and
+  priced at the excise-free cap price kept in the price archive;
+- the optimizer settles each month it touches as `min(C, limit × E)` and plans
+  the battery under that regime, pricing the rest of the month from the weekly
+  consumption profile, the archive's price estimate and the learned EV driving
+  profile;
+- when the cap cannot be modelled (incomplete month data, unpriced tail hours,
+  no EV driving profile yet) the plan says why and the battery is planned
+  without it — no substitute data.
+
+| Entity | Meaning |
+|--------|---------|
+| `sensor.…_tarcza_ppe1_energy` | observed import since the month started (kWh) |
+| `sensor.…_tarcza_ppe1_average` | observed weighted average so far (PLN/kWh, pre-cap) |
+| `sensor.…_tarcza_ppe1_forecast_average` | forecast month-end average (observed + plan + tail) |
+| `sensor.…_tarcza_ppe1_discount` | forecast discount the cap yields this month (PLN) |
+| `binary_sensor.…_tarcza_ppe1_cap_binds` | the plan expects the cap to bind this month |
+
+All five carry the full settlement record (hours covered, gaps, reasons) as
+attributes.
+
 ## Status
 
 Implemented: **Stage 0** (foundation — models, battery cost-after-losses, module

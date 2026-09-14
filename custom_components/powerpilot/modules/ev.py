@@ -536,15 +536,32 @@ class EVModule(PowerPilotModule):
         ``skip`` = hour starts left out of the sum — hours a calendar trip
         already forecasts, which must not be counted a second time.
         """
+        start = _hour_floor(dt_util.now())
+        return self.predicted_drain_between(
+            start, start + timedelta(hours=hours), skip=skip
+        )
+
+    def predicted_drain_between(
+        self,
+        start: datetime,
+        end: datetime,
+        skip: set[datetime] | frozenset[datetime] = frozenset(),
+    ) -> float | None:
+        """Expected driving drain (kWh) over the hours ``[start, end)``.
+
+        ``None`` until the profile has observed at least one day — an unknown
+        drain must not read as zero driving. ``skip`` as in
+        :meth:`predicted_drain_kwh`.
+        """
         if self._drain_profile.observed_days == 0:
             return None
-        start = _hour_floor(dt_util.now())
         total = 0.0
-        for i in range(hours):
-            hour = start + timedelta(hours=i)
-            if hour in skip:
-                continue
-            total += self._drain_profile.value(hour.weekday(), hour.hour) or 0.0
+        hour = start
+        while hour < end:
+            if hour not in skip:
+                local = dt_util.as_local(hour)
+                total += self._drain_profile.value(local.weekday(), local.hour) or 0.0
+            hour += timedelta(hours=1)
         return total
 
     def _routine_target(

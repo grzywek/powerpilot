@@ -8,7 +8,7 @@ price information in the system allows".
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from homeassistant.util import dt as dt_util
 
@@ -39,6 +39,21 @@ class ForecastBuilder:
         self._registry.contribute_all(forecast)
 
         return self._trim_to_prices(forecast)
+
+    def build_tail(self, start: datetime, end: datetime) -> Forecast:
+        """Accounting-only slots for ``[start, end)``, every module contributing.
+
+        Used for the part of a billing month that lies past the planning
+        horizon: the monthly price cap depends on those hours too. Unlike
+        :meth:`build` the result is NOT trimmed — an unpriced tail hour is a
+        gap the caller must report, not silently drop.
+        """
+        hours = max(0, int((end - start).total_seconds() // 3600))
+        slots = [HourSlot(start=start + timedelta(hours=i)) for i in range(hours)]
+        forecast = Forecast(slots=slots)
+        if slots:
+            self._registry.contribute_all(forecast)
+        return forecast
 
     @staticmethod
     def _trim_to_prices(forecast: Forecast) -> Forecast:

@@ -98,7 +98,8 @@
           "ev": "🚗 Samochód elektryczny",
           "tariff_list": "🧾 Taryfy dystrybucyjne",
           "reset_data": "🧹 Wyczyść dane i cache (zachowaj konfigurację)",
-          "finish": "✅ Zapisz i zakończ"
+          "finish": "✅ Zapisz i zakończ",
+          "billing": "🛡️ Tarcza (limit ceny miesięcznej)"
         }
       },
       "reset_data": {
@@ -249,6 +250,17 @@
           "valid_from": "Obowiązuje od (opcjonalnie)",
           "valid_to": "Obowiązuje do (opcjonalnie)"
         }
+      },
+      "billing": {
+        "title": "PowerPilot – Tarcza (limit ceny miesięcznej)",
+        "description": "Sprzedawca ogranicza ŚREDNIĄ MIESIĘCZNĄ cenę energii (energia + obsługa, brutto, bez akcyzy i dystrybucji) do limitu: na koniec miesiąca płacisz min(koszt, limit × kWh) na każdym punkcie poboru. Planer liczy to rozliczenie od początku miesiąca (z liczników niżej i archiwum cen), dolicza plan oraz szacowany ogon miesiąca i planuje baterię pod wynik. Gdy limit wiąże, każda kolejna kWh kosztuje limit niezależnie od godziny.",
+        "data": {
+          "tarcza_enabled": "Włącz rozliczenie Tarczy w planerze",
+          "tarcza_limit_kwh": "Limit ceny (PLN/kWh brutto, energia + obsługa)",
+          "tarcza_valid_from": "Obowiązuje od",
+          "tarcza_valid_to": "Obowiązuje do",
+          "ppe1_import_sensors": "Liczniki importu PPE 1 (kWh, sumowane — np. Victron AC-in do AC-out, AC-in do falownika, licznik ładowarki EV)"
+        }
       }
     },
     "error": {
@@ -301,6 +313,18 @@
       },
       "ev_charge_minutes": {
         "name": "🚗 EV minuty ładowania w godzinie"
+      },
+      "tarcza_ppe1_energy": {
+        "name": "🛡️ Tarcza PPE 1: import od początku miesiąca"
+      },
+      "tarcza_ppe1_average": {
+        "name": "🛡️ Tarcza PPE 1: średnia cena dotychczas"
+      },
+      "tarcza_ppe1_forecast_average": {
+        "name": "🛡️ Tarcza PPE 1: prognoza średniej na koniec miesiąca"
+      },
+      "tarcza_ppe1_discount": {
+        "name": "🛡️ Tarcza PPE 1: prognozowany rabat"
       }
     },
     "binary_sensor": {
@@ -309,6 +333,9 @@
       },
       "ev_connect_charger": {
         "name": "🚗 EV podłącz ładowarkę"
+      },
+      "tarcza_ppe1_cap_binds": {
+        "name": "🛡️ Tarcza PPE 1: limit wiąże"
       },
       "plan_not_executed": {
         "name": "⚠️ Plan nie jest wykonywany"

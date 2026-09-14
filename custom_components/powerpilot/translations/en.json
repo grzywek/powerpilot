@@ -98,7 +98,8 @@
           "ev": "🚗 EV",
           "tariff_list": "🧾 Distribution tariffs",
           "reset_data": "🧹 Clear data & cache (keep config)",
-          "finish": "✅ Save & exit"
+          "finish": "✅ Save & exit",
+          "billing": "🛡️ Price cap (Tarcza)"
         }
       },
       "reset_data": {
@@ -249,6 +250,17 @@
           "valid_from": "Valid from (optional)",
           "valid_to": "Valid to (optional)"
         }
+      },
+      "billing": {
+        "title": "PowerPilot – price cap (Tarcza)",
+        "description": "The seller caps the MONTHLY weighted-average energy price (energy + handling fee, gross, excise and distribution excluded): at month end you pay min(cost, limit × kWh) per point of delivery. The planner settles that from the month's start (meters below + the price archive), adds the plan and the estimated tail of the month, and plans the battery under the result. While the cap binds, every further kWh costs the limit whatever the hour.",
+        "data": {
+          "tarcza_enabled": "Model the price cap in the planner",
+          "tarcza_limit_kwh": "Price limit (PLN/kWh gross, energy + handling)",
+          "tarcza_valid_from": "Valid from",
+          "tarcza_valid_to": "Valid to",
+          "ppe1_import_sensors": "PPE 1 grid-import meters (kWh, summed — e.g. inverter AC-in to AC-out, AC-in to inverter, EV charger meter)"
+        }
       }
     },
     "error": {
@@ -301,6 +313,18 @@
       },
       "ev_charge_minutes": {
         "name": "EV charging minutes this hour"
+      },
+      "tarcza_ppe1_energy": {
+        "name": "🛡️ Price cap PPE 1: import this month"
+      },
+      "tarcza_ppe1_average": {
+        "name": "🛡️ Price cap PPE 1: average price so far"
+      },
+      "tarcza_ppe1_forecast_average": {
+        "name": "🛡️ Price cap PPE 1: forecast month average"
+      },
+      "tarcza_ppe1_discount": {
+        "name": "🛡️ Price cap PPE 1: forecast discount"
       }
     },
     "binary_sensor": {
@@ -309,6 +333,9 @@
       },
       "ev_connect_charger": {
         "name": "EV connect charger"
+      },
+      "tarcza_ppe1_cap_binds": {
+        "name": "🛡️ Price cap PPE 1: cap binds"
       },
       "plan_not_executed": {
         "name": "⚠️ Plan not executed"

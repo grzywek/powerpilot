@@ -28,6 +28,12 @@ class HourSlot:
     # published binding prices (typically D+1), otherwise the value is a forecast.
     buy_price: float | None = None
     price_confirmed: bool = False
+    # Energy-side gross price WITHOUT excise — ``(tge + markup) × (1 + VAT)``.
+    # This is the price the seller's monthly cap ("Tarcza") is settled on
+    # (energy + handling fee only; akcyza and distribution are billed outside
+    # it). ``None`` when the components are unknown (sensor price source), in
+    # which case no cap can be computed for the hour.
+    cap_price_kwh: float | None = None
 
     # Distribution tariff price for this hour (PLN/kWh). ``None`` means no tariff
     # has been resolved yet — modules and the optimizer should treat this as a
@@ -169,6 +175,128 @@ class ESSRequest:
     forced_hours: set[datetime] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class BillingPeriod:
+    """One point of delivery's month-to-date position under a monthly price cap.
+
+    The seller settles the cap over the WHOLE month: at month end the energy
+    bill is ``min(cost, limit × energy)``. ``energy_kwh`` / ``cost_pln`` are the
+    observed part (completed hours plus the elapsed part of the running hour);
+    the optimizer adds its planned import on top.
+
+    A period is only trustworthy when every hour since the month started is
+    covered by both an import reading and a cap price. Missing hours are
+    unknown, never zero — ``complete`` is False and the reasons are listed.
+    """
+
+    ppe: str
+    month_start: datetime  # first hour of the month (local, tz-aware)
+    month_end: datetime  # first hour of the next month (exclusive)
+    limit_kwh: float  # PLN/kWh gross the monthly average is capped at
+    energy_kwh: float = 0.0
+    cost_pln: float = 0.0
+    hours_expected: int = 0
+    hours_covered: int = 0
+    missing: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return self.hours_covered >= self.hours_expected and not self.missing
+
+    @property
+    def average_kwh(self) -> float | None:
+        """Observed weighted-average price so far, ``None`` without import."""
+        if self.energy_kwh <= 0:
+            return None
+        return self.cost_pln / self.energy_kwh
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "ppe": self.ppe,
+            "month_start": self.month_start.isoformat(),
+            "month_end": self.month_end.isoformat(),
+            "limit_kwh": self.limit_kwh,
+            "energy_kwh": round(self.energy_kwh, 3),
+            "cost_pln": round(self.cost_pln, 4),
+            "average_kwh": (
+                round(self.average_kwh, 4) if self.average_kwh is not None else None
+            ),
+            "hours_expected": self.hours_expected,
+            "hours_covered": self.hours_covered,
+            "complete": self.complete,
+            "missing": list(self.missing),
+        }
+
+
+@dataclass
+class BillingOutcome:
+    """The optimizer's month forecast for one :class:`BillingPeriod`.
+
+    Observed month-to-date import plus the import the plan schedules inside the
+    horizon plus the estimated import of the month's tail beyond it. The cap
+    regime (``cap_binds``) is what the optimizer planned the battery under.
+    """
+
+    period: BillingPeriod
+    energy_kwh: float
+    cost_pln: float  # pre-cap energy cost over the whole month
+    # ``None`` when the cap could not be modelled (see ``unavailable_reason``):
+    # the numbers above then cover only what is known and the battery was
+    # planned without the cap.
+    cap_binds: bool | None
+    settled_cost_pln: float  # min(cost, limit × energy)
+    planned_energy_kwh: float  # scheduled inside the planning horizon
+    tail_energy_kwh: float  # estimated beyond the horizon
+    unavailable_reason: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.cap_binds is not None
+
+    @property
+    def discount_pln(self) -> float:
+        return max(0.0, self.cost_pln - self.settled_cost_pln)
+
+    @property
+    def average_kwh(self) -> float | None:
+        if self.energy_kwh <= 0:
+            return None
+        return self.cost_pln / self.energy_kwh
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "period": self.period.as_dict(),
+            "energy_kwh": round(self.energy_kwh, 3),
+            "cost_pln": round(self.cost_pln, 4),
+            "average_kwh": (
+                round(self.average_kwh, 4) if self.average_kwh is not None else None
+            ),
+            "cap_binds": self.cap_binds,
+            "available": self.available,
+            "unavailable_reason": self.unavailable_reason,
+            "settled_cost_pln": round(self.settled_cost_pln, 4),
+            "discount_pln": round(self.discount_pln, 4),
+            "planned_energy_kwh": round(self.planned_energy_kwh, 3),
+            "tail_energy_kwh": round(self.tail_energy_kwh, 3),
+        }
+
+
+@dataclass
+class MonthTail:
+    """Accounting-only hours past the planning horizon, to the billing month's end.
+
+    The monthly cap depends on the whole month, so the optimizer prices the
+    battery against these estimated hours too — but reports decisions only for
+    the planning horizon. ``ev_grid_kwh`` is the expected EV import over the
+    tail (from the learned driving profile); the LP places it in the cheapest
+    tail hours, bounded per hour by ``ev_charger_kw``.
+    """
+
+    slots: list[HourSlot] = field(default_factory=list)
+    ev_grid_kwh: float = 0.0
+    ev_charger_kw: float = 0.0
+
+
 @dataclass
 class Forecast:
     """Ordered hourly horizon shared across the pipeline."""
@@ -189,6 +317,9 @@ class Plan:
     forecast: Forecast
     decisions: list[Decision] = field(default_factory=list)
     created_at: datetime | None = None
+    # Month forecasts under the seller's price cap, one per billing period the
+    # plan touches (empty when no cap is configured / active).
+    billing: list[BillingOutcome] = field(default_factory=list)
 
     @property
     def current(self) -> Decision | None:
@@ -212,11 +343,13 @@ class Plan:
         return {
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "total_cost": round(self.total_cost, 4),
+            "billing": [b.as_dict() for b in self.billing],
             "hours": [d.as_dict() for d in self.decisions],
             "forecast": [
                 {
                     "start": s.start.isoformat(),
                     "buy_price": s.buy_price,
+                    "cap_price_kwh": s.cap_price_kwh,
                     "distribution_price_kwh": s.distribution_price_kwh,
                     "total_price_kwh": s.total_price_kwh,
                     "price_confirmed": s.price_confirmed,

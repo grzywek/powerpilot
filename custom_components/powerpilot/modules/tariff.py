@@ -41,6 +41,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import (
+    CONF_TARCZA_ENABLED,
     CONF_TARIFFS,
     DOMAIN,
     STORAGE_VERSION_TARIFF_SNAPSHOTS,
@@ -58,6 +59,13 @@ _FUTURE_DAYS_TO_PREFETCH = 7
 
 _WORKDAY_DOMAIN = "workday"
 _CHECK_DATE_SERVICE = "check_date"
+
+
+def _next_month_start(day: date) -> date:
+    """First day of the month after the one containing ``day``."""
+    if day.month == 12:
+        return date(day.year + 1, 1, 1)
+    return date(day.year, day.month + 1, 1)
 
 
 class TariffModule(PowerPilotModule):
@@ -149,10 +157,25 @@ class TariffModule(PowerPilotModule):
             },
         )
 
+    def _prefetch_days(self, today: date) -> int:
+        """How many future days to classify.
+
+        The planning horizon by default; with the monthly price cap enabled the
+        optimizer also prices the tail of the billing month (and of the next
+        month when the horizon crosses into it), so every day up to that
+        month's end needs its peak/off-peak classification too.
+        """
+        days = _FUTURE_DAYS_TO_PREFETCH
+        if self.config.get(CONF_TARCZA_ENABLED):
+            horizon_end = today + timedelta(days=_FUTURE_DAYS_TO_PREFETCH)
+            days = max(days, (_next_month_start(horizon_end) - today).days)
+        return days
+
     async def _prefetch_future_days(self, today: date) -> None:
         """Call ``workday.check_date`` for every (sensor, future_date) pair."""
+        prefetch_days = self._prefetch_days(today)
         needed: set[tuple[str, date]] = set()
-        for offset in range(1, _FUTURE_DAYS_TO_PREFETCH + 1):
+        for offset in range(1, prefetch_days + 1):
             day = today + timedelta(days=offset)
             tariff = tariff_for_day(self._tariffs, day)
             if tariff is None:
@@ -162,7 +185,7 @@ class TariffModule(PowerPilotModule):
                     needed.add((period.day_sensor, day))
 
         # Drop stale cache entries.
-        valid_dates = {today + timedelta(days=d) for d in range(1, _FUTURE_DAYS_TO_PREFETCH + 1)}
+        valid_dates = {today + timedelta(days=d) for d in range(1, prefetch_days + 1)}
         self._future_day_cache = {
             k: v for k, v in self._future_day_cache.items() if k[1] in valid_dates
         }

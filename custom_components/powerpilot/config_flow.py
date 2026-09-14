@@ -58,6 +58,7 @@ from .const import (
     CONF_MAX_SOC,
     CONF_MIN_SOC,
     CONF_PHASES,
+    CONF_PPE1_IMPORT_SENSORS,
     CONF_EXCISE_KWH,
     CONF_PRADCAST_API_KEY,
     CONF_PRICE_MARKUP,
@@ -67,6 +68,10 @@ from .const import (
     CONF_PRICE_VAT,
     CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
+    CONF_TARCZA_ENABLED,
+    CONF_TARCZA_LIMIT_KWH,
+    CONF_TARCZA_VALID_FROM,
+    CONF_TARCZA_VALID_TO,
     CONF_TARIFFS,
     CONF_TRAVEL_MARGIN_AFTER_MIN,
     CONF_TRAVEL_MARGIN_BEFORE_MIN,
@@ -202,6 +207,36 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
                     domain=["device_tracker", "person", "binary_sensor"],
                     multiple=True,
                 )
+            ),
+        }
+    )
+
+
+def _billing_schema(data: dict[str, Any]) -> vol.Schema:
+    """Monthly price cap (Tarcza) + the meters that make up PPE 1's import."""
+
+    def d(key):
+        return data.get(key, DEFAULTS.get(key))
+
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_TARCZA_ENABLED, default=bool(d(CONF_TARCZA_ENABLED))
+            ): selector.BooleanSelector(),
+            vol.Optional(CONF_TARCZA_LIMIT_KWH, default=d(CONF_TARCZA_LIMIT_KWH)): _NUMBER(
+                _NUM(min=0, max=5, step=0.01, unit_of_measurement="PLN/kWh brutto", mode="box")
+            ),
+            vol.Optional(
+                CONF_TARCZA_VALID_FROM, default=d(CONF_TARCZA_VALID_FROM)
+            ): selector.DateSelector(),
+            vol.Optional(
+                CONF_TARCZA_VALID_TO, default=d(CONF_TARCZA_VALID_TO)
+            ): selector.DateSelector(),
+            vol.Optional(
+                CONF_PPE1_IMPORT_SENSORS,
+                default=list(d(CONF_PPE1_IMPORT_SENSORS) or []),
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", multiple=True)
             ),
         }
     )
@@ -537,6 +572,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 "calendars",
                 "ev",
                 "tariff_list",
+                "billing",
                 "reset_data",
                 "finish",
             ],
@@ -685,6 +721,13 @@ class PowerPilotOptionsFlow(OptionsFlow):
             self._data.update(user_input)
             return await self.async_step_init()
         return self.async_show_form(step_id="prices", data_schema=_price_schema(self._data))
+
+    async def async_step_billing(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        self._ensure_loaded()
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_init()
+        return self.async_show_form(step_id="billing", data_schema=_billing_schema(self._data))
 
     async def async_step_calendars(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._ensure_loaded()

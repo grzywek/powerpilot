@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Final
 
 from homeassistant.components import persistent_notification
@@ -43,18 +44,18 @@ from .const import (
     CONF_EV_PRESENCE_ENTITIES,
     CONF_GRID_VOLTAGE,
     CONF_INVERTER_MAX_CHARGE_KW,
-    CONF_MIN_CHARGE_POWER_KW,
     CONF_INVERTER_MAX_DISCHARGE_KW,
     CONF_MAIN_FUSE_A,
     CONF_MAX_SOC,
+    CONF_MIN_CHARGE_POWER_KW,
     CONF_MIN_SOC,
     CONF_PHASES,
     CONF_SOC_SENSOR,
     DEFAULTS,
     DOMAIN,
-    InverterMode,
     MODE_CODE,
     MODE_CODE_INV,
+    PPE_1,
     PRICE_ROUNDING_PER_BUCKET,
     PRICE_TYPE_CERTAIN,
     PRICE_TYPE_ESTIMATED,
@@ -62,6 +63,7 @@ from .const import (
     PTYPE_CODE,
     PTYPE_CODE_INV,
     STORAGE_VERSION_SNAPSHOTS,
+    InverterMode,
 )
 from . import pricing
 from .execution import (
@@ -71,7 +73,16 @@ from .execution import (
     assess_execution,
 )
 from .forecast import ForecastBuilder
-from .models import Decision, ESSRequest, Plan, tariff_for_day
+from .models import (
+    BillingOutcome,
+    BillingPeriod,
+    Decision,
+    ESSRequest,
+    MonthTail,
+    Plan,
+    tariff_for_day,
+)
+from .modules.billing import BillingModule, month_bounds
 from .modules.calendar import CALENDAR_LOOKAHEAD_HOURS
 from .modules.ev import CHARGING_STATES, HOME_STATES, PLUGGED_STATES
 from .modules.snapshots import SnapshotStore
@@ -147,6 +158,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # with its cause.
         self._pending_triggers: list[str] = []
         self._trigger_roles: dict[str, str] = {}
+        # Last reason the monthly price cap could not be modelled — logged once
+        # per distinct reason instead of on every refresh.
+        self._billing_unavailable_logged: str | None = None
 
         super().__init__(
             hass,
@@ -165,6 +179,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.climate = ClimateModule(hass, self)
         self.ev = EVModule(hass, self)
         self.calendar = CalendarModule(hass, self)
+        # Month-to-date settlement under the seller's price cap. Reads the
+        # recorder through the consumption module's kWh readers and the price
+        # archive through the prices module — injected, not reached for.
+        self.billing = BillingModule(hass, self, self.consumption, self.prices)
 
         # Order matters: prices/weather first, then derived loads, then the
         # calendar (events + trips), then EV — which consumes the calendar's
@@ -178,6 +196,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             self.loads,
             self.calendar,
             self.ev,
+            self.billing,
         ):
             self.registry.register(module)
 
@@ -576,9 +595,27 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             targets=list(self.calendar.ess_targets),
             forced_hours=set(self.calendar.ess_forced_hours),
         )
-        plan = optimizer.optimize(
-            forecast, battery, ev_request, reminders, ess_request=ess_request
+        # Monthly price cap: the periods the plan touches plus the estimated
+        # tail of the month, or the reason the cap cannot be modelled yet.
+        billing_periods, tail, billing_reason = await self._billing_inputs(
+            forecast, ev_request
         )
+        plan = await self.hass.async_add_executor_job(
+            partial(
+                optimizer.optimize,
+                forecast,
+                battery,
+                ev_request,
+                reminders,
+                ess_request=ess_request,
+                billing=billing_periods,
+                tail=tail,
+            )
+        )
+        if billing_reason is not None:
+            plan.billing = self._unavailable_outcomes(billing_reason)
+        elif billing_periods:
+            self._billing_unavailable_logged = None
 
         current = self.current_decision(plan)
         if current is not None:
@@ -587,6 +624,135 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         await self._maybe_record_snapshot(forecast, plan, trigger)
         self._record_event(plan)
         return plan
+
+    # ------------------------------------------------------------------
+    # Monthly price cap ("Tarcza")
+    # ------------------------------------------------------------------
+    async def _billing_inputs(
+        self, forecast, ev_request
+    ) -> tuple[list[BillingPeriod] | None, MonthTail | None, str | None]:
+        """Cap periods + month tail for the optimizer, or why they are unavailable.
+
+        Returns ``(periods, tail, reason)``. With ``periods`` the optimizer
+        settles each month as ``min(cost, limit × energy)`` and plans the
+        battery under that regime; with ``reason`` the cap cannot be modelled
+        (incomplete month-to-date data, unpriced tail hours, no EV driving
+        profile) and the battery is planned WITHOUT it — the plan says so, no
+        substitute data is used. ``(None, None, None)`` means no cap applies
+        to the horizon at all.
+        """
+        if not self.billing.enabled or not forecast.slots:
+            return None, None, None
+        first = forecast.slots[0].start
+        last = forecast.slots[-1].start
+        in_horizon = self.billing.active_on(
+            dt_util.as_local(first).date()
+        ) or self.billing.active_on(dt_util.as_local(last).date())
+        observed = self.billing.periods.get(PPE_1)
+        if observed is None:
+            if not in_horizon:
+                return None, None, None
+            return None, None, "; ".join(self.billing.reasons) or "brak rozliczenia PPE 1"
+        if not observed.complete:
+            return (
+                None,
+                None,
+                f"niekompletne dane od początku miesiąca "
+                f"({observed.hours_covered}/{observed.hours_expected} h): "
+                + "; ".join(observed.missing),
+            )
+        periods = self.billing.periods_touching(PPE_1, first, last)
+        if not periods:
+            return None, None, None
+        uncapped = [slot for slot in forecast.slots if slot.cap_price_kwh is None]
+        if uncapped:
+            return (
+                None,
+                None,
+                f"brak ceny pod Tarczę dla {len(uncapped)} h horyzontu (od "
+                f"{dt_util.as_local(uncapped[0].start).strftime('%d.%m %H:%M')}) — "
+                "źródło cen nie podaje składników ceny",
+            )
+
+        tail_start = last + timedelta(hours=1)
+        tail_end = periods[-1].month_end
+        tail_slots = []
+        if tail_end > tail_start:
+            tail_forecast = await self.hass.async_add_executor_job(
+                self.forecast_builder.build_tail, tail_start, tail_end
+            )
+            tail_slots = tail_forecast.slots
+        unpriced = [
+            slot
+            for slot in tail_slots
+            if slot.buy_price is None or slot.cap_price_kwh is None
+        ]
+        if unpriced:
+            return (
+                None,
+                None,
+                f"brak estymaty cen dla {len(unpriced)} z {len(tail_slots)} h "
+                f"ogona miesiąca (od "
+                f"{dt_util.as_local(unpriced[0].start).strftime('%d.%m %H:%M')}) — "
+                "za krótka historia cen w archiwum",
+            )
+
+        ev_grid = 0.0
+        charger_kw = 0.0
+        if self.ev.enabled and tail_slots:
+            drain = self.ev.predicted_drain_between(tail_start, tail_end)
+            if drain is None:
+                return (
+                    None,
+                    None,
+                    "brak wyuczonego profilu jazdy EV — nie da się oszacować "
+                    "ładowania auta w ogonie miesiąca",
+                )
+            efficiency = ev_request.charge_efficiency if ev_request is not None else 1.0
+            ev_grid = drain / max(efficiency, 0.01)
+            charger_kw = ev_request.charger_power_kw if ev_request is not None else 0.0
+        return (
+            periods,
+            MonthTail(slots=tail_slots, ev_grid_kwh=ev_grid, ev_charger_kw=charger_kw),
+            None,
+        )
+
+    def _unavailable_outcomes(self, reason: str) -> list[BillingOutcome]:
+        """Observed-only outcome for a month whose cap could not be modelled."""
+        observed = self.billing.periods.get(PPE_1)
+        if observed is None:
+            month_start, _ = month_bounds(dt_util.now())
+            observed = self.billing.empty_period(PPE_1, month_start)
+        if reason != self._billing_unavailable_logged:
+            self.log_warning(
+                "billing",
+                f"Tarcza: rozliczenie niedostępne — {reason}. "
+                "Bateria planowana bez limitu miesięcznego.",
+                extra={"reason": reason},
+            )
+            self._billing_unavailable_logged = reason
+        return [
+            BillingOutcome(
+                period=observed,
+                energy_kwh=observed.energy_kwh,
+                cost_pln=observed.cost_pln,
+                cap_binds=None,
+                settled_cost_pln=min(
+                    observed.cost_pln, observed.limit_kwh * observed.energy_kwh
+                ),
+                planned_energy_kwh=0.0,
+                tail_energy_kwh=0.0,
+                unavailable_reason=reason,
+            )
+        ]
+
+    def billing_status(self) -> dict:
+        """Configuration, observed periods and the plan's month forecasts."""
+        status = self.billing.status()
+        status["outcomes"] = [
+            outcome.as_dict() for outcome in (self.data.billing if self.data else [])
+        ]
+        return status
 
     # ------------------------------------------------------------------
     # Optimizer snapshots ("Symulacje" tab)

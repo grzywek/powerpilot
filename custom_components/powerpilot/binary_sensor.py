@@ -14,10 +14,11 @@ from .const import (
     BINARY_EV_CHARGE,
     BINARY_EV_CONNECT_CHARGER,
     BINARY_PLAN_NOT_EXECUTED,
+    BINARY_TARCZA_PPE1_CAP_BINDS,
     DOMAIN,
 )
 from .coordinator import PowerPilotCoordinator
-from .sensor import PowerPilotEntity
+from .sensor import PowerPilotEntity, TarczaEntity
 
 
 async def async_setup_entry(
@@ -28,6 +29,7 @@ async def async_setup_entry(
         [
             EVChargeBinarySensor(coordinator, entry),
             EVConnectChargerBinarySensor(coordinator, entry),
+            TarczaCapBindsBinarySensor(coordinator, entry),
             PlanNotExecutedBinarySensor(coordinator, entry),
         ]
     )
@@ -95,3 +97,29 @@ class EVConnectChargerBinarySensor(PowerPilotEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         return self.coordinator.ev_control().get("connect_charger")
+
+
+class TarczaCapBindsBinarySensor(TarczaEntity, BinarySensorEntity):
+    """ON when the plan expects PPE 1's monthly average to hit the price cap.
+
+    While it is ON every further kWh this month costs the limit whatever the
+    hour's price, so the battery is planned on distribution differences only.
+    ``unknown`` while the cap cannot be modelled (see the attributes).
+    """
+
+    _attr_translation_key = BINARY_TARCZA_PPE1_CAP_BINDS
+    _attr_icon = "mdi:shield-check"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, BINARY_TARCZA_PPE1_CAP_BINDS)
+
+    @property
+    def is_on(self) -> bool | None:
+        outcome = self.outcome
+        if outcome is None:
+            return None
+        return outcome.cap_binds
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self._forecast_attributes()

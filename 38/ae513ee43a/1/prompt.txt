@@ -1,0 +1,8 @@
+@"/Users/dawid/Downloads/powerpilot-debug-2026-09-14-20-50-05.json"
+nie wiem co się właśnie wydarzyło, ale powerpilot pozwolił na wyładowanie ESS do zera, co mi odcięło zasilanie wszędzie. nie możemy dopuszczać do takiej sytuacji. 
+
+jeśli soc spadnie poniżej minimalnego, powinno go doładować o 2-3% powyżej minimalnego.
+
+na wykresie widać, że ess soc miało być doładowane, a w rzeczywistości się nie doładowało i dalej spadało, aż około 17:15 osiągnęło 0%.
+
+dziwna sytuacja. z drugiej strony od 18 niby było tryb falownika charge, a się nie ładowało..

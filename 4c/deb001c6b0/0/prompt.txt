@@ -1,0 +1,12 @@
+no zrób ten rebase xd
+
+---
+
+1. nie wiem czemu powerpilot_ev_limit_ladowania_soc pokazuje ciągle takie samo, bez zmian
+2. nie wiem co oznaczają te sensory np. minuty ładowania. w tej godzinie co teraz czy tej za 4 dni? jeśli w tej co teraz, czemu "podłącz ładowarkę" jest off
+
+---
+
+wg mnie ten docelowy soc w tym encja powerpilot_docelowy_soc_ev nie ma sensu. bo co by to oznaczało, że w każdej chwili auto powinno mieć taki soc..
+
+a ja w kalendarzu mu wyznaczam kiedy ma mieć jaki soc..

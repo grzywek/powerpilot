@@ -23,9 +23,12 @@ the calendar module — which the registry updates *before* this one):
   ``#<keyword>_socNN`` on a trip raises that target and is aimed at the
   DEPARTURE, not the event's start.
 
-With no tagged events the module falls back to topping the car up to the
-target SoC (from the target-SoC sensor, or :data:`DEFAULT_TARGET_SOC`) in the
-cheapest available hours — the original Stage-0 behaviour.
+Without keyword events the routine charge rides alongside the trip targets:
+once a drain profile is learned it is one more deadline target — ``min SoC +
+the next 24 h of profile drain`` by the end of that window, capped at the
+target SoC, with the hours calendar trips already forecast left out. Before
+any profile exists the car is topped up to the target SoC (from the target-SoC
+sensor, or :data:`DEFAULT_TARGET_SOC`) in the cheapest available hours.
 """
 
 from __future__ import annotations
@@ -533,16 +536,49 @@ class EVModule(PowerPilotModule):
         """Best capacity estimate (learned median, or legacy seed, or None)."""
         return self._capacity
 
-    def predicted_drain_kwh(self, hours: int = DRAIN_HORIZON_HOURS) -> float | None:
-        """Expected driving drain (kWh) over the next ``hours`` from the profile."""
+    def predicted_drain_kwh(
+        self,
+        hours: int = DRAIN_HORIZON_HOURS,
+        skip: set[datetime] | frozenset[datetime] = frozenset(),
+    ) -> float | None:
+        """Expected drain (kWh) over the next ``hours`` from the profile.
+
+        ``skip`` = hour starts left out of the sum — hours a calendar trip
+        already forecasts, which must not be counted a second time.
+        """
         if self._drain_profile.observed_days == 0:
             return None
-        now = dt_util.now()
+        start = _hour_floor(dt_util.now())
         total = 0.0
         for i in range(hours):
-            moment = now + timedelta(hours=i)
-            total += self._drain_profile.value(moment.weekday(), moment.hour) or 0.0
+            hour = start + timedelta(hours=i)
+            if hour in skip:
+                continue
+            total += self._drain_profile.value(hour.weekday(), hour.hour) or 0.0
         return total
+
+    def _routine_target(
+        self, predicted_kwh: float, target_soc: float, battery_kwh: float
+    ) -> EVChargeTarget | None:
+        """Routine charge as a deadline target at the end of the look-ahead.
+
+        Sized as a pack-level floor rather than a free-floating deficit, so the
+        allocator's pack walk credits energy already planned for trip targets
+        and the trip drain inside the window — and the energy lands before the
+        window closes instead of on any cheap hour of the week. Needs the live
+        SoC: the allocator skips percent targets without it.
+        """
+        if self._soc is None or battery_kwh <= 0:
+            return None
+        return EVChargeTarget(
+            deadline=_hour_floor(dt_util.now())
+            + timedelta(hours=DRAIN_HORIZON_HOURS),
+            target_soc=min(
+                self.min_soc + predicted_kwh / battery_kwh * 100.0, target_soc
+            ),
+            label=f"Rutynowe: profil zużycia {DRAIN_HORIZON_HOURS} h",
+            source="routine",
+        )
 
     async def _maybe_learn(self) -> None:
         """Re-derive capacity + driving consumption from history (once per day)."""
@@ -1082,25 +1118,27 @@ class EVModule(PowerPilotModule):
 
         # Explicit keyword plans take over routine sizing; automatic trip
         # targets do NOT — they are a floor on top of normal behaviour, so the
-        # routine top-up keeps running alongside them.
-        if self._targets or self._forced_hours:
-            required_kwh = 0.0
-        else:
+        # routine charge keeps running alongside them.
+        required_kwh = 0.0
+        routine_targets: list[EVChargeTarget] = []
+        if not (self._targets or self._forced_hours):
             target_soc = (
                 self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
             )
             current_soc = self._soc if self._soc is not None else target_soc
             current_energy = current_soc / 100.0 * battery_kwh
-            predicted = self.predicted_drain_kwh()
+            # Hours a calendar trip forecasts itself (away window, departure
+            # hour, drive legs): the trip's drain and target already cover them.
+            trip_hours = (
+                self._unavailable_hours
+                | set(self._partial_hours)
+                | set(self._trip_drain)
+            )
+            predicted = self.predicted_drain_kwh(skip=trip_hours)
             if predicted is not None and battery_kwh > 0:
-                # Charge to cover the next look-ahead of predicted driving plus
-                # the safety-reserve floor — never above the car's own target
-                # SoC. Learned consumption drives routine charging.
-                target_energy = min(
-                    predicted + self.min_soc / 100.0 * battery_kwh,
-                    target_soc / 100.0 * battery_kwh,
-                )
-                required_kwh = max(0.0, target_energy - current_energy)
+                routine = self._routine_target(predicted, target_soc, battery_kwh)
+                if routine is not None:
+                    routine_targets.append(routine)
             else:
                 # No drain profile yet → top up to the target SoC as before.
                 required_kwh = max(0.0, target_soc / 100.0 * battery_kwh - current_energy)
@@ -1116,7 +1154,7 @@ class EVModule(PowerPilotModule):
             available_hours=available_hours,
             hour_fraction=partial_hours,
             forced_hours=set(self._forced_hours),
-            targets=[*self._targets, *self._trip_targets],
+            targets=[*self._targets, *self._trip_targets, *routine_targets],
             drain_kwh=drain,
             min_soc=self.min_soc,
             charge_ceiling_soc=self._charge_ceiling_soc(),
@@ -1138,10 +1176,17 @@ class EVModule(PowerPilotModule):
         if not self.enabled:
             return []
         reminders: list[str] = []
+        current_soc = self._request.current_soc
         need = (
             self._request.required_kwh > 0
-            or bool(self._request.targets)
             or bool(self._request.forced_hours)
+            or any(
+                # The routine floor is always present once a profile exists; it
+                # only asks for the cable when the pack sits below it.
+                target.source != "routine"
+                or (current_soc is not None and target.target_soc > current_soc)
+                for target in self._request.targets
+            )
         )
         # "Plug in" only makes sense when the car is actually home and idle —
         # away from home there's nothing the user can do about it right now.

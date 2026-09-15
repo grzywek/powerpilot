@@ -198,3 +198,28 @@ def test_forced_hours_stop_at_the_ceiling_too() -> None:
     alloc = _optimizer()._plan_ev(_forecast([0.10] * 6), request)
 
     assert sum(alloc.added.values()) <= 20.0 + 1e-6
+
+
+def test_ceiling_trimmed_top_off_never_gets_a_negative_remainder() -> None:
+    """Regression (snapshot 2026-09-15): 5.3 kWh became a full 10 kWh hour.
+
+    ``pack_caps`` trims the pricier hours to what is left under the ceiling
+    (h2 → 4 kWh). With h2 as the top-off the variant builder topped up the
+    cheap h0 to its FULL headroom (10 kWh) although only 5 kWh were needed,
+    leaving −5 kWh "on" h2. The negative remainder made that variant the
+    cheapest on paper; the conversion then dropped the negative hour and kept
+    the full one — the car was planned twice the energy the target needed.
+    """
+    fc = _forecast([0.5, 0.6, 0.8])
+    request = EVRequest(
+        enabled=True,
+        charger_kw=10.0,
+        phases=1,
+        battery_kwh=100.0,
+        current_soc=20.0,
+        charge_ceiling_soc=44.0,
+        available_hours={_h(i) for i in range(3)},
+        targets=[EVChargeTarget(deadline=_h(3), target_soc=25.0)],
+    )
+    alloc = _optimizer()._plan_ev(fc, request)
+    assert {h: round(kwh, 6) for h, kwh in alloc.added.items()} == {_h(0): 5.0}

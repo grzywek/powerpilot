@@ -1019,10 +1019,11 @@ class Optimizer:
 
         1. **Forced windows** — bare ``"<keyword>"`` calendar events: charge full
            power in exactly those hours (user's explicit choice, not cost-driven).
-        2. **Deadline targets** — ``"<keyword> NN%"`` events: cost-optimal blocks
-           among available hours before the deadline (earliest deadline first).
-        3. **Default top-up** — no calendar: cost-optimal blocks for the deficit
-           to the target SoC.
+        2. **Deadline targets** — ``"<keyword> NN%"`` events, trip floors and the
+           routine drain-profile floor: cost-optimal blocks among available
+           hours before the deadline (earliest deadline first).
+        3. **Default top-up** — no keyword plan and no drain profile learned
+           yet: cost-optimal blocks for the deficit to the target SoC.
 
         Predicted trip drain (``EVRequest.drain_kwh``) is folded in on both
         sides: deadline targets buy extra to cover driving the car can still
@@ -1295,9 +1296,19 @@ class Optimizer:
                 covered = 0.0
                 i = 0
                 while deliverable - covered > cap_top + _EPS and i < len(by_price):
-                    fulls.append(by_price[i])
-                    covered += caps[by_price[i].start]
+                    s = by_price[i]
                     i += 1
+                    if deliverable - covered - caps[s.start] <= _EPS:
+                        # Filled whole, this hour would swallow the top-off's
+                        # remainder and push it to zero or below. A negative
+                        # remainder prices as a discount, wins the cost
+                        # comparison, and is then dropped on conversion — the
+                        # hour stays full and the car gets planned far more
+                        # than the target needs. The placement that tops off
+                        # on this hour is its own variant.
+                        continue
+                    fulls.append(s)
+                    covered += caps[s.start]
                 if deliverable - covered > cap_top + _EPS:
                     continue  # this top-off can't hold the remainder
                 p_top = slot_price(top_off)
@@ -1473,7 +1484,7 @@ class Optimizer:
             room_at_deadline = max(0.0, ceiling_kwh - before) if battery_kwh else None
             commit(select(target_kwh - before, candidates, room=room_at_deadline))
 
-        # 3. Default top-up (no calendar plan).
+        # 3. Default top-up (no keyword plan, no drain profile yet).
         if ev_request.required_kwh > _EPS:
             candidates = [
                 slot

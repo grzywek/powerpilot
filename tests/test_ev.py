@@ -1251,15 +1251,18 @@ def _flat_drain(per_hour: float) -> WeeklyAccumulator:
 
 
 def test_get_request_drain_based_topup() -> None:
-    # 60 kWh pack, at 20% (12 kWh), car target 80% (48 kWh), reserve 20% (12 kWh).
-    # Drain profile predicts 0.25 kWh/h → 6 kWh over the next 24 h.
-    # target_energy = min(6 + 12, 48) = 18 kWh; required = 18 - 12 = 6 kWh.
+    # 60 kWh pack, car target 80 %, reserve 20 %. Drain profile predicts
+    # 0.25 kWh/h → 6 kWh (10 %) over the next 24 h → a 30 % routine floor,
+    # sized by the allocator as a deadline target (no free-floating deficit).
     fc = _forecast([0.5] * 6)
     module = _module_with_state(
         soc=20.0, target_soc=80.0, drain_profile=_flat_drain(0.25)
     )
     req = module.get_request(fc)
-    assert round(req.required_kwh, 3) == 6.0
+    assert req.required_kwh == 0.0
+    assert [round(t.target_soc, 6) for t in req.targets if t.source == "routine"] == [
+        30.0
+    ]
 
 
 def test_get_request_passes_trip_targets_and_drain() -> None:
@@ -1706,3 +1709,94 @@ def test_partial_departure_hour_reaches_the_request() -> None:
     # The fraction survives for the hour that is still available, and is dropped
     # for the one no longer in the plan at all.
     assert req.hour_fraction == {depart_hour: 0.75}
+
+
+# ---------------------------------------------------------------------------
+# Routine top-up (learned drain profile) as a deadline target
+# ---------------------------------------------------------------------------
+
+
+def test_routine_topup_is_a_deadline_target_not_a_free_floating_deficit(
+    freezer,
+) -> None:
+    """The next 24 h of learned drain + reserve must be in the pack by the end
+    of that window — sized through the allocator's pack walk, so energy already
+    planned for other targets counts, and never placed days later."""
+    freezer.move_to(dt_util.now())
+    module = _module_with_state(
+        soc=20.0, target_soc=80.0, min_soc=10.0, drain_profile=_flat_drain(0.5)
+    )
+    req = module.get_request(_forecast([0.5] * 6))
+
+    assert req.required_kwh == 0.0
+    routine = [t for t in req.targets if t.source == "routine"]
+    assert len(routine) == 1
+    now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    assert routine[0].deadline == now_hour + timedelta(hours=24)
+    # reserve 10 % + 24 × 0.5 kWh = 12 kWh of 60 kWh = 20 %.
+    assert round(routine[0].target_soc, 6) == 30.0
+
+
+def test_routine_topup_skips_hours_the_calendar_already_covers(freezer) -> None:
+    """A calendar trip's hours are forecast by the trip itself (drain + its own
+    target); counting the profile's average for the same hours drove the car's
+    energy twice."""
+    freezer.move_to(dt_util.now())
+    now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    module = _module_with_state(
+        soc=20.0,
+        target_soc=80.0,
+        min_soc=10.0,
+        drain_profile=_flat_drain(0.5),
+        partial_hours={now_hour + timedelta(hours=1): 0.5},
+        unavailable_hours={now_hour + timedelta(hours=2), now_hour + timedelta(hours=3)},
+        trip_drain={now_hour + timedelta(hours=1): 4.0, now_hour + timedelta(hours=3): 4.0},
+    )
+    req = module.get_request(_forecast([0.5] * 6))
+    routine = [t for t in req.targets if t.source == "routine"]
+    # 21 uncovered hours × 0.5 kWh = 10.5 kWh = 17.5 % + reserve 10 %.
+    assert round(routine[0].target_soc, 6) == 27.5
+
+
+def test_routine_floor_asks_for_the_cable_only_below_it(freezer) -> None:
+    """The routine target exists whenever a profile is learned; the "plug in"
+    reminder must still fire only when the pack is below that floor."""
+    freezer.move_to(dt_util.now())
+    fc = _forecast([0.5] * 6)
+    covered = _module_with_state(
+        soc=40.0, target_soc=80.0, min_soc=10.0, home=True, plugged=False,
+        drain_profile=_flat_drain(0.5),
+    )
+    covered.get_request(fc)
+    assert not any("Podłącz" in r for r in covered.collect_reminders())
+
+    short = _module_with_state(
+        soc=20.0, target_soc=80.0, min_soc=10.0, home=True, plugged=False,
+        drain_profile=_flat_drain(0.5),
+    )
+    short.get_request(fc)
+    assert any("Podłącz" in r for r in short.collect_reminders())
+
+
+def test_routine_target_credits_energy_already_planned_for_a_trip() -> None:
+    """Trip target needs 12 kWh before h4; after the 10 kWh drive the pack still
+    holds 14 kWh ≥ the 12 kWh routine floor, so the routine buys nothing extra."""
+    fc = _forecast([0.5] * 8)
+    req = EVRequest(
+        enabled=True,
+        charger_kw=10.0,
+        battery_kwh=60.0,
+        current_soc=20.0,
+        available_hours={s.start for s in fc.slots},
+        drain_kwh={BASE + timedelta(hours=4): 10.0},
+        targets=[
+            EVChargeTarget(
+                deadline=BASE + timedelta(hours=4), target_soc=40.0, source="trip"
+            ),
+            EVChargeTarget(
+                deadline=BASE + timedelta(hours=8), target_soc=20.0, source="routine"
+            ),
+        ],
+    )
+    alloc = _optimizer()._plan_ev(fc, req)
+    assert round(sum(alloc.added.values()), 6) == 12.0

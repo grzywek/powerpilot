@@ -1,0 +1,14 @@
+@"/Users/dawid/Downloads/powerpilot-debug-2026-09-15-11-02-08.json"
+czemu chce mi ładować auto do 60% jutro skoro po ładowaniu dzisiaj ma być 45% a minimum na wokal to 38%?
+
+---
+
+"To zwykłe dobicie: prognoza jazdy na najbliższą dobę plus rezerwa." -> prognoza jazdy?
+
+---
+
+Ta sama jazda może być policzona dwa razy. -> nie no bez sensu XD
+
+---
+
+tak, zrób te zmiany, a potem commit & push

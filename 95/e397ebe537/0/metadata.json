@@ -1,0 +1,56 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "95e397ebe537",
+  "session_id": "ba41cdd6-7132-494a-886b-2939ae6eb027",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-15T12:14:38.786397Z",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "custom_components/powerpilot/modules/ev.py",
+    "custom_components/powerpilot/optimizer.py",
+    "tests/test_ev.py",
+    "tests/test_ev_pack_ceiling.py"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "a5045471c439",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 872,
+    "cache_creation_tokens": 141452,
+    "cache_read_tokens": 3920858,
+    "output_tokens": 52796,
+    "api_call_count": 31
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-15T12:14:38.729879Z",
+    "agent_lines": 0,
+    "agent_removed": 11,
+    "human_added": 0,
+    "human_modified": 309,
+    "human_removed": 122,
+    "total_committed": 280,
+    "total_lines_changed": 442,
+    "agent_percentage": 2.48868778280543,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 150,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84,
+        ".claude/settings.local.json": 11,
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 52
+      }
+    }
+  ]
+}

@@ -315,9 +315,6 @@
       }
     },
     "number": {
-      "ev_target_soc": {
-        "name": "EV target SoC"
-      },
       "ev_min_soc": {
         "name": "EV minimum SoC (reserve)"
       }

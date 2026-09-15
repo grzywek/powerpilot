@@ -283,7 +283,11 @@ class EVChargeUntilSensor(PowerPilotEntity, SensorEntity):
 
 
 class EVSocLimitSensor(PowerPilotEntity, SensorEntity):
-    """Target SoC (%) the car should charge to right now."""
+    """SoC (%) the car should stop charging at.
+
+    The soonest keyword calendar target, otherwise the SoC the plan's next
+    charging window ends at; ``None`` when no charging is planned.
+    """
 
     _attr_translation_key = SENSOR_EV_SOC_LIMIT
     _attr_native_unit_of_measurement = "%"

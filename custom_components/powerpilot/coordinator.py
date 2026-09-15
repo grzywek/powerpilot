@@ -2992,13 +2992,30 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         else:
             charge_until = None
 
+        # Where the car should stop: a keyword calendar target names it;
+        # otherwise it is the SoC the plan's next charging window (the running
+        # one while charging) ends at — so a charger switched off late still
+        # can't take the car past what the plan bought. Nothing planned → none.
+        soc_limit = ev.calendar_soc_limit()
+        if soc_limit is None and plan and charge_start is not None:
+            by_start = {d.start: d for d in plan.decisions}
+            end = by_start.get(
+                current.start if charging_now and current is not None else charge_start
+            )
+            while end is not None:
+                following = by_start.get(end.start + timedelta(hours=1))
+                if following is None or following.ev_charge_kwh <= 0:
+                    break
+                end = following
+            soc_limit = end.ev_soc if end is not None else None
+
         return {
             "enabled": True,
             "connect_charger": connect,
             "charging_now": charging_now,
             "charge_start": charge_start.isoformat() if charge_start else None,
             "charge_until": charge_until.isoformat() if charge_until else None,
-            "soc_limit": ev.soc_limit_now(),
+            "soc_limit": soc_limit,
             "soc": ev.soc,
             "charge_minutes": charge_minutes,
         }

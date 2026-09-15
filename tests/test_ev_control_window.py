@@ -25,16 +25,19 @@ class _EV:
     enabled = True
     soc = 74.0
 
-    def soc_limit_now(self) -> float:
-        return 95.0
+    def __init__(self, calendar_limit: float | None = None) -> None:
+        self._calendar_limit = calendar_limit
+
+    def calendar_soc_limit(self) -> float | None:
+        return self._calendar_limit
 
 
 class _Coordinator:
     """``ev_control`` only touches the plan, the EV module and the clock."""
 
-    def __init__(self, plan: Plan) -> None:
+    def __init__(self, plan: Plan, calendar_limit: float | None = None) -> None:
         self.data = plan
-        self.ev = _EV()
+        self.ev = _EV(calendar_limit)
 
     def current_decision(self, plan=None, moment=None):
         return (plan or self.data).decision_at(moment or dt_util.now())
@@ -43,8 +46,11 @@ class _Coordinator:
         return PowerPilotCoordinator.ev_control(self)
 
 
-def _plan(charging: dict[int, int], created_at) -> Plan:
-    """``charging`` maps hour offset → planned charging minutes."""
+def _plan(
+    charging: dict[int, int], created_at, socs: dict[int, float] | None = None
+) -> Plan:
+    """``charging`` maps hour offset → planned charging minutes; ``socs`` the
+    projected EV SoC at the end of each hour."""
     decisions = []
     for offset in range(6):
         decision = Decision(start=HOUR + timedelta(hours=offset))
@@ -52,6 +58,8 @@ def _plan(charging: dict[int, int], created_at) -> Plan:
             decision.ev_charge = True
             decision.ev_charge_kwh = 1.0
             decision.ev_charge_minutes = charging[offset]
+        if socs and offset in socs:
+            decision.ev_soc = socs[offset]
         decisions.append(decision)
     return Plan(forecast=Forecast(slots=[]), decisions=decisions, created_at=created_at)
 
@@ -89,3 +97,28 @@ def test_no_planned_charging_has_no_window() -> None:
     assert control["charge_start"] is None
     assert control["charge_until"] is None
     assert control["charging_now"] is False
+    assert control["soc_limit"] is None
+
+
+def test_soc_limit_is_the_planned_soc_at_the_end_of_the_next_window() -> None:
+    """No fixed target: the car is told to stop where the plan's charging
+    window ends, so an automation that switches off late can't overfill it."""
+    plan = _plan({2: 60, 3: 30, 5: 60}, HOUR, socs={2: 50.0, 3: 62.0, 4: 60.0, 5: 75.0})
+    control = _Coordinator(plan).control()
+
+    assert control["soc_limit"] == 62.0
+
+
+def test_soc_limit_follows_the_running_window() -> None:
+    plan = _plan({0: 60, 1: 60, 4: 60}, HOUR, socs={0: 40.0, 1: 55.0, 4: 70.0})
+    control = _Coordinator(plan).control()
+
+    assert control["charging_now"] is True
+    assert control["soc_limit"] == 55.0
+
+
+def test_soc_limit_from_a_calendar_target_wins() -> None:
+    plan = _plan({2: 60}, HOUR, socs={2: 50.0})
+    control = _Coordinator(plan, calendar_limit=90.0).control()
+
+    assert control["soc_limit"] == 90.0

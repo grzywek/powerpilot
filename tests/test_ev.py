@@ -32,7 +32,6 @@ from custom_components.powerpilot.modules.calendar import (
     trip_window,
 )
 from custom_components.powerpilot.modules.ev import (
-    DEFAULT_TARGET_SOC,
     EVChargeTarget,
     EVModule,
     EVRequest,
@@ -961,10 +960,6 @@ def _module_with_state(**state) -> EVModule:
         CONF_EV_CHARGER_PHASES: state.get("phases", 1),
     }
     module._soc = state.get("soc")
-    target_soc = state.get("target_soc")
-    module.target_soc_entity = (
-        SimpleNamespace(native_value=target_soc) if target_soc is not None else None
-    )
     module._energy_added = None
     module._home = state.get("home")
     module._charging = state.get("charging")
@@ -1000,20 +995,15 @@ def test_get_request_calendar_governs_required_kwh() -> None:
     assert req.available_hours == {s.start for s in fc.slots}
 
 
-def test_get_request_default_topup_uses_target_sensor() -> None:
+def test_get_request_without_profile_plans_only_the_calendar() -> None:
+    """No fixed "target SoC": until a drain profile is learned, only calendar
+    targets (and trips) ask for energy."""
     fc = _forecast([0.5] * 6)
-    module = _module_with_state(soc=50.0, target_soc=70.0)
+    module = _module_with_state(soc=30.0)
     req = module.get_request(fc)
-    # (70 - 50) % of 60 kWh = 12 kWh.
-    assert round(req.required_kwh, 3) == 12.0
-
-
-def test_get_request_default_topup_falls_back_to_default_target() -> None:
-    fc = _forecast([0.5] * 6)
-    module = _module_with_state(soc=50.0)
-    req = module.get_request(fc)
-    expected = (DEFAULT_TARGET_SOC - 50.0) / 100.0 * 60.0
-    assert round(req.required_kwh, 3) == round(expected, 3)
+    assert req.required_kwh == 0.0
+    assert req.targets == []
+    assert not req.is_actionable
 
 
 def test_get_request_with_no_signals_assumes_available() -> None:
@@ -1071,58 +1061,41 @@ def test_get_request_passes_phases() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_soc_limit_forced_window_keeps_active_ceiling() -> None:
-    # A bare calendar window chooses *when* to charge, not permission to blow
-    # past the SoC limit — the car is steered to stop at the active ceiling.
-    now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
-    module = _module_with_state(forced_hours={now_hour}, target_soc=95.0)
-    assert module.soc_limit_now() == 95.0
-
-
-def test_soc_limit_uses_next_target() -> None:
+def test_calendar_soc_limit_uses_next_keyword_target() -> None:
     module = _module_with_state(
         targets=[
             EVChargeTarget(deadline=BASE + timedelta(hours=8), target_soc=90.0),
             EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=60.0),
         ]
     )
-    assert module.soc_limit_now() == 60.0
+    assert module.calendar_soc_limit() == 60.0
 
 
-def test_soc_limit_defaults_to_target_sensor() -> None:
-    module = _module_with_state(target_soc=70.0)
-    assert module.soc_limit_now() == 70.0
-
-
-def test_soc_limit_falls_back_to_default() -> None:
-    module = _module_with_state()
-    assert module.soc_limit_now() == DEFAULT_TARGET_SOC
-
-
-def test_soc_limit_raised_by_trip_target() -> None:
-    # A trip needing 95% must raise the advisory limit above the routine 80%.
+def test_calendar_soc_limit_absent_without_keyword_targets() -> None:
+    # A bare window or a trip floor sets no limit — the plan's own charging
+    # window does (see ``ev_control``).
+    now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
     module = _module_with_state(
-        target_soc=80.0,
-        trip_targets=[
-            EVChargeTarget(
-                deadline=BASE + timedelta(hours=6), target_soc=95.0, source="trip"
-            )
-        ],
-    )
-    assert module.soc_limit_now() == 95.0
-
-
-def test_soc_limit_not_lowered_by_small_trip_target() -> None:
-    # Trip targets are a floor, not a ceiling — a small trip keeps the 80% cap.
-    module = _module_with_state(
-        target_soc=80.0,
+        forced_hours={now_hour},
         trip_targets=[
             EVChargeTarget(
                 deadline=BASE + timedelta(hours=6), target_soc=35.0, source="trip"
             )
         ],
     )
-    assert module.soc_limit_now() == 80.0
+    assert module.calendar_soc_limit() is None
+
+
+def test_charge_ceiling_only_from_keyword_targets_raised_by_trips() -> None:
+    trip = EVChargeTarget(
+        deadline=BASE + timedelta(hours=6), target_soc=95.0, source="trip"
+    )
+    keyword = EVChargeTarget(deadline=BASE + timedelta(hours=4), target_soc=60.0)
+    assert _module_with_state(trip_targets=[trip])._charge_ceiling_soc() is None
+    assert (
+        _module_with_state(targets=[keyword], trip_targets=[trip])._charge_ceiling_soc()
+        == 95.0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1170,7 +1143,7 @@ def test_capacity_samples_skips_tiny_soc_swing() -> None:
 
 def test_get_request_not_actionable_without_capacity() -> None:
     fc = _forecast([0.5] * 6)
-    module = _module_with_state(soc=20.0, target_soc=80.0, capacity=None)
+    module = _module_with_state(soc=20.0, capacity=None)
     req = module.get_request(fc)
     assert req.battery_kwh == 0.0
     assert req.is_actionable is False
@@ -1256,7 +1229,7 @@ def test_get_request_drain_based_topup() -> None:
     # sized by the allocator as a deadline target (no free-floating deficit).
     fc = _forecast([0.5] * 6)
     module = _module_with_state(
-        soc=20.0, target_soc=80.0, drain_profile=_flat_drain(0.25)
+        soc=20.0, drain_profile=_flat_drain(0.25)
     )
     req = module.get_request(fc)
     assert req.required_kwh == 0.0
@@ -1272,12 +1245,12 @@ def test_get_request_passes_trip_targets_and_drain() -> None:
     )
     drain = {BASE + timedelta(hours=4): 6.0}
     module = _module_with_state(
-        soc=70.0, target_soc=80.0, trip_targets=[trip_target], trip_drain=drain,
+        soc=70.0, trip_targets=[trip_target], trip_drain=drain,
         min_soc=25.0,
     )
     req = module.get_request(fc)
-    # Trip targets do NOT suppress the routine top-up (only keyword plans do).
-    assert req.required_kwh > 0
+    # No drain profile → nothing but the calendar asks for energy.
+    assert req.required_kwh == 0.0
     assert req.targets == [trip_target]
     assert req.drain_kwh == drain
     assert req.min_soc == 25.0
@@ -1449,7 +1422,7 @@ def test_reminder_when_target_unreachable_before_departure() -> None:
     fc = _forecast([0.5] * 3)
     # 60 kWh pack at 10% (6 kWh); needs 90% (54 kWh) by h2 with only two 7 kW
     # hours available → 48 kWh short of the 48 kWh deficit... clearly infeasible.
-    module = _module_with_state(soc=10.0, target_soc=80.0)
+    module = _module_with_state(soc=10.0)
     module._targets = [
         EVChargeTarget(deadline=BASE + timedelta(hours=2), target_soc=90.0)
     ]
@@ -1461,7 +1434,7 @@ def test_reminder_when_target_unreachable_before_departure() -> None:
 
 def test_no_reminder_when_target_reachable() -> None:
     fc = _forecast([0.5] * 6)
-    module = _module_with_state(soc=60.0, target_soc=80.0)
+    module = _module_with_state(soc=60.0)
     module._targets = [
         EVChargeTarget(deadline=BASE + timedelta(hours=5), target_soc=70.0)
     ]
@@ -1724,7 +1697,7 @@ def test_routine_topup_is_a_deadline_target_not_a_free_floating_deficit(
     planned for other targets counts, and never placed days later."""
     freezer.move_to(dt_util.now())
     module = _module_with_state(
-        soc=20.0, target_soc=80.0, min_soc=10.0, drain_profile=_flat_drain(0.5)
+        soc=20.0, min_soc=10.0, drain_profile=_flat_drain(0.5)
     )
     req = module.get_request(_forecast([0.5] * 6))
 
@@ -1745,7 +1718,6 @@ def test_routine_topup_skips_hours_the_calendar_already_covers(freezer) -> None:
     now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
     module = _module_with_state(
         soc=20.0,
-        target_soc=80.0,
         min_soc=10.0,
         drain_profile=_flat_drain(0.5),
         partial_hours={now_hour + timedelta(hours=1): 0.5},
@@ -1764,14 +1736,14 @@ def test_routine_floor_asks_for_the_cable_only_below_it(freezer) -> None:
     freezer.move_to(dt_util.now())
     fc = _forecast([0.5] * 6)
     covered = _module_with_state(
-        soc=40.0, target_soc=80.0, min_soc=10.0, home=True, plugged=False,
+        soc=40.0, min_soc=10.0, home=True, plugged=False,
         drain_profile=_flat_drain(0.5),
     )
     covered.get_request(fc)
     assert not any("Podłącz" in r for r in covered.collect_reminders())
 
     short = _module_with_state(
-        soc=20.0, target_soc=80.0, min_soc=10.0, home=True, plugged=False,
+        soc=20.0, min_soc=10.0, home=True, plugged=False,
         drain_profile=_flat_drain(0.5),
     )
     short.get_request(fc)

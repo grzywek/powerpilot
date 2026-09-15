@@ -1075,9 +1075,9 @@ class Optimizer:
                 fraction = first_hour_frac if start == first_start else 1.0
             return hour_cap_added * max(fraction, 0.0)
         battery_kwh = max(ev_request.battery_kwh, 0.0)
-        # Highest SoC the planner may intentionally buy to. The car/charger is
-        # steered off ``soc_limit_now`` and stops there, so energy planned past
-        # the ceiling is undeliverable by construction.
+        # Highest SoC the planner may intentionally buy to. A keyword calendar
+        # target steers the car to stop there, so energy planned past the
+        # ceiling is undeliverable by construction.
         ceiling_kwh = (
             max(0.0, min(100.0, ev_request.charge_ceiling_soc)) / 100.0 * battery_kwh
             if ev_request.charge_ceiling_soc is not None and battery_kwh > 0

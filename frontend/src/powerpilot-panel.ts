@@ -70,10 +70,8 @@ interface EVPlan {
   chargeable_now: boolean;
   charge_ceiling_soc: number | null;
   soc: number | null;
-  target_soc: number | null;
   energy_added_kwh: number | null;
   charging: boolean | null;
-  soc_limit: number | null;
   charger_power_kw: number | null;
   capacity_kwh: number | null;
   capacity_source: string | null;
@@ -1597,7 +1595,7 @@ export class PowerPilotPanel extends LitElement {
               ev.soc != null
                 ? ev.soc.toFixed(0) +
                   " %" +
-                  (ev.soc_limit != null ? ` / ${ev.soc_limit.toFixed(0)} %` : "")
+                  (ev.control.soc_limit != null ? ` / ${ev.control.soc_limit.toFixed(0)} %` : "")
                 : "—"
             )}
             ${this._stat(
@@ -3261,7 +3259,6 @@ export class PowerPilotPanel extends LitElement {
         <div class="card-title">🚗 Samochód elektryczny</div>
         <div class="check">
           Stan: <b>${ev.soc !== null ? `${ev.soc}%` : "—"}</b>
-          ${ev.target_soc !== null ? html`<span class="muted">cel ${ev.target_soc}%</span>` : nothing}
           ${ev.min_soc != null ? html`<span class="muted">· min ${ev.min_soc}%</span>` : nothing}
         </div>
         <div class="check">

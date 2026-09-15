@@ -25,10 +25,10 @@ the calendar module — which the registry updates *before* this one):
 
 Without keyword events the routine charge rides alongside the trip targets:
 once a drain profile is learned it is one more deadline target — ``min SoC +
-the next 24 h of profile drain`` by the end of that window, capped at the
-target SoC, with the hours calendar trips already forecast left out. Before
-any profile exists the car is topped up to the target SoC (from the target-SoC
-sensor, or :data:`DEFAULT_TARGET_SOC`) in the cheapest available hours.
+the next 24 h of profile drain`` by the end of that window, with the hours
+calendar trips already forecast left out. Before any profile exists nothing but
+the calendar asks for energy: there is no fixed "target SoC" the car has to sit
+at — the calendar says when it needs how much.
 """
 
 from __future__ import annotations
@@ -66,7 +66,6 @@ from ..const import (
     DRAIN_HORIZON_HOURS,
     DRAIN_LEARN_DAYS,
     EV_MIN_SOC_DEFAULT,
-    EV_TARGET_SOC_DEFAULT,
     MAX_CAPACITY_SAMPLES,
     MIN_CAPACITY_SAMPLES,
     MIN_SESSION_KWH,
@@ -81,7 +80,6 @@ from .calendar import CalendarEvent, Trip, has_tag, is_trip_location, soc_tag
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_TARGET_SOC = EV_TARGET_SOC_DEFAULT
 DEFAULT_MIN_SOC = EV_MIN_SOC_DEFAULT
 HOME_STATES = {"home", "on", "true", "connected"}
 CHARGING_STATES = {"on", "true", "charging"}
@@ -342,9 +340,10 @@ class EVRequest:
     drain_kwh: dict[datetime, float] = field(default_factory=dict)
     # Safety reserve (%) the plan should never dip the car below.
     min_soc: float = 0.0
-    # Highest SoC (%) the planner may buy up to — mirrors ``soc_limit_now``,
-    # the value automations push to the car, so the plan never schedules
-    # energy the charger will refuse to deliver. ``None`` → no ceiling.
+    # Highest SoC (%) the planner may buy up to — set only by keyword calendar
+    # targets (``calendar_soc_limit`` then steers the car), so the plan never
+    # schedules energy the charger will refuse to deliver. ``None`` → no
+    # ceiling: the targets alone size the charge.
     charge_ceiling_soc: float | None = None
     # Placement preferences (see const.py CONF_EV_PREFER_*): trade a bounded
     # % of extra cost for an unbroken charging block / an earlier finish.
@@ -400,9 +399,8 @@ class EVModule(PowerPilotModule):
         # Predicted per-hour drive drain (kWh) from calendar trips.
         self._trip_drain: dict[datetime, float] = {}
         self._request = EVRequest()
-        # The integration's own writable target-SoC / min-SoC entities (see
-        # number.py). Set by NumberEntity.async_added_to_hass; read-only here.
-        self.target_soc_entity = None
+        # The integration's own writable min-SoC entity (see number.py). Set by
+        # NumberEntity.async_added_to_hass; read-only here.
         self.min_soc_entity = None
         # Learned battery capacity (kWh) — see _maybe_learn_capacity.
         self._capacity: float | None = None
@@ -419,12 +417,6 @@ class EVModule(PowerPilotModule):
     @property
     def enabled(self) -> bool:
         return bool(self.config.get(CONF_EV_ENABLED))
-
-    @property
-    def target_soc(self) -> float | None:
-        """Charge target (%) from the integration's own number entity."""
-        entity = self.target_soc_entity
-        return entity.native_value if entity is not None else None
 
     @property
     def min_soc(self) -> float:
@@ -506,7 +498,6 @@ class EVModule(PowerPilotModule):
             f"({self._capacity_source or 'brak'}, {len(self._capacity_samples)} sesji), "
             f"zużycie={self._kwh_per_km if self._kwh_per_km is not None else '–'} kWh/km "
             f"({self._drain_profile.observed_days} dni), "
-            f"cel={self.target_soc if self.target_soc is not None else '–'}%, "
             f"w domu={self._home}, podłączony={self._plugged}, "
             f"ładuje={self._charging}, "
             f"godziny niedostępne={len(self._unavailable_hours)}, "
@@ -514,7 +505,6 @@ class EVModule(PowerPilotModule):
             f"godziny ręczne={len(self._forced_hours)}.",
             extra={
                 "soc": self._soc,
-                "target_soc": self.target_soc,
                 "min_soc": self.min_soc,
                 "energy_added_kwh": self._energy_added,
                 "home": self._home,
@@ -558,7 +548,7 @@ class EVModule(PowerPilotModule):
         return total
 
     def _routine_target(
-        self, predicted_kwh: float, target_soc: float, battery_kwh: float
+        self, predicted_kwh: float, battery_kwh: float
     ) -> EVChargeTarget | None:
         """Routine charge as a deadline target at the end of the look-ahead.
 
@@ -574,7 +564,7 @@ class EVModule(PowerPilotModule):
             deadline=_hour_floor(dt_util.now())
             + timedelta(hours=DRAIN_HORIZON_HOURS),
             target_soc=min(
-                self.min_soc + predicted_kwh / battery_kwh * 100.0, target_soc
+                100.0, self.min_soc + predicted_kwh / battery_kwh * 100.0
             ),
             label=f"Rutynowe: profil zużycia {DRAIN_HORIZON_HOURS} h",
             source="routine",
@@ -1119,14 +1109,9 @@ class EVModule(PowerPilotModule):
         # Explicit keyword plans take over routine sizing; automatic trip
         # targets do NOT — they are a floor on top of normal behaviour, so the
         # routine charge keeps running alongside them.
-        required_kwh = 0.0
+        # Without a learned profile nothing is routine: only the calendar asks.
         routine_targets: list[EVChargeTarget] = []
         if not (self._targets or self._forced_hours):
-            target_soc = (
-                self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
-            )
-            current_soc = self._soc if self._soc is not None else target_soc
-            current_energy = current_soc / 100.0 * battery_kwh
             # Hours a calendar trip forecasts itself (away window, departure
             # hour, drive legs): the trip's drain and target already cover them.
             trip_hours = (
@@ -1135,17 +1120,13 @@ class EVModule(PowerPilotModule):
                 | set(self._trip_drain)
             )
             predicted = self.predicted_drain_kwh(skip=trip_hours)
-            if predicted is not None and battery_kwh > 0:
-                routine = self._routine_target(predicted, target_soc, battery_kwh)
+            if predicted is not None:
+                routine = self._routine_target(predicted, battery_kwh)
                 if routine is not None:
                     routine_targets.append(routine)
-            else:
-                # No drain profile yet → top up to the target SoC as before.
-                required_kwh = max(0.0, target_soc / 100.0 * battery_kwh - current_energy)
 
         self._request = EVRequest(
             enabled=True,
-            required_kwh=required_kwh,
             charger_kw=float(self.config.get(CONF_EV_CHARGER_KW, 3.5)),
             phase=int(self.config.get(CONF_EV_CHARGER_PHASE, 1)),
             phases=int(self.config.get(CONF_EV_CHARGER_PHASES, 1)),
@@ -1280,8 +1261,6 @@ class EVModule(PowerPilotModule):
             "plugged": self._plugged,
             "chargeable_now": self.chargeable_now(),
             "soc": self.soc,
-            "target_soc": self.target_soc,
-            "soc_limit": self.soc_limit_now(),
             "charge_ceiling_soc": self._charge_ceiling_soc(),
             "energy_added_kwh": self._energy_added,
             "charging": self._charging,
@@ -1408,40 +1387,29 @@ class EVModule(PowerPilotModule):
             ],
         }
 
-    def _charge_ceiling_soc(self) -> float:
-        """Highest SoC (%) the plan may intentionally buy to.
+    def _charge_ceiling_soc(self) -> float | None:
+        """Highest SoC (%) the plan may intentionally buy to, or ``None``.
 
-        Explicit keyword targets set the ceiling (the highest of them, so an
-        earlier smaller target can't cap a later bigger one). Otherwise the
-        integration's own target-SoC entity (or the built-in default) applies —
-        raised when an upcoming trip needs more (trip targets are a floor,
-        never a cap). A bare calendar window chooses *timing*, not permission
-        to exceed the active limit: the car stops at ``soc_limit_now`` anyway,
-        so planning past it only produced phantom charge hours.
+        Only explicit keyword targets set a ceiling — the highest of them, so
+        an earlier smaller target can't cap a later bigger one — raised when a
+        trip needs more (trip targets are a floor, never a cap). Without them
+        there is no fixed limit to respect: the targets size the charge and
+        the car is steered to the SoC the plan's charging window ends at.
         """
-        base = self.target_soc if self.target_soc is not None else DEFAULT_TARGET_SOC
-        ceiling = (
-            max(t.target_soc for t in self._targets) if self._targets else base
-        )
-        if self._trip_targets:
-            ceiling = max(ceiling, max(t.target_soc for t in self._trip_targets))
-        return ceiling
-
-    def soc_limit_now(self) -> float | None:
-        """The SoC (%) the car should be allowed to charge to right now.
-
-        With keyword deadline targets the soonest upcoming one sets the
-        ceiling. Otherwise the integration's own target-SoC entity (or the
-        built-in default) applies — raised when an upcoming trip needs more
-        than that (trip targets are a floor, never a cap). A bare calendar
-        window is a timing choice and does not lift the limit to 100 %.
-        """
-        if not self.enabled:
+        if not self._targets:
             return None
-        if self._targets:
-            upcoming = sorted(self._targets, key=lambda t: t.deadline)
-            return upcoming[0].target_soc
-        return self._charge_ceiling_soc()
+        return max(t.target_soc for t in [*self._targets, *self._trip_targets])
+
+    def calendar_soc_limit(self) -> float | None:
+        """The SoC (%) a keyword calendar target tells the car to stop at.
+
+        The soonest upcoming keyword target sets it. ``None`` without one — a
+        bare calendar window is a timing choice and a trip target is a floor,
+        so neither names a limit; ``ev_control`` then takes it from the plan.
+        """
+        if not self._targets:
+            return None
+        return min(self._targets, key=lambda t: t.deadline).target_soc
 
     @property
     def charger_power_kw(self) -> float:

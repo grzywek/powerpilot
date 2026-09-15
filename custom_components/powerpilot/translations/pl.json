@@ -315,9 +315,6 @@
       }
     },
     "number": {
-      "ev_target_soc": {
-        "name": "🚗 Docelowy SoC EV"
-      },
       "ev_min_soc": {
         "name": "🚗 Minimalny SoC EV (rezerwa)"
       }

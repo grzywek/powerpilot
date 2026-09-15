@@ -230,8 +230,6 @@ HOME_LOCATION_MARKERS: Final = ("dom", "home")
 # of pointing at a car-provided sensor — most cars don't expose one in HA, and
 # a writable helper is easier to adjust from the dashboard than the options
 # flow. Calendar deadline targets / forced windows still override it.
-NUMBER_EV_TARGET_SOC: Final = "ev_target_soc"
-EV_TARGET_SOC_DEFAULT: Final = 80.0
 
 # --- EV minimum SoC (own writable entity, not a config field) ---
 # Safety reserve (%) the car should never be planned below: trip targets charge

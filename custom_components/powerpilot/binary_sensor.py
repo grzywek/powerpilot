@@ -16,6 +16,7 @@ from .const import (
     BINARY_PLAN_NOT_EXECUTED,
     BINARY_TARCZA_PPE1_CAP_BINDS,
     DOMAIN,
+    PPE_1,
 )
 from .coordinator import PowerPilotCoordinator
 from .sensor import PowerPilotEntity, TarczaEntity
@@ -107,11 +108,10 @@ class TarczaCapBindsBinarySensor(TarczaEntity, BinarySensorEntity):
     ``unknown`` while the cap cannot be modelled (see the attributes).
     """
 
-    _attr_translation_key = BINARY_TARCZA_PPE1_CAP_BINDS
     _attr_icon = "mdi:shield-check"
 
     def __init__(self, coordinator, entry) -> None:
-        super().__init__(coordinator, entry, BINARY_TARCZA_PPE1_CAP_BINDS)
+        super().__init__(coordinator, entry, BINARY_TARCZA_PPE1_CAP_BINDS, PPE_1)
 
     @property
     def is_on(self) -> bool | None:

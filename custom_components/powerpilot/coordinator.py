@@ -180,14 +180,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.climate = ClimateModule(hass, self)
         self.ev = EVModule(hass, self)
         self.calendar = CalendarModule(hass, self)
-        # Month-to-date settlement under the seller's price cap. Reads the
-        # recorder through the consumption module's kWh readers and the price
-        # archive through the prices module — injected, not reached for.
-        self.billing = BillingModule(hass, self, self.consumption, self.prices)
         # Which point of delivery feeds the apartment (Victron / meter 2),
         # sampled on its own tick. It adds nothing to the forecast itself; the
         # consumption and climate modules ask it what the Victron feeds.
         self.supply = SupplyModule(hass, self)
+        # Month-to-date settlement under the seller's price cap. Reads the
+        # recorder through the consumption module's kWh readers, the price
+        # archive through the prices module and which hours PPE 2 fed the
+        # apartment through the supply module — injected, not reached for.
+        self.billing = BillingModule(hass, self, self.consumption, self.prices, self.supply)
 
         # Order matters: prices/weather first, then derived loads, then the
         # calendar (events + trips), then EV — which consumes the calendar's

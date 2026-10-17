@@ -185,6 +185,14 @@ PowerPilot models it end to end:
   just ended, the first minutes of the running one — are pending for up to
   15 minutes (an hour that just ended is read from its 5-minute buckets), not
   gaps;
+- with apartment supply detection on (see below), the month-to-date import of
+  PPE 2 is the apartment meter's energy in the hours the apartment was on the
+  second meter, under the same edition as PPE 1: Victron hours count 0, an hour
+  containing a switch is split at the switch by the 5-minute statistics (each
+  completed split is archived in `.storage/powerpilot_<entry>_billing_ppe2`,
+  since the recorder purges 5-minute statistics after about ten days), and an
+  hour whose supply is unknown is a gap. PPE 2 is observed only so far — the
+  plan does not settle it yet;
 - the optimizer settles each capped month it touches as `min(C, limit × E)` and
   plans the battery under that regime, pricing the rest of the month from the
   weekly consumption profile, the archive's price estimate and the learned EV
@@ -200,8 +208,10 @@ PowerPilot models it end to end:
 | `sensor.…_tarcza_ppe1_forecast_average` | forecast month-end average (observed + plan + tail) |
 | `sensor.…_tarcza_ppe1_discount` | forecast discount the cap yields this month (PLN) |
 | `binary_sensor.…_tarcza_ppe1_cap_binds` | the plan expects the cap to bind this month |
+| `sensor.…_tarcza_ppe2_energy` | PPE 2's observed import since the month started (kWh) |
+| `sensor.…_tarcza_ppe2_average` | PPE 2's observed weighted average so far (PLN/kWh, pre-cap) |
 
-All five carry the full settlement record (hours covered, gaps, reasons) as
+All of them carry the full settlement record (hours covered, gaps, reasons) as
 attributes.
 
 ## Apartment supply (second meter)

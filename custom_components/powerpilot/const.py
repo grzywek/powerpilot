@@ -273,6 +273,10 @@ CONF_PPE1_IMPORT_SENSORS: Final = "ppe1_import_sensors"
 
 # Point-of-delivery identifiers used in billing records and entity keys.
 PPE_1: Final = "ppe1"
+# The second meter feeds only the apartment, and only while the apartment's
+# switch is on it: its import is the apartment meter's energy in those intervals
+# (``modules/billing.py``). Settled under the same Tarcza editions as PPE 1.
+PPE_2: Final = "ppe2"
 
 # --- Apartment supply (which point of delivery feeds the apartment) ---
 # A manual switch moves the apartment between the Victron output (PPE 1) and
@@ -307,6 +311,9 @@ SUPPLY_SOURCE_REPLAY: Final = "replay"
 
 # Storage version for the per-entry apartment-supply transition log.
 STORAGE_VERSION_SUPPLY: Final = 1
+# Storage version for PPE 2's archive of split hours (``modules/billing.py``):
+# ``Store(version=STORAGE_VERSION_BILLING_PPE2, key=f"{DOMAIN}_{entry_id}_billing_ppe2")``.
+STORAGE_VERSION_BILLING_PPE2: Final = 1
 
 # --- Distribution tariffs ---
 # Stored in ``entry.options`` as a list of dicts (see ``models.Tariff.to_dict``).
@@ -446,5 +453,8 @@ SENSOR_TARCZA_PPE1_AVERAGE: Final = "tarcza_ppe1_average"  # observed weighted a
 SENSOR_TARCZA_PPE1_FORECAST_AVERAGE: Final = "tarcza_ppe1_forecast_average"  # month forecast (PLN/kWh)
 SENSOR_TARCZA_PPE1_DISCOUNT: Final = "tarcza_ppe1_discount"  # forecast month discount (PLN)
 BINARY_TARCZA_PPE1_CAP_BINDS: Final = "tarcza_ppe1_cap_binds"  # forecast: the cap binds this month
+# The same observed diagnostics for PPE 2 (the apartment while on meter 2).
+SENSOR_TARCZA_PPE2_ENERGY: Final = "tarcza_ppe2_energy"  # observed import this month (kWh)
+SENSOR_TARCZA_PPE2_AVERAGE: Final = "tarcza_ppe2_average"  # observed weighted average (PLN/kWh)
 # Confirmed supply of the apartment right now (victron / meter_2, see modules/supply.py).
 SENSOR_APARTMENT_SUPPLY_ACTUAL: Final = "apartment_supply_actual"

@@ -362,6 +362,12 @@
       "tarcza_ppe1_discount": {
         "name": "🛡️ Price cap PPE 1: forecast discount"
       },
+      "tarcza_ppe2_energy": {
+        "name": "🛡️ Price cap PPE 2: import this month"
+      },
+      "tarcza_ppe2_average": {
+        "name": "🛡️ Price cap PPE 2: average price so far"
+      },
       "apartment_supply_actual": {
         "name": "Apartment supply",
         "state": {

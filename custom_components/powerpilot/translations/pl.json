@@ -362,6 +362,12 @@
       "tarcza_ppe1_discount": {
         "name": "🛡️ Tarcza PPE 1: prognozowany rabat"
       },
+      "tarcza_ppe2_energy": {
+        "name": "🛡️ Tarcza PPE 2: import od początku miesiąca"
+      },
+      "tarcza_ppe2_average": {
+        "name": "🛡️ Tarcza PPE 2: średnia cena dotychczas"
+      },
       "apartment_supply_actual": {
         "name": "Zasilanie mieszkania",
         "state": {

@@ -20,6 +20,8 @@ from custom_components.powerpilot.const import (
     SENSOR_TARCZA_PPE1_DISCOUNT,
     SENSOR_TARCZA_PPE1_ENERGY,
     SENSOR_TARCZA_PPE1_FORECAST_AVERAGE,
+    SENSOR_TARCZA_PPE2_AVERAGE,
+    SENSOR_TARCZA_PPE2_ENERGY,
 )
 from custom_components.powerpilot.models import Forecast, HourSlot
 from custom_components.powerpilot.modules.billing import month_bounds
@@ -118,6 +120,18 @@ async def test_enabled_with_meters_but_unreadable_recorder_reports_the_error(
     energy = _state(hass, entry, "sensor", SENSOR_TARCZA_PPE1_ENERGY)
     assert energy.state == "unknown"
     assert any("błąd odczytu" in r for r in energy.attributes["reasons"])
+
+
+async def test_ppe2_entities_say_why_without_supply_detection(hass: HomeAssistant) -> None:
+    entry, coordinator = await _setup(hass, **{CONF_TARCZA_TERMS: [TERMS]})
+    for key in (SENSOR_TARCZA_PPE2_ENERGY, SENSOR_TARCZA_PPE2_AVERAGE):
+        state = _state(hass, entry, "sensor", key)
+        assert state.state == "unknown"
+        assert any("wykrywanie zasilania" in r for r in state.attributes["reasons"])
+    # PPE 1's entities and the plan carry only PPE 1's reasons.
+    ppe1 = _state(hass, entry, "sensor", SENSOR_TARCZA_PPE1_ENERGY)
+    assert not any("zasilania" in r for r in ppe1.attributes["reasons"])
+    assert "zasilania" not in coordinator.data.billing[0].unavailable_reason
 
 
 async def test_cap_outside_its_validity_is_inactive(hass: HomeAssistant) -> None:

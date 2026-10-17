@@ -35,7 +35,10 @@ from .const import (
     SENSOR_TARCZA_PPE1_DISCOUNT,
     SENSOR_TARCZA_PPE1_ENERGY,
     SENSOR_TARCZA_PPE1_FORECAST_AVERAGE,
+    SENSOR_TARCZA_PPE2_AVERAGE,
+    SENSOR_TARCZA_PPE2_ENERGY,
     PPE_1,
+    PPE_2,
     SUPPLY_METER_2,
     SUPPLY_VICTRON,
     InverterMode,
@@ -60,10 +63,12 @@ async def async_setup_entry(
             EVChargeUntilSensor(coordinator, entry),
             EVSocLimitSensor(coordinator, entry),
             EVChargeMinutesSensor(coordinator, entry),
-            TarczaEnergySensor(coordinator, entry),
-            TarczaAverageSensor(coordinator, entry),
+            TarczaEnergySensor(coordinator, entry, PPE_1, SENSOR_TARCZA_PPE1_ENERGY),
+            TarczaAverageSensor(coordinator, entry, PPE_1, SENSOR_TARCZA_PPE1_AVERAGE),
             TarczaForecastAverageSensor(coordinator, entry),
             TarczaDiscountSensor(coordinator, entry),
+            TarczaEnergySensor(coordinator, entry, PPE_2, SENSOR_TARCZA_PPE2_ENERGY),
+            TarczaAverageSensor(coordinator, entry, PPE_2, SENSOR_TARCZA_PPE2_AVERAGE),
             ApartmentSupplySensor(coordinator, entry),
         ]
     )
@@ -340,54 +345,60 @@ class EVChargeMinutesSensor(PowerPilotEntity, SensorEntity):
 
 
 # ---------------------------------------------------------------------------
-# Monthly price cap ("Tarcza") diagnostics — PPE 1
+# Monthly price cap ("Tarcza") diagnostics — PPE 1 and PPE 2
 # ---------------------------------------------------------------------------
 
 
 class TarczaEntity(PowerPilotEntity):
-    """Shared lookups for the month-to-date settlement of PPE 1."""
+    """Shared lookups for the month-to-date settlement of one PPE."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry, key: str, ppe: str) -> None:
+        super().__init__(coordinator, entry, key)
+        self._ppe = ppe
+        self._attr_translation_key = key
 
     @property
     def period(self):
         """Observed month-to-date position (``None`` when unavailable)."""
-        return self.coordinator.billing.periods.get(PPE_1)
+        return self.coordinator.billing.periods.get(self._ppe)
 
     @property
     def outcome(self):
-        """The plan's month forecast for PPE 1 (``None`` without a plan)."""
+        """The plan's month forecast for this PPE (``None`` without a plan)."""
         plan = self.plan
         if not plan:
             return None
         for outcome in plan.billing:
-            if outcome.period.ppe == PPE_1:
+            if outcome.period.ppe == self._ppe:
                 return outcome
         return None
 
     def _observed_attributes(self) -> dict:
         period = self.period
+        reasons = self.coordinator.billing.reasons_for(self._ppe)
         if period is None:
-            return {"reasons": list(self.coordinator.billing.reasons)}
-        return period.as_dict()
+            return {"reasons": reasons}
+        # A period can stand with a caveat (PPE 2 read without its archive).
+        return {**period.as_dict(), "reasons": reasons} if reasons else period.as_dict()
 
     def _forecast_attributes(self) -> dict:
         outcome = self.outcome
         if outcome is None:
-            return {"reasons": list(self.coordinator.billing.reasons)}
+            return {"reasons": self.coordinator.billing.reasons_for(self._ppe)}
         return outcome.as_dict()
 
 
 class TarczaEnergySensor(TarczaEntity, SensorEntity):
-    """Grid import of PPE 1 since the month started (observed, kWh)."""
+    """Grid import of a PPE since the month started (observed, kWh)."""
 
-    _attr_translation_key = SENSOR_TARCZA_PPE1_ENERGY
     _attr_icon = "mdi:transmission-tower-import"
     _attr_native_unit_of_measurement = "kWh"
     _attr_suggested_display_precision = 1
 
-    def __init__(self, coordinator, entry) -> None:
-        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_ENERGY)
+    def __init__(self, coordinator, entry, ppe: str, key: str) -> None:
+        super().__init__(coordinator, entry, key, ppe)
 
     @property
     def native_value(self) -> float | None:
@@ -400,15 +411,14 @@ class TarczaEnergySensor(TarczaEntity, SensorEntity):
 
 
 class TarczaAverageSensor(TarczaEntity, SensorEntity):
-    """Observed weighted-average energy price of PPE 1 this month, before the cap."""
+    """Observed weighted-average energy price of a PPE this month, before the cap."""
 
-    _attr_translation_key = SENSOR_TARCZA_PPE1_AVERAGE
     _attr_icon = "mdi:scale-balance"
     _attr_native_unit_of_measurement = "PLN/kWh"
     _attr_suggested_display_precision = 4
 
-    def __init__(self, coordinator, entry) -> None:
-        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_AVERAGE)
+    def __init__(self, coordinator, entry, ppe: str, key: str) -> None:
+        super().__init__(coordinator, entry, key, ppe)
 
     @property
     def native_value(self) -> float | None:
@@ -426,13 +436,12 @@ class TarczaForecastAverageSensor(TarczaEntity, SensorEntity):
     ``unknown`` while the cap cannot be modelled — the attributes carry why.
     """
 
-    _attr_translation_key = SENSOR_TARCZA_PPE1_FORECAST_AVERAGE
     _attr_icon = "mdi:chart-timeline-variant"
     _attr_native_unit_of_measurement = "PLN/kWh"
     _attr_suggested_display_precision = 4
 
     def __init__(self, coordinator, entry) -> None:
-        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_FORECAST_AVERAGE)
+        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_FORECAST_AVERAGE, PPE_1)
 
     @property
     def native_value(self) -> float | None:
@@ -449,13 +458,12 @@ class TarczaForecastAverageSensor(TarczaEntity, SensorEntity):
 class TarczaDiscountSensor(TarczaEntity, SensorEntity):
     """Forecast discount the cap yields on PPE 1's energy bill this month (PLN)."""
 
-    _attr_translation_key = SENSOR_TARCZA_PPE1_DISCOUNT
     _attr_icon = "mdi:cash-refund"
     _attr_native_unit_of_measurement = "PLN"
     _attr_suggested_display_precision = 2
 
     def __init__(self, coordinator, entry) -> None:
-        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_DISCOUNT)
+        super().__init__(coordinator, entry, SENSOR_TARCZA_PPE1_DISCOUNT, PPE_1)
 
     @property
     def native_value(self) -> float | None:

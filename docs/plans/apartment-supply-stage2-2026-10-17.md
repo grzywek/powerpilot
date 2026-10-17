@@ -175,6 +175,33 @@ persisted through `Store` (`{DOMAIN}_{entry_id}_supply`, `{"transitions":
    `meter_2` hour detaches the subtree, missing child ≠ 0, negative exclusive
    skipped and counted, demand without the apartment while on PPE 2,
    stage-1 PPE 1 billing unchanged.
+   Slice 3 in detail:
+   - Past hour states for learning come from one function on the supply
+     module: the log (`supply_for_hour`) from `covered_from` on; before it the
+     hourly classification turned into states — the state of a decided hour
+     carries forward through undecided and missing hours until the next
+     decided hour; when that one has the other state, every hour between them
+     plus the two hours next to the change is `mixed`; before the first
+     decided hour `unknown`. Where the hourly states meet the log, a state
+     differing from the log's first transition makes the hours between the
+     last decided hour and that transition's `at` `mixed`.
+   - `exclusive_series` gains the per-hour supply and the apartment meter
+     (`apartment_meter`): `meter_2` hours detach the apartment subtree from
+     the root; `mixed` and `unknown` hours drop the root's hour; the apartment
+     subtree is computed as usual in every hour. For every node: a missing
+     child reading makes the parent's hour unknown (dropped), and a negative
+     exclusive value is dropped; both are counted per node and returned for
+     diagnostics. Without supply detection or `apartment_meter` every hour is
+     `victron`, i.e. today's tree with the two data fixes.
+   - All three callers pass the hour states: learning in
+     `ConsumptionModule._maybe_learn` and the two real-consumption series in
+     `coordinator.py`.
+   - Forecast: while the confirmed state is `meter_2`, the apartment subtree's
+     device profiles and the climate module's forecast for climate sensors
+     inside that subtree are left out of the Victron demand; `unknown` keeps
+     them and adds a plan reminder that the apartment's supply is unknown.
+   - The topology fingerprint includes `apartment_meter` and whether supply
+     detection is on, so the profiles relearn once under the new attribution.
 4. Diagnostics, README section, parent spec status. A backtest script
    (`scripts/backtest_supply_detector.py`) over exported hourly statistics
    against the PPE 2 Tauron series, printing the confusion matrix.
@@ -184,6 +211,11 @@ persisted through `Store` (`{DOMAIN}_{entry_id}_supply`, `{"transitions":
 1. Unknown state: plan with the apartment included, flagged.
 2. History older than the recorder's state history: the same rule on hourly
    means, skipping undecided hours and hours next to a detected change.
+   Clarified 2026-10-17 before slice 3: "skipping" means an undecided hour is
+   no evidence, not that its state is unknown — the switch state persists
+   through it, exactly as the live log holds its state through undecided
+   samples. Dropping undecided hours from learning would discard ~60 % of
+   them (backtest) and leave most days below the 20-of-24-hours rule.
 3. Build now.
 
 ## Questions as asked

@@ -274,6 +274,34 @@ CONF_PPE1_IMPORT_SENSORS: Final = "ppe1_import_sensors"
 # Point-of-delivery identifiers used in billing records and entity keys.
 PPE_1: Final = "ppe1"
 
+# --- Apartment supply (which point of delivery feeds the apartment) ---
+# A manual switch moves the apartment between the Victron output (PPE 1) and
+# the second meter (PPE 2). ``modules/supply.py`` tells which from power alone:
+# with the apartment drawing at least ``supply_min_apartment_w``, it is on the
+# Victron when the Victron output minus the other sub-meters behind it covers
+# the apartment within ``supply_margin_w``; ``supply_confirm_samples`` agreeing
+# samples in a row confirm a change. Detection is on only when the apartment
+# sensor, the Victron output sensor and the other sub-meters are all set.
+CONF_APARTMENT_POWER_SENSOR: Final = "apartment_power_sensor"  # W or kW
+# Which metered device (``hierarchy.metered_sensors``) is the apartment; its
+# meter subtree moves with the apartment between the two supplies.
+CONF_APARTMENT_METER: Final = "apartment_meter"
+CONF_VICTRON_OUTPUT_POWER_SENSOR: Final = "victron_output_power_sensor"  # W or kW
+# Power sensors of the other loads behind the Victron (outside the apartment).
+CONF_VICTRON_OTHER_POWER_SENSORS: Final = "victron_other_power_sensors"
+CONF_SUPPLY_MIN_APARTMENT_W: Final = "supply_min_apartment_w"
+CONF_SUPPLY_MARGIN_W: Final = "supply_margin_w"
+CONF_SUPPLY_CONFIRM_SAMPLES: Final = "supply_confirm_samples"
+
+SUPPLY_VICTRON: Final = "victron"  # apartment fed from the Victron (PPE 1)
+SUPPLY_METER_2: Final = "meter_2"  # apartment fed from the second meter (PPE 2)
+# Where a stored transition was detected: live sampling or a history replay.
+SUPPLY_SOURCE_LIVE: Final = "live"
+SUPPLY_SOURCE_REPLAY: Final = "replay"
+
+# Storage version for the per-entry apartment-supply transition log.
+STORAGE_VERSION_SUPPLY: Final = 1
+
 # --- Distribution tariffs ---
 # Stored in ``entry.options`` as a list of dicts (see ``models.Tariff.to_dict``).
 # Snapshots of resolved per-hour distribution prices live in their own
@@ -333,6 +361,9 @@ DEFAULTS: Final = {
     CONF_EV_EARLY_MAX_EXTRA_PCT: 10.0,
     CONF_TRAVEL_MARGIN_BEFORE_MIN: 30,
     CONF_TRAVEL_MARGIN_AFTER_MIN: 30,
+    CONF_SUPPLY_MIN_APARTMENT_W: 300.0,
+    CONF_SUPPLY_MARGIN_W: 100.0,
+    CONF_SUPPLY_CONFIRM_SAMPLES: 3,
 }
 
 # ---------------------------------------------------------------------------
@@ -409,3 +440,5 @@ SENSOR_TARCZA_PPE1_AVERAGE: Final = "tarcza_ppe1_average"  # observed weighted a
 SENSOR_TARCZA_PPE1_FORECAST_AVERAGE: Final = "tarcza_ppe1_forecast_average"  # month forecast (PLN/kWh)
 SENSOR_TARCZA_PPE1_DISCOUNT: Final = "tarcza_ppe1_discount"  # forecast month discount (PLN)
 BINARY_TARCZA_PPE1_CAP_BINDS: Final = "tarcza_ppe1_cap_binds"  # forecast: the cap binds this month
+# Confirmed supply of the apartment right now (victron / meter_2, see modules/supply.py).
+SENSOR_APARTMENT_SUPPLY_ACTUAL: Final = "apartment_supply_actual"

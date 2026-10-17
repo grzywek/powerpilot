@@ -7,12 +7,21 @@ unit-test.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from .const import ChargePower, InverterMode
+from .const import (
+    SUPPLY_METER_2,
+    SUPPLY_SOURCE_LIVE,
+    SUPPLY_SOURCE_REPLAY,
+    SUPPLY_VICTRON,
+    ChargePower,
+    InverterMode,
+)
 
 
 @dataclass
@@ -688,3 +697,81 @@ def price_cap_terms_for_day(
         if current.contains(day):
             return current
     return None
+
+
+# ---------------------------------------------------------------------------
+# Apartment supply
+# ---------------------------------------------------------------------------
+
+_SUPPLY_STATES = (SUPPLY_VICTRON, SUPPLY_METER_2)
+_SUPPLY_SOURCES = (SUPPLY_SOURCE_LIVE, SUPPLY_SOURCE_REPLAY)
+
+
+def _parse_utc(value: Any, name: str) -> datetime:
+    """An aware ISO timestamp from storage, in UTC; ``ValueError`` otherwise."""
+    if not isinstance(value, str):
+        raise ValueError(f"supply transition needs {name!r} as an ISO timestamp")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError(f"supply transition {name!r} has no time zone: {value!r}")
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_watts(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"supply transition needs {name!r} as a number")
+    if not math.isfinite(value):
+        raise ValueError(f"supply transition {name!r} is not finite")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class SupplyTransition:
+    """A confirmed change of the apartment's supply (see ``modules/supply.py``).
+
+    The switch happened inside ``[not_before, at]``: ``at`` is the first of the
+    N agreeing samples, ``not_before`` the last decisive sample of the previous
+    state (``None`` for the first confirmation ever, when there was none).
+    """
+
+    state: str  # SUPPLY_VICTRON | SUPPLY_METER_2
+    at: datetime  # aware, UTC
+    not_before: datetime | None
+    apartment_w: float  # evidence at confirmation
+    victron_net_w: float  # Victron output − the other sub-meters behind it
+    source: str  # SUPPLY_SOURCE_LIVE | SUPPLY_SOURCE_REPLAY
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "at": self.at.isoformat(),
+            "not_before": self.not_before.isoformat() if self.not_before else None,
+            "apartment_w": self.apartment_w,
+            "victron_net_w": self.victron_net_w,
+            "source": self.source,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "SupplyTransition":
+        """Decode a stored transition; ``ValueError`` when it is unusable.
+
+        Only ``not_before`` is optional (absent = the first confirmation); a
+        transition without its state, time, evidence or source is not guessed.
+        """
+        if not isinstance(data, Mapping):
+            raise ValueError("supply transition must be a mapping")
+        state = data.get("state")
+        if state not in _SUPPLY_STATES:
+            raise ValueError(f"unknown supply state {state!r}")
+        source = data.get("source")
+        if source not in _SUPPLY_SOURCES:
+            raise ValueError(f"unknown supply transition source {source!r}")
+        not_before = data.get("not_before")
+        return cls(
+            state=state,
+            at=_parse_utc(data.get("at"), "at"),
+            not_before=None if not_before is None else _parse_utc(not_before, "not_before"),
+            apartment_w=_parse_watts(data.get("apartment_w"), "apartment_w"),
+            victron_net_w=_parse_watts(data.get("victron_net_w"), "victron_net_w"),
+            source=source,
+        )

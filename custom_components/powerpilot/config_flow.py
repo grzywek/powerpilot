@@ -16,6 +16,8 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_APARTMENT_METER,
+    CONF_APARTMENT_POWER_SENSOR,
     CONF_BATTERY_CAPACITY_KWH,
     CONF_BATTERY_CHARGE_SENSOR,
     CONF_BATTERY_DISCHARGE_SENSOR,
@@ -68,10 +70,15 @@ from .const import (
     CONF_PRICE_VAT,
     CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
+    CONF_SUPPLY_CONFIRM_SAMPLES,
+    CONF_SUPPLY_MARGIN_W,
+    CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_TARCZA_TERMS,
     CONF_TARIFFS,
     CONF_TRAVEL_MARGIN_AFTER_MIN,
     CONF_TRAVEL_MARGIN_BEFORE_MIN,
+    CONF_VICTRON_OTHER_POWER_SENSORS,
+    CONF_VICTRON_OUTPUT_POWER_SENSOR,
     CONF_WEATHER_ENTITY,
     CHARGE_CURVE_BANDS,
     DEFAULTS,
@@ -227,6 +234,84 @@ def _billing_meters_schema(data: dict[str, Any]) -> vol.Schema:
             ),
         }
     )
+
+
+# Single power sensors of the supply section; a cleared field is removed.
+_SUPPLY_SENSOR_KEYS = (CONF_APARTMENT_POWER_SENSOR, CONF_VICTRON_OUTPUT_POWER_SENSOR)
+
+
+def _supply_schema(
+    data: dict[str, Any], meters: list[selector.SelectOptionDict]
+) -> vol.Schema:
+    """Apartment supply: the power inputs, which meter is the apartment, thresholds."""
+
+    def d(key):
+        return data.get(key, DEFAULTS.get(key))
+
+    def current(key) -> dict[str, Any]:
+        # A suggested value, not a default: voluptuous fills a missing key from
+        # its default, so a cleared field could never turn detection off.
+        value = data.get(key)
+        return {"suggested_value": value} if value else {}
+
+    fields: dict[Any, Any] = {
+        vol.Optional(
+            CONF_APARTMENT_POWER_SENSOR, description=current(CONF_APARTMENT_POWER_SENSOR)
+        ): _entity("sensor"),
+        vol.Optional(
+            CONF_VICTRON_OUTPUT_POWER_SENSOR,
+            description=current(CONF_VICTRON_OUTPUT_POWER_SENSOR),
+        ): _entity("sensor"),
+        vol.Optional(
+            CONF_VICTRON_OTHER_POWER_SENSORS,
+            description=current(CONF_VICTRON_OTHER_POWER_SENSORS),
+        ): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor", multiple=True)
+        ),
+    }
+    # The apartment's meter subtree moves with it; offered only once there are
+    # metered devices to pick from.
+    if meters:
+        valid = {option["value"] for option in meters}
+        stored = data.get(CONF_APARTMENT_METER)
+        fields[
+            vol.Optional(
+                CONF_APARTMENT_METER,
+                description=current(CONF_APARTMENT_METER) if stored in valid else {},
+            )
+        ] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=meters, mode=selector.SelectSelectorMode.DROPDOWN
+            )
+        )
+    fields.update(
+        {
+            vol.Required(
+                CONF_SUPPLY_MIN_APARTMENT_W, default=d(CONF_SUPPLY_MIN_APARTMENT_W)
+            ): _NUMBER(_NUM(min=0, max=20000, step=10, unit_of_measurement="W", mode="box")),
+            vol.Required(CONF_SUPPLY_MARGIN_W, default=d(CONF_SUPPLY_MARGIN_W)): _NUMBER(
+                _NUM(min=0, max=5000, step=10, unit_of_measurement="W", mode="box")
+            ),
+            vol.Required(
+                CONF_SUPPLY_CONFIRM_SAMPLES, default=d(CONF_SUPPLY_CONFIRM_SAMPLES)
+            ): _NUMBER(_NUM(min=1, max=20, step=1, mode="box")),
+        }
+    )
+    return vol.Schema(fields)
+
+
+def _supply_errors(user_input: dict[str, Any]) -> dict[str, str]:
+    """Detection needs all three inputs, each sensor in one role only."""
+    apartment = user_input.get(CONF_APARTMENT_POWER_SENSOR)
+    victron = user_input.get(CONF_VICTRON_OUTPUT_POWER_SENSOR)
+    others = list(user_input.get(CONF_VICTRON_OTHER_POWER_SENSORS) or [])
+    present = [bool(apartment), bool(victron), bool(others)]
+    if any(present) and not all(present):
+        return {"base": "supply_incomplete"}
+    roles = [e for e in (apartment, victron, *others) if e]
+    if len(roles) != len(set(roles)):
+        return {"base": "supply_sensor_reused"}
+    return {}
 
 
 def _cap_terms_schema(defaults: dict[str, Any]) -> vol.Schema:
@@ -604,6 +689,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 "ev",
                 "tariff_list",
                 "billing",
+                "supply",
                 "reset_data",
                 "finish",
             ],
@@ -838,6 +924,43 @@ class PowerPilotOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="billing_terms",
             data_schema=_cap_terms_schema(existing.to_dict() if existing else {}),
+        )
+
+    # ------------------------------------------------------- apartment supply
+
+    async def async_step_supply(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Which point of delivery feeds the apartment: inputs and thresholds."""
+        self._ensure_loaded()
+        meters = [
+            selector.SelectOptionDict(value=eid, label=self._friendly(eid))
+            for eid in metered_sensors(self._data)
+        ]
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = _supply_errors(user_input)
+            if not errors:
+                for key in (*_SUPPLY_SENSOR_KEYS, CONF_APARTMENT_METER):
+                    if user_input.get(key):
+                        self._data[key] = user_input[key]
+                    else:
+                        self._data.pop(key, None)
+                others = list(user_input.get(CONF_VICTRON_OTHER_POWER_SENSORS) or [])
+                if others:
+                    self._data[CONF_VICTRON_OTHER_POWER_SENSORS] = others
+                else:
+                    self._data.pop(CONF_VICTRON_OTHER_POWER_SENSORS, None)
+                self._data[CONF_SUPPLY_MIN_APARTMENT_W] = float(
+                    user_input[CONF_SUPPLY_MIN_APARTMENT_W]
+                )
+                self._data[CONF_SUPPLY_MARGIN_W] = float(user_input[CONF_SUPPLY_MARGIN_W])
+                self._data[CONF_SUPPLY_CONFIRM_SAMPLES] = int(
+                    user_input[CONF_SUPPLY_CONFIRM_SAMPLES]
+                )
+                return await self.async_step_init()
+        return self.async_show_form(
+            step_id="supply",
+            data_schema=_supply_schema({**self._data, **(user_input or {})}, meters),
+            errors=errors,
         )
 
     async def async_step_billing_meters(

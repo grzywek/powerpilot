@@ -99,7 +99,8 @@
           "tariff_list": "🧾 Taryfy dystrybucyjne",
           "reset_data": "🧹 Wyczyść dane i cache (zachowaj konfigurację)",
           "finish": "✅ Zapisz i zakończ",
-          "billing": "🛡️ Tarcza (limit ceny miesięcznej)"
+          "billing": "🛡️ Tarcza (limit ceny miesięcznej)",
+          "supply": "🏠 Zasilanie mieszkania"
         }
       },
       "reset_data": {
@@ -276,6 +277,19 @@
         "data": {
           "ppe1_import_sensors": "Liczniki importu PPE 1 (np. Victron AC-in do AC-out, AC-in do falownika, licznik ładowarki EV)"
         }
+      },
+      "supply": {
+        "title": "PowerPilot – zasilanie mieszkania",
+        "description": "Rozpoznaje z samej mocy, czy mieszkanie jest zasilane z Victrona (PPE 1), czy z drugiego licznika (PPE 2). Gdy mieszkanie pobiera co najmniej minimalną moc, jest na Victronie, jeśli wyjście Victrona minus pozostałe podliczniki za nim pokrywa mieszkanie z dokładnością do marginesu. Zmiana liczy się dopiero po tylu zgodnych próbkach z rzędu (jedna co 30 s). Wykrywanie działa tylko, gdy ustawione są wszystkie trzy: czujnik mieszkania, wyjście Victrona i pozostałe podliczniki; zostaw wszystkie trzy puste, aby je wyłączyć.",
+        "data": {
+          "apartment_power_sensor": "Moc mieszkania (W lub kW)",
+          "apartment_meter": "Urządzenie z licznikiem, które jest mieszkaniem (jego podliczniki przechodzą razem z nim)",
+          "victron_output_power_sensor": "Moc wyjścia Victrona (W lub kW)",
+          "victron_other_power_sensors": "Moc pozostałych podliczników za Victronem (poza mieszkaniem)",
+          "supply_min_apartment_w": "Minimalna moc mieszkania do rozstrzygnięcia",
+          "supply_margin_w": "Margines",
+          "supply_confirm_samples": "Zgodne próbki z rzędu potwierdzające zmianę"
+        }
       }
     },
     "error": {
@@ -283,7 +297,9 @@
       "cap_terms_dates_order": "Data początku jest późniejsza niż data końca.",
       "cap_terms_whole_months": "Okres musi obejmować pełne miesiące: od 1. dnia miesiąca do ostatniego dnia miesiąca.",
       "cap_terms_limit": "Limit musi być większy od zera.",
-      "cap_terms_overlap": "Ten okres nachodzi na inną Tarczę."
+      "cap_terms_overlap": "Ten okres nachodzi na inną Tarczę.",
+      "supply_incomplete": "Ustaw wszystkie trzy: czujnik mieszkania, wyjście Victrona i co najmniej jeden pozostały podlicznik za Victronem — albo zostaw wszystkie trzy puste.",
+      "supply_sensor_reused": "Każdy czujnik może pełnić tylko jedną rolę: mieszkanie, wyjście Victrona i pozostałe podliczniki muszą być różnymi czujnikami."
     }
   },
   "selector": {
@@ -344,6 +360,13 @@
       },
       "tarcza_ppe1_discount": {
         "name": "🛡️ Tarcza PPE 1: prognozowany rabat"
+      },
+      "apartment_supply_actual": {
+        "name": "Zasilanie mieszkania",
+        "state": {
+          "victron": "Victron (PPE 1)",
+          "meter_2": "Licznik 2 (PPE 2)"
+        }
       }
     },
     "binary_sensor": {

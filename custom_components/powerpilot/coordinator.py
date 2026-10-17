@@ -86,6 +86,7 @@ from .modules.billing import BillingModule, month_bounds
 from .modules.calendar import CALENDAR_LOOKAHEAD_HOURS
 from .modules.ev import CHARGING_STATES, HOME_STATES, PLUGGED_STATES
 from .modules.snapshots import SnapshotStore
+from .modules.supply import SupplyModule
 from .modules import (
     CalendarModule,
     ClimateModule,
@@ -183,6 +184,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # recorder through the consumption module's kWh readers and the price
         # archive through the prices module — injected, not reached for.
         self.billing = BillingModule(hass, self, self.consumption, self.prices)
+        # Which point of delivery feeds the apartment (Victron / meter 2),
+        # sampled on its own tick; contributes nothing to the forecast yet.
+        self.supply = SupplyModule(hass, self)
 
         # Order matters: prices/weather first, then derived loads, then the
         # calendar (events + trips), then EV — which consumes the calendar's
@@ -197,6 +201,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             self.calendar,
             self.ev,
             self.billing,
+            self.supply,
         ):
             self.registry.register(module)
 

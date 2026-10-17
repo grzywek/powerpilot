@@ -84,7 +84,8 @@
           "tariff_list": "🧾 Distribution tariffs",
           "reset_data": "🧹 Clear data & cache (keep config)",
           "finish": "✅ Save & exit",
-          "billing": "🛡️ Price cap (Tarcza)"
+          "billing": "🛡️ Price cap (Tarcza)",
+          "supply": "🏠 Apartment supply"
         }
       },
       "reset_data": {
@@ -242,6 +243,19 @@
         "data": {
           "ppe1_import_sensors": "PPE 1 grid-import meters (e.g. inverter AC-in to AC-out, AC-in to inverter, EV charger meter)"
         }
+      },
+      "supply": {
+        "title": "PowerPilot – apartment supply",
+        "description": "Tells whether the apartment is fed from the Victron (PPE 1) or from the second meter (PPE 2), from power alone. When the apartment draws at least the minimum power, it is on the Victron if the Victron output minus the other sub-meters behind it covers the apartment within the margin. A change counts after that many agreeing samples in a row (one every 30 s). Detection is on only when the apartment sensor, the Victron output sensor and the other sub-meters are all set; leave all three empty to turn it off.",
+        "data": {
+          "apartment_power_sensor": "Apartment power (W or kW)",
+          "apartment_meter": "Metered device that is the apartment (its sub-meters move with it)",
+          "victron_output_power_sensor": "Victron output power (W or kW)",
+          "victron_other_power_sensors": "Power of the other sub-meters behind the Victron (outside the apartment)",
+          "supply_min_apartment_w": "Minimum apartment power to decide",
+          "supply_margin_w": "Margin",
+          "supply_confirm_samples": "Agreeing samples in a row to confirm a change"
+        }
       }
     },
     "error": {
@@ -249,7 +263,9 @@
       "cap_terms_dates_order": "The start date is after the end date.",
       "cap_terms_whole_months": "The period must span whole months: from the 1st of a month to the last day of a month.",
       "cap_terms_limit": "The limit must be greater than zero.",
-      "cap_terms_overlap": "This period overlaps another price cap edition."
+      "cap_terms_overlap": "This period overlaps another price cap edition.",
+      "supply_incomplete": "Set all three: the apartment sensor, the Victron output sensor and at least one other sub-meter behind the Victron — or leave all three empty.",
+      "supply_sensor_reused": "Each sensor can play one role only: the apartment, the Victron output and the other sub-meters must be different sensors."
     }
   },
   "selector": {
@@ -307,6 +323,13 @@
       },
       "tarcza_ppe1_discount": {
         "name": "🛡️ Price cap PPE 1: forecast discount"
+      },
+      "apartment_supply_actual": {
+        "name": "Apartment supply",
+        "state": {
+          "victron": "Victron (PPE 1)",
+          "meter_2": "Meter 2 (PPE 2)"
+        }
       }
     },
     "binary_sensor": {

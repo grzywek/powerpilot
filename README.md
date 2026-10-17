@@ -29,12 +29,17 @@ frontend card (HACS → Frontend).
 
 ### Sidebar panel
 
-PowerPilot also ships a **custom sidebar panel** (Lit + TypeScript) that registers
-itself automatically — a **PowerPilot** entry appears in the HA sidebar with three
-tabs: *Overview* (SVG charts + current control + Configure button), *Status* (what
-works / what's missing + learning progress), and *Logs* (recent optimization runs
-and module errors). It is backed by a WebSocket API (`powerpilot/plan|status|log`),
-not by entity attributes. See
+PowerPilot also ships a **custom sidebar panel** (Lit + TypeScript, ApexCharts)
+that registers itself automatically — a **PowerPilot** entry appears in the HA
+sidebar with ten tabs: *Przegląd* (energy and price charts, the current control,
+the apartment-supply card), *Ceny* (the hourly price archive), *Symulacje*
+(forecast accuracy against what happened), *Przepływ* (the live pipeline),
+*Sprawność* (measured vs configured efficiencies), *Status* (what works and
+what is missing), *Diagnostyka*, *Profile* (learned consumption profiles),
+*Logi* and *Debug* (a full state export). It is backed by a WebSocket API
+(`powerpilot/plan`, `status`, `log`, `profiles`, `series`, `prices`,
+`accuracy`, `flow`, `efficiency`, `debug`, `diagnostics`,
+`consumption_stats`), not by entity attributes. See
 [docs/INSTALL_AND_VERIFY.md](docs/INSTALL_AND_VERIFY.md) for how to verify and
 [the frontend build notes](docs/INSTALL_AND_VERIFY.md#budowanie-frontendu-dla-deweloperów).
 

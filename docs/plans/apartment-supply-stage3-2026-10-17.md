@@ -171,6 +171,49 @@ slice 1); the actual supply and the last transition; availability.
   meters' `BillingOutcome`s. Recommendations (marginal value per cycle,
   entities, notifications) are slice 3.
 
+## Slice 3 design (binding)
+
+- **Opt-in.** A new option `supply_recommendations` (default off) in the
+  `supply` step. Switching is modelled only while it is on: a plan that assumes
+  switches nobody makes would provision the battery for a load it then
+  carries. Off = today's plans, and the recommendation entities say why.
+- **What "now" means.** The running hour is always planned on the actual
+  supply, so the recommendation is the planned supply of the NEXT hour:
+  `recommended` = supply of slot 1; `switch_required` = on while `recommended`
+  differs from the actual state (switch before the next full hour). It turns
+  off by itself once detection confirms the switch (actual = recommended) or a
+  re-plan drops the cycle.
+- **Cycles.** A cycle = a run of planned `meter_2` hours. Its id is its planned
+  start (ISO) — or, for one already running, the actual transition's `at`,
+  read from the supply log (the started-cycle record the parent spec asks for:
+  its return needs no threshold, which the model already does by pricing only
+  openings). Per cycle: start, planned return, hours, apartment kWh moved.
+- **Marginal value (decision 4).** Each proposed cycle (not one already
+  running) is re-solved with its opening forbidden; its saving = the settled
+  cost without it − the settled cost with it (thresholds excluded). A cycle
+  saving less than the threshold is dropped by forbidding it and re-solving,
+  repeated until every remaining cycle clears it. A running cycle's saving
+  is "stay until the planned return" against "return at the next allowed
+  boundary". Re-solves reuse the enumeration of slice 2b; their count and time
+  go to diagnostics.
+- **Entities** (parent spec table): `sensor.…_apartment_supply_recommended`
+  (enum, next hour), `sensor.…_apartment_supply_plan` (state = number of
+  cycles in the horizon; attributes: cycles with id, start, return, hours, kWh,
+  saving, and the hourly planned supply), `sensor.…_apartment_next_switch`
+  (timestamp; attributes: target, planned return, cycle id),
+  `binary_sensor.…_apartment_switch_required`,
+  `binary_sensor.…_apartment_switch_available` (the user can switch now: not
+  in the quiet window, not on a trip, calendar readable),
+  `sensor.…_apartment_cycle_savings` (PLN of the next or running cycle), and
+  number entities for the cycle threshold and the minimum stay (writing the
+  options, like the existing EV reserve number). All show the reason while
+  switching is not modelled.
+- **Notification.** One Home Assistant persistent notification per cycle id
+  while `switch_required` is on ("Przełącz mieszkanie na licznik 2 do HH:00,
+  powrót ok. HH:00, oszczędność ~X zł" / the return wording), dismissed when
+  it turns off; never repeated for the same cycle id and direction. Phone push
+  is left to the user's automations on `switch_required`.
+
 ## Backtest on October 1–17, 2026 (live data)
 
 Hourly apartment energy, the Victron's grid-to-loads energy split between the

@@ -149,9 +149,10 @@ class ConsumptionModule(PowerPilotModule):
 
         The in-progress clock hour has no compiled *hourly* statistic yet, so the
         chart's "real so far this hour" segment reads the short-term 5-minute
-        buckets instead: energy sensors sum their delta across the window, power
-        sensors integrate ``mean × 5min``. Returns ``None`` when the sensor is
-        unreadable (no unit / no statistics), ``0.0`` when simply nothing flowed.
+        buckets instead: energy sensors add up each bucket's ``change`` (the
+        window's first bucket included), power sensors integrate
+        ``mean × 5min``. Returns ``None`` when the sensor is unreadable (no unit
+        / no statistics), ``0.0`` when simply nothing flowed.
         """
         if end <= start:
             return 0.0
@@ -167,7 +168,7 @@ class ConsumptionModule(PowerPilotModule):
             {entity_id},
             "5minute",
             None,
-            {"mean"} if kind == "power" else {"sum"},
+            {"mean"} if kind == "power" else {"change"},
         )
         series = rows.get(entity_id, [])
         if not series:
@@ -180,10 +181,14 @@ class ConsumptionModule(PowerPilotModule):
                 if mean is not None:
                     total += float(mean) * factor * (5.0 / 60.0)
             return total
-        sums = [float(r["sum"]) for r in series if r.get("sum") is not None]
-        if len(sums) < 2:
-            return 0.0
-        return max(0.0, sums[-1] - sums[0]) * _ENERGY_UNITS[unit]
+        # ``change`` is the energy within each bucket. Differencing cumulative
+        # sums instead loses the first bucket of the window (a sum row is the
+        # total at the END of its bucket), and a dip stays the negative energy
+        # the recorder booked rather than being clamped away.
+        changes = [float(r["change"]) for r in series if r.get("change") is not None]
+        if not changes:
+            return None
+        return sum(changes) * _ENERGY_UNITS[unit]
 
     async def async_active_minutes(
         self, entity_id: str, start: datetime, end: datetime
@@ -262,8 +267,8 @@ class ConsumptionModule(PowerPilotModule):
             total = float(total)
             if prev is not None:
                 _seen(row)
-                # A negative delta is a counter reset (a new charging session),
-                # not flow — the next bucket judges what follows it.
+                # A negative delta is a dip the recorder booked (resets never
+                # show here: the sum continues across them) — not flow.
                 if (total - prev) * factor > _ACTIVE_BUCKET_KWH:
                     _active(row)
             prev = total
@@ -480,6 +485,15 @@ class ConsumptionModule(PowerPilotModule):
         return out
 
     def _energy_series(self, series: list, unit: str) -> dict[datetime, float]:
+        """Hourly kWh as the difference of consecutive cumulative ``sum`` rows.
+
+        The recorder already carries ``sum`` across meter resets: a
+        total_increasing state falling below 90 % of the previous one starts a
+        new cycle and the sum keeps growing. A smaller fall is a dip it books
+        as negative energy, so a negative difference is that hour's reading,
+        never a reset — dropping it made the hour look unmeasured, and the
+        hours no longer added up to the meter's total.
+        """
         factor = _ENERGY_UNITS[unit]
         out: dict[datetime, float] = {}
         prev_sum: float | None = None
@@ -490,9 +504,7 @@ class ConsumptionModule(PowerPilotModule):
                 continue
             total = float(total)
             if prev_sum is not None:
-                delta = total - prev_sum
-                if delta >= 0:  # ignore meter resets
-                    out[self._row_hour(row)] = delta * factor
+                out[self._row_hour(row)] = (total - prev_sum) * factor
             prev_sum = total
         return out
 

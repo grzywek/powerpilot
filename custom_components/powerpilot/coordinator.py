@@ -2070,7 +2070,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         bat_discharge_real = await _read_opt(CONF_BATTERY_DISCHARGE_SENSOR)
         grid_import_real = await _read_opt(CONF_GRID_IMPORT_SENSOR)
         # Realized EV charging per hour from the session energy-added counter
-        # (total_increasing; async_range_kwh already ignores session resets).
+        # (total_increasing; the recorder's sum continues across session resets).
         ev_charge_real = await _read_opt(CONF_EV_ENERGY_ADDED_SENSOR)
         # How long the charger actually ran each hour, measured in 5-minute
         # buckets. The plan commits to a *duration* (ev_charge_minutes), so the

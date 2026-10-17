@@ -356,6 +356,8 @@ class _SwitchModel:
     actual: float  # 1.0 = on meter 2
     threshold: float  # zł per opened cycle
     min_stay: int  # hours
+    # Columns held on the Victron (``SupplyPlanning.victron_hours``).
+    victron: frozenset[int] = frozenset()
 
 
 @dataclass
@@ -372,6 +374,8 @@ class _LPSolution:
     # unless switching was modelled.
     supply: list[float] = field(default_factory=list)
     ppe2_periods: list[tuple[float, float, bool]] = field(default_factory=list)
+    # The winning objective without the cycle thresholds (PLN).
+    objective: float = 0.0
 
 
 class Optimizer:
@@ -605,6 +609,9 @@ class Optimizer:
             )
         plan.supply_switching = switching
         plan.supply_reason = supply.switching_reason if supply is not None else None
+        plan.comparable_cost_pln = solution.objective
+        if switch is not None:
+            plan.supply_boundaries = [all_slots[t].start for t in switch.starts[1:]]
         return plan
 
     @staticmethod
@@ -616,7 +623,9 @@ class Optimizer:
         Boundary ``t`` (between hours ``t−1`` and ``t``) is a switch hour only
         before the switch horizon, outside the quiet window (by the local
         start hour of slot ``t``), while the user is available, and once the
-        actual last transition is at least the minimum stay old.
+        actual last transition is at least the minimum stay old. A column
+        holding one of ``supply.victron_hours`` is held on the Victron; the
+        running hour's cannot be while the apartment is on meter 2.
         """
         t_sw = min(SUPPLY_SWITCH_HOURS, horizon)
         stay = timedelta(hours=supply.min_stay_hours)
@@ -636,12 +645,21 @@ class Optimizer:
             ):
                 starts.append(t)
             segment.append(len(starts) - 1)
+        actual = 1.0 if supply.actual == SUPPLY_METER_2 else 0.0
+        victron = frozenset(
+            segment[t] for t, slot in enumerate(slots) if slot.start in supply.victron_hours
+        )
+        if 0 in victron and actual > 0.5:
+            raise ValueError(
+                "the running hour cannot be held on the Victron: the apartment is on meter 2"
+            )
         return _SwitchModel(
             segment=segment,
             starts=starts,
-            actual=1.0 if supply.actual == SUPPLY_METER_2 else 0.0,
+            actual=actual,
             threshold=supply.cycle_threshold_pln,
             min_stay=supply.min_stay_hours,
+            victron=victron,
         )
 
     @staticmethod
@@ -1000,10 +1018,11 @@ class Optimizer:
         w_cols: dict[int, int] = {}
         if switch is not None:
             for k in range(seg_k):
-                fixed = k == 0
-                h.addVar(switch.actual if fixed else 0.0, switch.actual if fixed else 1.0)
-                if not fixed:
-                    h.changeColIntegrality(s_col(k), highspy.HighsVarType.kInteger)
+                if k == 0:
+                    h.addVar(switch.actual, switch.actual)
+                    continue
+                h.addVar(0.0, 0.0 if k in switch.victron else 1.0)
+                h.changeColIntegrality(s_col(k), highspy.HighsVarType.kInteger)
             for _k in range(1, seg_k):
                 h.addVar(0.0, 1.0)
             for t in range(n):
@@ -1350,7 +1369,11 @@ class Optimizer:
             (combo for combo, (obj, _) in solved.items() if obj <= best_obj + _REGIME_TIE_PLN),
             key=lambda combo: tie_rank[combo],
         )
-        sol = solved[regime_combo][1]
+        objective, sol = solved[regime_combo]
+        # The cycle thresholds are a hurdle, not a cost: plans are compared
+        # without them (o is exact under minimisation while the threshold is
+        # positive; at zero it costs nothing either way).
+        objective -= sum(switch.threshold * sol[o_col(k)] for k in range(1, seg_k))
         regimes = list(regime_combo[: len(periods)])
         regimes2 = list(regime_combo[len(periods) :])
 
@@ -1396,6 +1419,7 @@ class Optimizer:
             periods=settled_periods,
             supply=supply,
             ppe2_periods=ppe2_settled,
+            objective=objective,
         )
 
     @staticmethod

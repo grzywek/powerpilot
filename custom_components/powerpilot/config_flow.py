@@ -75,6 +75,7 @@ from .const import (
     CONF_SUPPLY_MIN_STAY_HOURS,
     CONF_SUPPLY_QUIET_END_HOUR,
     CONF_SUPPLY_QUIET_START_HOUR,
+    CONF_SUPPLY_RECOMMENDATIONS,
     CONF_SUPPLY_VICTRON_SHARE,
     CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_TARCZA_TERMS,
@@ -302,7 +303,10 @@ def _supply_schema(
             vol.Required(
                 CONF_SUPPLY_CONFIRM_SAMPLES, default=d(CONF_SUPPLY_CONFIRM_SAMPLES)
             ): _NUMBER(_NUM(min=1, max=20, step=1, mode="box")),
-            # Switching rules of the plan (stage 3).
+            # Switching rules of the plan (stage 3), modelled only when opted in.
+            vol.Required(
+                CONF_SUPPLY_RECOMMENDATIONS, default=d(CONF_SUPPLY_RECOMMENDATIONS)
+            ): selector.BooleanSelector(),
             vol.Required(
                 CONF_SUPPLY_CYCLE_THRESHOLD_PLN, default=d(CONF_SUPPLY_CYCLE_THRESHOLD_PLN)
             ): _NUMBER(_NUM(min=0, max=100, step=0.5, unit_of_measurement="zł", mode="box")),
@@ -991,6 +995,9 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 self._data.pop(_OBSOLETE_SUPPLY_MARGIN_KEY, None)
                 self._data[CONF_SUPPLY_CONFIRM_SAMPLES] = int(
                     user_input[CONF_SUPPLY_CONFIRM_SAMPLES]
+                )
+                self._data[CONF_SUPPLY_RECOMMENDATIONS] = bool(
+                    user_input[CONF_SUPPLY_RECOMMENDATIONS]
                 )
                 self._data[CONF_SUPPLY_CYCLE_THRESHOLD_PLN] = float(
                     user_input[CONF_SUPPLY_CYCLE_THRESHOLD_PLN]

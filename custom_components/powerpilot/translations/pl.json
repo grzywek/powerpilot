@@ -280,7 +280,7 @@
       },
       "supply": {
         "title": "PowerPilot – zasilanie mieszkania",
-        "description": "Rozpoznaje z samej mocy, czy mieszkanie jest zasilane z Victrona (PPE 1), czy z drugiego licznika (PPE 2). Gdy mieszkanie pobiera co najmniej minimalną moc, jest na Victronie, chyba że wyjście Victrona minus pozostałe podliczniki za nim pokrywa mniej niż ustalony udział mocy mieszkania. Zmiana liczy się dopiero po tylu zgodnych próbkach z rzędu (jedna co 30 s). Wykrywanie działa tylko, gdy ustawione są wszystkie trzy: czujnik mieszkania, wyjście Victrona i pozostałe podliczniki; zostaw wszystkie trzy puste, aby je wyłączyć. Reguły przełączania w planie: otwarcie cyklu (przełączenie mieszkania na licznik 2) kosztuje próg w zł, więc cykl musi oszczędzić więcej; każde źródło trzyma się co najmniej minimalny czas; w oknie ciszy (godziny lokalne od–do, przez północ; równe godziny = bez okna) ani podczas wyjazdów z kalendarza plan nie przełącza.",
+        "description": "Rozpoznaje z samej mocy, czy mieszkanie jest zasilane z Victrona (PPE 1), czy z drugiego licznika (PPE 2). Gdy mieszkanie pobiera co najmniej minimalną moc, jest na Victronie, chyba że wyjście Victrona minus pozostałe podliczniki za nim pokrywa mniej niż ustalony udział mocy mieszkania. Zmiana liczy się dopiero po tylu zgodnych próbkach z rzędu (jedna co 30 s). Wykrywanie działa tylko, gdy ustawione są wszystkie trzy: czujnik mieszkania, wyjście Victrona i pozostałe podliczniki; zostaw wszystkie trzy puste, aby je wyłączyć. Reguły przełączania w planie: otwarcie cyklu (przełączenie mieszkania na licznik 2) kosztuje próg w zł, więc cykl musi oszczędzić więcej; każde źródło trzyma się co najmniej minimalny czas; w oknie ciszy (godziny lokalne od–do, przez północ; równe godziny = bez okna) ani podczas wyjazdów z kalendarza plan nie przełącza. Przełączenia są planowane i rekomendowane tylko po włączeniu rekomendacji; wyłączone — plan trzyma mieszkanie na obecnym źródle, a encje rekomendacji podają przyczynę.",
         "data": {
           "apartment_power_sensor": "Moc mieszkania (W lub kW)",
           "apartment_meter": "Urządzenie z licznikiem, które jest mieszkaniem (jego podliczniki przechodzą razem z nim)",
@@ -289,6 +289,7 @@
           "supply_min_apartment_w": "Minimalna moc mieszkania do rozstrzygnięcia",
           "supply_victron_share": "Udział mocy mieszkania, który Victron musi pokrywać (0,5 = połowa)",
           "supply_confirm_samples": "Zgodne próbki z rzędu potwierdzające zmianę",
+          "supply_recommendations": "Rekomenduj przełączanie mieszkania między licznikami (plan modeluje przełączenia)",
           "supply_cycle_threshold_pln": "Próg opłacalności cyklu (zł)",
           "supply_min_stay_hours": "Minimalny czas na jednym źródle (h)",
           "supply_quiet_start_hour": "Okno ciszy — od godziny",
@@ -378,6 +379,22 @@
           "victron": "Victron (PPE 1)",
           "meter_2": "Licznik 2 (PPE 2)"
         }
+      },
+      "apartment_supply_recommended": {
+        "name": "Zalecane zasilanie mieszkania",
+        "state": {
+          "victron": "Victron (PPE 1)",
+          "meter_2": "Licznik 2 (PPE 2)"
+        }
+      },
+      "apartment_supply_plan": {
+        "name": "Plan zasilania mieszkania"
+      },
+      "apartment_next_switch": {
+        "name": "Następne przełączenie mieszkania"
+      },
+      "apartment_cycle_savings": {
+        "name": "Oszczędność cyklu mieszkania"
       }
     },
     "binary_sensor": {
@@ -392,11 +409,23 @@
       },
       "plan_not_executed": {
         "name": "⚠️ Plan nie jest wykonywany"
+      },
+      "apartment_switch_required": {
+        "name": "Przełączenie mieszkania wymagane"
+      },
+      "apartment_switch_available": {
+        "name": "Przełączenie mieszkania możliwe"
       }
     },
     "number": {
       "ev_min_soc": {
         "name": "🚗 Minimalny SoC EV (rezerwa)"
+      },
+      "apartment_min_cycle_savings": {
+        "name": "Próg opłacalności cyklu mieszkania"
+      },
+      "apartment_min_stay_hours": {
+        "name": "Minimalny czas mieszkania na jednym źródle"
       }
     }
   }

@@ -11,6 +11,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    BINARY_APARTMENT_SWITCH_AVAILABLE,
+    BINARY_APARTMENT_SWITCH_REQUIRED,
     BINARY_EV_CHARGE,
     BINARY_EV_CONNECT_CHARGER,
     BINARY_PLAN_NOT_EXECUTED,
@@ -19,7 +21,7 @@ from .const import (
     PPE_1,
 )
 from .coordinator import PowerPilotCoordinator
-from .sensor import PowerPilotEntity, TarczaEntity
+from .sensor import ApartmentRecommendationEntity, PowerPilotEntity, TarczaEntity
 
 
 async def async_setup_entry(
@@ -32,6 +34,8 @@ async def async_setup_entry(
             EVConnectChargerBinarySensor(coordinator, entry),
             TarczaCapBindsBinarySensor(coordinator, entry),
             PlanNotExecutedBinarySensor(coordinator, entry),
+            ApartmentSwitchRequiredBinarySensor(coordinator, entry),
+            ApartmentSwitchAvailableBinarySensor(coordinator, entry),
         ]
     )
 
@@ -123,3 +127,48 @@ class TarczaCapBindsBinarySensor(TarczaEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict:
         return self._forecast_attributes()
+
+
+class ApartmentSwitchRequiredBinarySensor(ApartmentRecommendationEntity, BinarySensorEntity):
+    """ON while the recommended supply (next hour) differs from the actual one.
+
+    Switch before the next full hour. Turns off once detection confirms the
+    switch or a re-plan drops the cycle. The stable interface for an
+    automation (or a person) carrying the switch out.
+    """
+
+    _attr_icon = "mdi:home-switch-outline"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, BINARY_APARTMENT_SWITCH_REQUIRED)
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.recommendation.switch_required
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rec = self.recommendation
+        return {
+            "reason": rec.reason,
+            "target": rec.recommended if rec.switch_required else None,
+            "cycle_id": rec.notice[0] if rec.notice else None,
+        }
+
+
+class ApartmentSwitchAvailableBinarySensor(ApartmentRecommendationEntity, BinarySensorEntity):
+    """ON when the user can switch now: outside the quiet window, not away, calendar readable."""
+
+    _attr_icon = "mdi:account-check"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, BINARY_APARTMENT_SWITCH_AVAILABLE)
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.recommendation.available
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rec = self.recommendation
+        return {"reason": rec.reason, "unavailable_reason": rec.unavailable_reason}

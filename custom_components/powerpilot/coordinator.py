@@ -18,6 +18,7 @@ from typing import Final
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import (
     async_track_point_in_time,
     async_track_state_change_event,
@@ -55,6 +56,7 @@ from .const import (
     CONF_SUPPLY_MIN_STAY_HOURS,
     CONF_SUPPLY_QUIET_END_HOUR,
     CONF_SUPPLY_QUIET_START_HOUR,
+    CONF_SUPPLY_RECOMMENDATIONS,
     DEFAULTS,
     DOMAIN,
     MODE_CODE,
@@ -105,6 +107,12 @@ from .modules import (
     WeatherModule,
 )
 from .optimizer import ChargeCurve, Optimizer, OptimizerConfig
+from .supply_cycles import (
+    SupplyRecommendation,
+    SwitchNotices,
+    recommendation,
+    settle_cycles,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -170,6 +178,13 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # reason instead of on every refresh.
         self._billing_unavailable_logged: dict[str, str] = {}
         self._supply_reason_logged: str | None = None
+        # What the latest plan was given to place the apartment (``None``
+        # without supply detection) — the recommendation entities read the
+        # quiet window, trips and calendar state from it — and which switch
+        # notifications were already shown (kept across restarts in the
+        # snapshot store).
+        self.supply_planning: SupplyPlanning | None = None
+        self.switch_notices = SwitchNotices()
 
         super().__init__(
             hass,
@@ -355,6 +370,16 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
     async def async_setup_modules(self) -> None:
         await self.registry.async_setup_all()
         await self._async_setup_snapshots()
+        # A confirmed switch ends (or starts) a required switch between plans.
+        self.entry.async_on_unload(
+            async_dispatcher_connect(
+                self.hass, self.supply.signal, self._async_on_supply_changed
+            )
+        )
+
+    @callback
+    def _async_on_supply_changed(self) -> None:
+        self._sync_switch_notification(self.data)
 
     async def _async_setup_snapshots(self) -> None:
         self._snapshot_store = Store(
@@ -376,6 +401,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 dt_util.parse_datetime(stored.get("last_snapshot_hour") or "")
                 or None
             )
+            self.switch_notices = SwitchNotices.from_list(stored.get("supply_notified"))
 
     def _snapshots_payload(self) -> dict:
         return {
@@ -389,6 +415,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if self._last_snapshot_hour
                 else None
             ),
+            # Switch notifications already shown: never repeated after a restart.
+            "supply_notified": self.switch_notices.to_list(),
         }
 
     async def _async_save_snapshots(self) -> None:
@@ -410,6 +438,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.snapshots = SnapshotStore()
         self._last_snapshot_hour = None
         self._battery_energy_cost = 0.0
+        self.switch_notices = SwitchNotices()
         self.events.clear()
         await self.registry.async_clear_all()
 
@@ -620,19 +649,24 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         supply_planning, ppe2_reason = self._supply_inputs(
             forecast, billing_periods, billing_reason
         )
-        plan = await self.hass.async_add_executor_job(
-            partial(
-                optimizer.optimize,
-                forecast,
-                battery,
-                ev_request,
-                reminders,
-                ess_request=ess_request,
-                billing=billing_periods,
-                tail=tail,
-                supply=supply_planning,
-            )
+        solve = partial(
+            optimizer.optimize,
+            forecast,
+            battery,
+            ev_request,
+            reminders,
+            ess_request=ess_request,
+            billing=billing_periods,
+            tail=tail,
         )
+        if supply_planning is None:
+            plan = await self.hass.async_add_executor_job(solve)
+        else:
+            # With switching modelled every proposed cycle is valued by
+            # re-solving these same inputs without it (``supply_cycles.py``).
+            plan = await self.hass.async_add_executor_job(
+                settle_cycles, lambda planning: solve(supply=planning), supply_planning
+            )
         if billing_reason is not None:
             plan.billing = self._unavailable_outcomes(billing_reason, forecast, PPE_1)
         elif billing_periods:
@@ -649,6 +683,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         await self._maybe_record_snapshot(forecast, plan, trigger)
         self._record_event(plan)
+        self.supply_planning = supply_planning
+        self._sync_switch_notification(plan)
         return plan
 
     # ------------------------------------------------------------------
@@ -795,7 +831,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             if ppe2_reason is None:
                 ppe2_periods = touching
 
-        if supply.state is None:
+        if not self.config[CONF_SUPPLY_RECOMMENDATIONS]:
+            reason = (
+                "rekomendacje przełączania są wyłączone (opcje → Zasilanie "
+                "mieszkania)"
+            )
+        elif supply.state is None:
             reason = "nie wiadomo jeszcze, skąd zasilane jest mieszkanie"
         elif billing_reason is not None:
             reason = f"rozliczenie Tarczy PPE 1 niedostępne — {billing_reason}"
@@ -826,6 +867,48 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             calendar_error="; ".join(calendar_errors) if calendar_errors else None,
         )
         return planning, ppe2_reason
+
+    def supply_recommendation(self, plan: Plan | None = None) -> SupplyRecommendation:
+        """The apartment switch recommendation now (the latest plan by default)."""
+        return recommendation(
+            self.data if plan is None else plan,
+            self.supply_planning,
+            self.supply.state,
+            self.supply.since,
+            dt_util.now(),
+        )
+
+    @callback
+    def _sync_switch_notification(self, plan: Plan | None) -> None:
+        """Show the required switch once per cycle id and direction; dismiss it after.
+
+        The notification follows ``switch_required``: created when a switch
+        for a (cycle id, direction) not notified before becomes required,
+        dismissed when it stops being required (done, or re-planned away).
+        Phone pushes are left to the user's automations on the entity.
+        """
+        rec = self.supply_recommendation(plan)
+        notice = rec.notice if rec.switch_required else None
+        dismiss, create = self.switch_notices.update(notice)
+        notification_id = f"{DOMAIN}_apartment_switch_{self.entry.entry_id}"
+        if dismiss:
+            persistent_notification.async_dismiss(self.hass, notification_id)
+        if create:
+            persistent_notification.async_create(
+                self.hass,
+                rec.notice_message,
+                title=rec.notice_title,
+                notification_id=notification_id,
+            )
+            self.log_info(
+                "supply",
+                rec.notice_message,
+                extra={"cycle_id": notice[0], "direction": notice[1]},
+            )
+            # Saved soon, not with the snapshots' 30 s delay: a restart right
+            # after must not show the same switch again.
+            if self._snapshot_store is not None:
+                self._snapshot_store.async_delay_save(self._snapshots_payload, 1.0)
 
     def _note_supply_reason(self, reason: str | None) -> None:
         """Log, once per distinct reason, why no apartment switch is planned."""
@@ -3623,5 +3706,14 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 # Whether the current plan may move the apartment, and why not.
                 "plan_switching": self.data.supply_switching if self.data else None,
                 "plan_switching_reason": self.data.supply_reason if self.data else None,
+                # Cycles with their savings and what valuing them cost.
+                "plan_cycles": (
+                    [c.as_dict() for c in self.data.supply_cycles] if self.data else []
+                ),
+                "plan_resolves": self.data.supply_resolves if self.data else None,
+                "plan_resolve_seconds": (
+                    round(self.data.supply_resolve_seconds, 3) if self.data else None
+                ),
+                "plan_dropped_cycles": self.data.supply_dropped if self.data else [],
             },
         }

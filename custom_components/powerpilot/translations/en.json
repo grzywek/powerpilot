@@ -280,7 +280,7 @@
       },
       "supply": {
         "title": "PowerPilot – apartment supply",
-        "description": "Tells whether the apartment is fed from the Victron (PPE 1) or from the second meter (PPE 2), from power alone. When the apartment draws at least the minimum power, it is on the Victron unless the Victron output minus the other sub-meters behind it covers less than the set share of the apartment's power. A change counts after that many agreeing samples in a row (one every 30 s). Detection is on only when the apartment sensor, the Victron output sensor and the other sub-meters are all set; leave all three empty to turn it off. Switching rules of the plan: opening a cycle (moving the apartment to meter 2) costs the threshold in zł, so a cycle must save more than that; each source is kept at least the minimum stay; no switch is planned inside the quiet window (local hours from–to, wrapping past midnight; equal hours = no window) or during calendar trips.",
+        "description": "Tells whether the apartment is fed from the Victron (PPE 1) or from the second meter (PPE 2), from power alone. When the apartment draws at least the minimum power, it is on the Victron unless the Victron output minus the other sub-meters behind it covers less than the set share of the apartment's power. A change counts after that many agreeing samples in a row (one every 30 s). Detection is on only when the apartment sensor, the Victron output sensor and the other sub-meters are all set; leave all three empty to turn it off. Switching rules of the plan: opening a cycle (moving the apartment to meter 2) costs the threshold in zł, so a cycle must save more than that; each source is kept at least the minimum stay; no switch is planned inside the quiet window (local hours from–to, wrapping past midnight; equal hours = no window) or during calendar trips. Switches are planned and recommended only with recommendations turned on; off, the plan keeps the apartment on its current source and the recommendation entities say why.",
         "data": {
           "apartment_power_sensor": "Apartment power (W or kW)",
           "apartment_meter": "Metered device that is the apartment (its sub-meters move with it)",
@@ -289,6 +289,7 @@
           "supply_min_apartment_w": "Minimum apartment power to decide",
           "supply_victron_share": "Share of the apartment's power the Victron must cover (0.5 = half)",
           "supply_confirm_samples": "Agreeing samples in a row to confirm a change",
+          "supply_recommendations": "Recommend switching the apartment between the meters (the plan models switches)",
           "supply_cycle_threshold_pln": "Cycle threshold (zł)",
           "supply_min_stay_hours": "Minimum stay on one source (h)",
           "supply_quiet_start_hour": "Quiet window — from hour",
@@ -378,6 +379,22 @@
           "victron": "Victron (PPE 1)",
           "meter_2": "Meter 2 (PPE 2)"
         }
+      },
+      "apartment_supply_recommended": {
+        "name": "Recommended apartment supply",
+        "state": {
+          "victron": "Victron (PPE 1)",
+          "meter_2": "Meter 2 (PPE 2)"
+        }
+      },
+      "apartment_supply_plan": {
+        "name": "Apartment supply plan"
+      },
+      "apartment_next_switch": {
+        "name": "Apartment next switch"
+      },
+      "apartment_cycle_savings": {
+        "name": "Apartment cycle savings"
       }
     },
     "binary_sensor": {
@@ -392,11 +409,23 @@
       },
       "plan_not_executed": {
         "name": "⚠️ Plan not executed"
+      },
+      "apartment_switch_required": {
+        "name": "Apartment switch required"
+      },
+      "apartment_switch_available": {
+        "name": "Apartment switch available"
       }
     },
     "number": {
       "ev_min_soc": {
         "name": "EV minimum SoC (reserve)"
+      },
+      "apartment_min_cycle_savings": {
+        "name": "Apartment cycle threshold"
+      },
+      "apartment_min_stay_hours": {
+        "name": "Apartment minimum stay"
       }
     }
   }

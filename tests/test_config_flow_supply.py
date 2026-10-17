@@ -19,6 +19,7 @@ from custom_components.powerpilot.const import (
     CONF_SUPPLY_MIN_STAY_HOURS,
     CONF_SUPPLY_QUIET_END_HOUR,
     CONF_SUPPLY_QUIET_START_HOUR,
+    CONF_SUPPLY_RECOMMENDATIONS,
     CONF_SUPPLY_VICTRON_SHARE,
     CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_VICTRON_OTHER_POWER_SENSORS,
@@ -245,3 +246,31 @@ async def test_switching_rules_out_of_range_are_refused(
     _, result = await _open_supply(hass)
     with pytest.raises(InvalidData):
         await _configure(hass, result, {**SENSORS, key: value})
+
+
+async def test_recommendations_are_opt_in(hass: HomeAssistant) -> None:
+    """Off by default; turned on, the plan models switches (stage 3, slice 3)."""
+    entry, result = await _open_supply(hass)
+    assert _field(result, CONF_SUPPLY_RECOMMENDATIONS)[0].default() is False
+
+    result = await _configure(
+        hass,
+        result,
+        {**SENSORS, CONF_APARTMENT_METER: "sensor.apartment_energy"},
+    )
+    await _finish(hass, result)
+    assert entry.options[CONF_SUPPLY_RECOMMENDATIONS] is False
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _configure(hass, result, {"next_step_id": "supply"})
+    result = await _configure(
+        hass,
+        result,
+        {
+            **SENSORS,
+            CONF_APARTMENT_METER: "sensor.apartment_energy",
+            CONF_SUPPLY_RECOMMENDATIONS: True,
+        },
+    )
+    await _finish(hass, result)
+    assert entry.options[CONF_SUPPLY_RECOMMENDATIONS] is True

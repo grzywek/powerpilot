@@ -307,6 +307,10 @@ CONF_SUPPLY_CYCLE_THRESHOLD_PLN: Final = "supply_cycle_threshold_pln"
 CONF_SUPPLY_MIN_STAY_HOURS: Final = "supply_min_stay_hours"
 CONF_SUPPLY_QUIET_START_HOUR: Final = "supply_quiet_start_hour"
 CONF_SUPPLY_QUIET_END_HOUR: Final = "supply_quiet_end_hour"
+# Opt-in (default off): the plan models switches and recommends them. Off,
+# every plan keeps the actual supply — a plan assuming switches nobody makes
+# would provision the battery for a load it then carries.
+CONF_SUPPLY_RECOMMENDATIONS: Final = "supply_recommendations"
 
 SUPPLY_VICTRON: Final = "victron"  # apartment fed from the Victron (PPE 1)
 SUPPLY_METER_2: Final = "meter_2"  # apartment fed from the second meter (PPE 2)
@@ -390,6 +394,7 @@ DEFAULTS: Final = {
     CONF_SUPPLY_MIN_STAY_HOURS: 2,
     CONF_SUPPLY_QUIET_START_HOUR: 0,
     CONF_SUPPLY_QUIET_END_HOUR: 9,
+    CONF_SUPPLY_RECOMMENDATIONS: False,
 }
 
 # ---------------------------------------------------------------------------
@@ -471,3 +476,15 @@ SENSOR_TARCZA_PPE2_ENERGY: Final = "tarcza_ppe2_energy"  # observed import this 
 SENSOR_TARCZA_PPE2_AVERAGE: Final = "tarcza_ppe2_average"  # observed weighted average (PLN/kWh)
 # Confirmed supply of the apartment right now (victron / meter_2, see modules/supply.py).
 SENSOR_APARTMENT_SUPPLY_ACTUAL: Final = "apartment_supply_actual"
+# Switch recommendations (stage 3, see supply_cycles.py): the planned supply of
+# the next hour, the plan's cycles, the next planned switch and the saving of
+# the running or next cycle; the switch required now and whether the user can.
+SENSOR_APARTMENT_SUPPLY_RECOMMENDED: Final = "apartment_supply_recommended"
+SENSOR_APARTMENT_SUPPLY_PLAN: Final = "apartment_supply_plan"
+SENSOR_APARTMENT_NEXT_SWITCH: Final = "apartment_next_switch"
+SENSOR_APARTMENT_CYCLE_SAVINGS: Final = "apartment_cycle_savings"
+BINARY_APARTMENT_SWITCH_REQUIRED: Final = "apartment_switch_required"
+BINARY_APARTMENT_SWITCH_AVAILABLE: Final = "apartment_switch_available"
+# Writable switching rules (they write the options, which reloads the entry).
+NUMBER_APARTMENT_MIN_CYCLE_SAVINGS: Final = "apartment_min_cycle_savings"
+NUMBER_APARTMENT_MIN_STAY: Final = "apartment_min_stay_hours"

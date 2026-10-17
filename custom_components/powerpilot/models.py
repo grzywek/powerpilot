@@ -354,6 +354,11 @@ class SupplyPlanning:
     quiet_end_hour: int = 9
     unavailable: list[tuple[datetime, datetime]] = field(default_factory=list)
     calendar_error: str | None = None
+    # Hours (slot starts) the apartment must spend on the Victron: how the
+    # recommendations re-solve a plan without one of its cycles
+    # (``supply_cycles.py``). Hours between two allowed switch boundaries
+    # share one supply, so a listed hour keeps its whole stretch there.
+    victron_hours: frozenset[datetime] = frozenset()
 
     @property
     def switching(self) -> bool:
@@ -405,6 +410,45 @@ class Forecast:
 
 
 @dataclass
+class SupplyCycle:
+    """A run of planned meter-2 hours of the apartment (stage 3).
+
+    ``id`` is the planned start (ISO) — or, for the cycle already running, the
+    actual transition's ``at`` from the supply log. ``planned_return`` is the
+    boundary back to the Victron, ``None`` when the cycle lasts past the
+    horizon (the month's tail keeps it). ``hours`` spans ``start`` to the
+    return (or the horizon's end); ``apartment_kwh`` is the apartment's planned
+    energy it moves to PPE 2 within the horizon. ``victron_hours`` are its
+    planned meter-2 hours: forcing them back on the Victron is the plan
+    without this cycle. ``saving_pln`` is its marginal value by re-solve,
+    thresholds excluded (``None`` when it cannot be measured, see
+    ``saving_note``).
+    """
+
+    id: str
+    start: datetime
+    planned_return: datetime | None
+    hours: float
+    apartment_kwh: float
+    running: bool
+    victron_hours: frozenset[datetime] = frozenset()
+    saving_pln: float | None = None
+    saving_note: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "start": self.start.isoformat(),
+            "return": self.planned_return.isoformat() if self.planned_return else None,
+            "hours": round(self.hours, 2),
+            "apartment_kwh": round(self.apartment_kwh, 3),
+            "running": self.running,
+            "saving_pln": round(self.saving_pln, 2) if self.saving_pln is not None else None,
+            "saving_note": self.saving_note,
+        }
+
+
+@dataclass
 class Plan:
     """The optimizer output: a forecast paired with per-hour decisions."""
 
@@ -419,6 +463,20 @@ class Plan:
     # why not (``None`` while modelled, or without supply detection).
     supply_switching: bool = False
     supply_reason: str | None = None
+    # The solved objective without the cycle thresholds (PLN): what two plans
+    # of the same inputs are compared by (``supply_cycles.py``). ``None`` for
+    # a plan that was not solved (an empty horizon).
+    comparable_cost_pln: float | None = None
+    # Hour boundaries (slot starts) at which the apartment may switch, in
+    # order; empty unless switching was modelled.
+    supply_boundaries: list[datetime] = field(default_factory=list)
+    # The plan's apartment cycles with their savings, and how the
+    # recommendations got there: re-solves run, their wall time (s) and the
+    # ids of the cycles dropped below the threshold (``supply_cycles.py``).
+    supply_cycles: list[SupplyCycle] = field(default_factory=list)
+    supply_resolves: int = 0
+    supply_resolve_seconds: float = 0.0
+    supply_dropped: list[str] = field(default_factory=list)
 
     @property
     def current(self) -> Decision | None:

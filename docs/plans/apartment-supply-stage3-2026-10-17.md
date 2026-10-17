@@ -189,12 +189,19 @@ slice 1); the actual supply and the last transition; availability.
   its return needs no threshold, which the model already does by pricing only
   openings). Per cycle: start, planned return, hours, apartment kWh moved.
 - **Marginal value (decision 4).** Each proposed cycle (not one already
-  running) is re-solved with its opening forbidden; its saving = the settled
-  cost without it − the settled cost with it (thresholds excluded). A cycle
+  running) is re-solved with its hours held on the Victron; its saving = the
+  comparable cost without it − the comparable cost with it (the MIP objective
+  without the thresholds: both settlements, hourly costs, wear and terminal
+  value). Changed during slice 3 from "forbid its opening": forbidding only
+  the boundary let the re-solve open the same cycle an hour later, so a cycle
+  was valued at about its first hour and dropped boundary by boundary. A cycle
   saving less than the threshold is dropped by forbidding it and re-solving,
-  repeated until every remaining cycle clears it. A running cycle's saving
-  is "stay until the planned return" against "return at the next allowed
-  boundary". Re-solves reuse the enumeration of slice 2b; their count and time
+  repeated until every remaining cycle clears it (the smallest first). A
+  running cycle's saving is "stay until the planned return" against "return
+  at the next allowed boundary"; running cycles are never dropped. Bench
+  (Mac, medians): a full refresh with recommendations at `T_sw` = 72 h took
+  2.1 s (base) and 2.5 s (winter), no re-solve needed; at 168 h the winter
+  case planned one cycle and took 5.6 s with one 4.1 s re-solve. Re-solves reuse the enumeration of slice 2b; their count and time
   go to diagnostics.
 - **Entities** (parent spec table): `sensor.…_apartment_supply_recommended`
   (enum, next hour), `sensor.…_apartment_supply_plan` (state = number of

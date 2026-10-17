@@ -19,6 +19,7 @@ from custom_components.powerpilot.const import (
     CONF_APARTMENT_POWER_SENSOR,
     CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
+    CONF_SUPPLY_RECOMMENDATIONS,
     CONF_VICTRON_OTHER_POWER_SENSORS,
     CONF_VICTRON_OUTPUT_POWER_SENSOR,
     DEFAULTS,
@@ -46,6 +47,7 @@ SUPPLY_CFG = {
     CONF_APARTMENT_POWER_SENSOR: "sensor.apartment_power",
     CONF_VICTRON_OUTPUT_POWER_SENSOR: "sensor.victron_power",
     CONF_VICTRON_OTHER_POWER_SENSORS: ["sensor.garage_power"],
+    CONF_SUPPLY_RECOMMENDATIONS: True,
 }
 SWITCHED_AT = NOW - timedelta(hours=5)
 
@@ -188,3 +190,15 @@ def test_a_calendar_read_error_reaches_the_planning() -> None:
 def test_without_supply_detection_there_is_no_planning() -> None:
     config = {k: v for k, v in SUPPLY_CFG.items() if k != CONF_APARTMENT_METER}
     assert _inputs(_coordinator(config=config)) == (None, None)
+
+
+def test_recommendations_off_by_default_keep_the_actual_supply_with_a_reason() -> None:
+    """The opt-in: without it no switch is modelled, PPE 2 is still settled."""
+    config = {**SUPPLY_CFG, CONF_SUPPLY_RECOMMENDATIONS: DEFAULTS[CONF_SUPPLY_RECOMMENDATIONS]}
+    assert DEFAULTS[CONF_SUPPLY_RECOMMENDATIONS] is False
+    planning, ppe2_reason = _inputs(_coordinator(config=config))
+    assert planning.switching is False
+    assert "rekomendacje przełączania są wyłączone" in planning.switching_reason
+    assert planning.actual == SUPPLY_METER_2
+    assert ppe2_reason is None
+    assert [p.ppe for p in planning.ppe2_periods] == [PPE_2]

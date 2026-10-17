@@ -10,7 +10,10 @@ meters under the price cap — and times ``Optimizer.optimize`` for:
 * switching with ``T_sw`` = 168 h (the whole horizon),
 * switching with ``T_sw`` = 72 h,
 * for reference, no switching and no month tail (the settlement then covers
-  the observed month plus the horizon only).
+  the observed month plus the horizon only),
+* a full refresh with recommendations (stage 3, slice 3) at ``T_sw`` = 72 h
+  and 168 h: the plan, a re-solve per proposed cycle (more when one is
+  dropped), and the running cycle's (``supply_cycles.settle_cycles``).
 
 Three runs each; prints the median seconds, what the plan did, how many
 cap-regime combinations there were, how many MIPs ran (the rest are pruned by
@@ -59,6 +62,7 @@ from custom_components.powerpilot.optimizer import (  # noqa: E402
     Optimizer,
     OptimizerConfig,
 )
+from custom_components.powerpilot.supply_cycles import settle_cycles  # noqa: E402
 
 HORIZON_H = 168
 TAIL_H = 500
@@ -226,6 +230,42 @@ def _run(label: str, t_sw: int, switching: bool, with_tail: bool = True) -> floa
     return median
 
 
+def _run_refresh(label: str, t_sw: int) -> float:
+    """A full refresh with recommendations: the plan plus every re-solve."""
+    optimizer_module.SUPPLY_SWITCH_HOURS = t_sw
+    times = []
+    plan = None
+    for _ in range(RUNS):
+        forecast, tail, billing, ppe2, ev = _case()
+        planning = SupplyPlanning(
+            actual=SUPPLY_VICTRON,
+            ppe2_periods=ppe2,
+            last_transition_at=forecast.slots[0].start - timedelta(days=3),
+        )
+        optimizer = _optimizer()
+
+        def solve(supply: SupplyPlanning, forecast=forecast, tail=tail, billing=billing, ev=ev):
+            return optimizer.optimize(
+                forecast, _battery(), ev, billing=billing, tail=tail, supply=supply
+            )
+
+        began = time.perf_counter()
+        plan = settle_cycles(solve, planning)
+        times.append(time.perf_counter() - began)
+    median = statistics.median(times)
+    cycles = ", ".join(
+        f"{c.id[5:16]} {c.hours:.0f} h {c.saving_pln:.2f} zł" for c in plan.supply_cycles
+    )
+    print(
+        f"{label:<28} median {median:7.2f} s  runs "
+        + ", ".join(f"{t:.2f}" for t in times)
+        + f"  | {plan.supply_resolves} re-solve(s) in {plan.supply_resolve_seconds:.2f} s"
+        + f", dropped {len(plan.supply_dropped)}  | cycles: {cycles or 'none'}",
+        flush=True,
+    )
+    return median
+
+
 def main() -> None:
     print(
         f"horizon {HORIZON_H} h + tail {TAIL_H} h, {RUNS} runs per case"
@@ -237,6 +277,10 @@ def main() -> None:
     full = _run("switching, T_sw = 168 h", 168, switching=True)
     short = _run("switching, T_sw = 72 h", 72, switching=True)
     print(f"168 h / 72 h solve-time ratio: {full / short:.2f}")
+    _run_refresh("refresh + recommendations", 72)
+    # The production switch horizon may plan no cycle on these cases; 168 h
+    # shows what valuing cycles costs once one is planned.
+    _run_refresh("refresh + recs, T_sw = 168 h", 168)
 
 
 if __name__ == "__main__":

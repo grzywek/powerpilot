@@ -20,7 +20,11 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
+    SENSOR_APARTMENT_CYCLE_SAVINGS,
+    SENSOR_APARTMENT_NEXT_SWITCH,
     SENSOR_APARTMENT_SUPPLY_ACTUAL,
+    SENSOR_APARTMENT_SUPPLY_PLAN,
+    SENSOR_APARTMENT_SUPPLY_RECOMMENDED,
     SENSOR_BATTERY_ENERGY_COST,
     SENSOR_CHARGE_POWER,
     SENSOR_ESS_CHARGE_START,
@@ -45,6 +49,7 @@ from .const import (
 )
 from .coordinator import PowerPilotCoordinator
 from .models import Plan
+from .supply_cycles import SupplyRecommendation
 
 
 async def async_setup_entry(
@@ -70,6 +75,10 @@ async def async_setup_entry(
             TarczaEnergySensor(coordinator, entry, PPE_2, SENSOR_TARCZA_PPE2_ENERGY),
             TarczaAverageSensor(coordinator, entry, PPE_2, SENSOR_TARCZA_PPE2_AVERAGE),
             ApartmentSupplySensor(coordinator, entry),
+            ApartmentSupplyRecommendedSensor(coordinator, entry),
+            ApartmentSupplyPlanSensor(coordinator, entry),
+            ApartmentNextSwitchSensor(coordinator, entry),
+            ApartmentCycleSavingsSensor(coordinator, entry),
         ]
     )
 
@@ -533,4 +542,132 @@ class ApartmentSupplySensor(PowerPilotEntity, SensorEntity):
             "error": supply.store_error,
             "replay_error": supply.replay_error,
             "save_error": supply.save_error,
+        }
+
+
+class ApartmentRecommendationEntity(PowerPilotEntity):
+    """Shared wiring of the switch recommendation entities (stage 3).
+
+    Each reads one :class:`SupplyRecommendation` from the latest plan and the
+    live supply state, so it also updates when detection confirms a switch.
+    While switching is not modelled the state is unknown and ``reason`` says
+    why.
+    """
+
+    def __init__(self, coordinator, entry, key: str) -> None:
+        super().__init__(coordinator, entry, key)
+        self._attr_translation_key = key
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, self.coordinator.supply.signal, self.async_write_ha_state
+            )
+        )
+
+    @property
+    def recommendation(self) -> SupplyRecommendation:
+        return self.coordinator.supply_recommendation()
+
+
+class ApartmentSupplyRecommendedSensor(ApartmentRecommendationEntity, SensorEntity):
+    """Recommended supply of the apartment: the plan's supply of the next hour."""
+
+    _attr_icon = "mdi:home-lightning-bolt"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [SUPPLY_VICTRON, SUPPLY_METER_2]
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_APARTMENT_SUPPLY_RECOMMENDED)
+
+    @property
+    def native_value(self) -> str | None:
+        return self.recommendation.recommended
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rec = self.recommendation
+        return {"reason": rec.reason, "actual": rec.actual}
+
+
+class ApartmentSupplyPlanSensor(ApartmentRecommendationEntity, SensorEntity):
+    """Number of apartment cycles in the horizon; the cycles and hours as attributes."""
+
+    _attr_icon = "mdi:home-clock"
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_APARTMENT_SUPPLY_PLAN)
+
+    @property
+    def native_value(self) -> int | None:
+        rec = self.recommendation
+        return len(rec.cycles) if rec.reason is None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rec = self.recommendation
+        plan = self.plan
+        modelled = rec.reason is None and plan is not None
+        return {
+            "reason": rec.reason,
+            "cycles": [c.as_dict() for c in rec.cycles],
+            "hours": rec.hourly,
+            "resolves": plan.supply_resolves if modelled else None,
+            "resolve_seconds": round(plan.supply_resolve_seconds, 3) if modelled else None,
+            "dropped": list(plan.supply_dropped) if modelled else [],
+        }
+
+
+class ApartmentNextSwitchSensor(ApartmentRecommendationEntity, SensorEntity):
+    """When the plan next moves the apartment; target, return and cycle id as attributes."""
+
+    _attr_icon = "mdi:swap-horizontal"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_APARTMENT_NEXT_SWITCH)
+
+    @property
+    def native_value(self):
+        return self.recommendation.next_switch
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rec = self.recommendation
+        cycle = rec.next_cycle
+        return {
+            "reason": rec.reason,
+            "target": rec.next_target,
+            "planned_return": _iso(cycle.planned_return) if cycle else None,
+            "cycle_id": cycle.id if cycle else None,
+        }
+
+
+class ApartmentCycleSavingsSensor(ApartmentRecommendationEntity, SensorEntity):
+    """Saving of the running cycle, else of the next one (PLN, thresholds excluded)."""
+
+    _attr_icon = "mdi:piggy-bank"
+    _attr_native_unit_of_measurement = "PLN"
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator, entry) -> None:
+        super().__init__(coordinator, entry, SENSOR_APARTMENT_CYCLE_SAVINGS)
+
+    @property
+    def native_value(self) -> float | None:
+        cycle = self.recommendation.cycle
+        return cycle.saving_pln if cycle is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rec = self.recommendation
+        cycle = rec.cycle
+        return {
+            "reason": rec.reason,
+            "cycle_id": cycle.id if cycle else None,
+            "running": cycle.running if cycle else None,
+            "start": _iso(cycle.start) if cycle else None,
+            "planned_return": _iso(cycle.planned_return) if cycle else None,
+            "note": cycle.saving_note if cycle else None,
         }

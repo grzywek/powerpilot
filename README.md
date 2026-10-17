@@ -238,8 +238,9 @@ hours older than that are classified from hourly means.
 **Configuration.** Options → *Zasilanie mieszkania*: the apartment power
 sensor, the Victron output power sensor, the other sub-meters behind the
 Victron, the metered device that is the apartment, and the three thresholds (minimum power 300 W, Victron share 0.5, N = 10).
-The same form holds the plan's switching rules: the cycle threshold (2 zł),
-the minimum stay on one source (2 h) and the quiet window (00:00–09:00).
+The same form holds the plan's switching rules: whether to recommend switches
+at all (off by default), the cycle threshold (2 zł), the minimum stay on one
+source (2 h) and the quiet window (00:00–09:00).
 Leave the three sensors empty to turn detection off. The log is evidence read
 through the rule, so changing any threshold sets the old log aside (renamed,
 not deleted) and rebuilds it from the recorder's history. The apartment meter must
@@ -267,8 +268,22 @@ liczników*); the form refuses anything else.
   be read, and not sooner than the minimum stay after the last switch. It does
   so only with the supply known and both meters' months complete; otherwise
   it keeps the confirmed state for the whole horizon and says why
-  (`supply_reason`). The chart's per-device forecast follows the confirmed
-  state. Recommendation entities come later.
+  (`supply_reason`). Switches are modelled only with recommendations turned
+  on: a plan assuming switches nobody makes would size the battery for the
+  wrong load. The chart's per-device forecast follows the confirmed state.
+- Recommendations: the plan's runs of meter-2 hours are cycles (id = planned
+  start, or the actual switch time for the one running). Each proposed cycle
+  is re-solved without it, its hours held on the Victron; one saving less than
+  the threshold is dropped and the plan re-solved, until every cycle clears
+  it. `sensor.…_apartment_supply_recommended` is the next hour's planned
+  supply, `binary_sensor.…_apartment_switch_required` is on while it differs
+  from the actual one (switch before the next full hour), and a persistent
+  notification is shown once per cycle and direction while it is on.
+  `sensor.…_apartment_supply_plan` (cycles and hours), `…_apartment_next_switch`,
+  `…_apartment_cycle_savings` and `binary_sensor.…_apartment_switch_available`
+  complete the set, and two numbers set the cycle threshold and the minimum
+  stay (they write the options, which reloads the integration). While switches
+  are not modelled each entity carries the `reason`.
 - Unknown: the apartment is planned on the Victron, and the plan carries a
   reminder that its supply is not known yet.
 

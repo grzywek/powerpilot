@@ -90,6 +90,10 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# How far before a window of past hours the hourly classification looks for a
+# decided hour to carry into the window's first, undecided hours.
+SUPPLY_HISTORY_LEAD_IN = timedelta(days=7)
+
 # Fixed sampling tick, not every state change: the Victron reports every few
 # seconds, and N must mean a duration (≈1–1.5 min at N = 3).
 SUPPLY_SAMPLE_INTERVAL = timedelta(seconds=30)
@@ -341,15 +345,21 @@ def carry_hour_states(
     state of a decided hour carries forward through such hours until the next
     decided hour. When that one has the other state the switch was somewhere in
     between, so every hour between them and both decided hours are ``mixed``.
-    Before the first decided hour the state is ``unknown``; after the last one
-    it carries to ``end``. Keys are UTC hour starts.
+    Decided hours before ``start`` count too — the last of them carries its
+    state into the first hours of the window. Before the first decided hour
+    the state is ``unknown``; after the last one it carries to ``end``. Keys
+    are UTC hour starts.
     """
-    hours = _clock_hours(start, end)
+    window = _clock_hours(start, end)
+    if not window:
+        return {}
     in_range = sorted(
         (hour.astimezone(timezone.utc), state)
         for hour, state in decided.items()
-        if hours and hours[0] <= hour.astimezone(timezone.utc) <= hours[-1]
+        if hour.astimezone(timezone.utc) <= window[-1]
     )
+    span_start = min(window[0], in_range[0][0]) if in_range else window[0]
+    hours = _clock_hours(span_start, end)
     states = {hour: SUPPLY_HOUR_UNKNOWN for hour in hours}
     carried: str | None = None
     index = 0
@@ -365,7 +375,7 @@ def carry_hour_states(
             while hour <= later:
                 states[hour] = SUPPLY_HOUR_MIXED
                 hour += _HOUR
-    return states
+    return {hour: states[hour] for hour in window}
 
 
 def past_hour_states(
@@ -404,7 +414,7 @@ def past_hour_states(
     before_log = {
         hour.astimezone(timezone.utc): state
         for hour, state in decided.items()
-        if first_hour <= hour.astimezone(timezone.utc) < hourly_end
+        if hour.astimezone(timezone.utc) < hourly_end
     }
     if before_log and transitions and log_start is not None:
         last_decided = max(before_log)
@@ -1172,8 +1182,12 @@ class SupplyModule(PowerPilotModule):
         covered_from = self.covered_from
         decided: dict[datetime, str] = {}
         if covered_from is None or start < covered_from:
+            # From a lead-in before the window: its first hours are often
+            # undecided (the apartment idles at night), and only a decided hour
+            # before them can carry its state into them.
             decided = await self.async_hourly_states(
-                start, end if covered_from is None else covered_from
+                start - SUPPLY_HISTORY_LEAD_IN,
+                end if covered_from is None else covered_from,
             )
         return past_hour_states(start, end, decided, self.transitions, covered_from)
 

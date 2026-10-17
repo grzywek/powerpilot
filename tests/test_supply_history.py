@@ -736,6 +736,49 @@ async def test_past_hour_states_join_hourly_means_and_the_log(
     assert len(recorder.statistics_calls) == 1
 
 
+def test_a_decided_hour_before_the_window_carries_into_its_first_hours() -> None:
+    decided = {H - 30 * HOUR: V, H + 3 * HOUR: V}
+    assert _states(carry_hour_states(decided, H, H + 4 * HOUR), 4) == [V, V, V, V]
+
+
+def test_a_change_just_before_the_window_makes_its_first_hours_mixed() -> None:
+    decided = {H - 5 * HOUR: V, H + 2 * HOUR: M2}
+    assert _states(carry_hour_states(decided, H, H + 4 * HOUR), 4) == [MIX, MIX, MIX, M2]
+
+
+async def test_past_hours_read_the_hourly_states_from_a_lead_in_before_the_window(
+    hass: HomeAssistant, supply_recorder
+) -> None:
+    """Incident 2026-10-17: on the live installation PPE 2's October stayed
+    "incomplete" — 01.10 00:00 and 01:00 had an unknown supply, because the
+    hourly classification began at the month's first hour and the apartment
+    idled below the minimum then, so no decided hour could carry its state
+    into them. The classification now starts a lead-in before the window.
+    """
+    _set_units(hass)
+    day_before = H - 20 * HOUR
+
+    def rows(first: float, idle: float) -> list[dict]:
+        return [{"start": day_before.timestamp(), "mean": first}] + [
+            {"start": (H + i * HOUR).timestamp(), "mean": idle} for i in range(3)
+        ]
+
+    supply_recorder(
+        statistics={
+            APARTMENT: rows(1000, 120),  # decided the evening before, idle after
+            VICTRON: rows(1300, 330),
+            GARAGE: rows(200, 200),
+        }
+    )
+    coordinator = _coordinator()
+    coordinator.config[CONF_APARTMENT_METER] = "sensor.apartment_energy"
+    module = SupplyModule(hass, coordinator)
+
+    states = await module.async_past_hour_states(H, H + 3 * HOUR)
+
+    assert _states(states, 3) == [V, V, V]
+
+
 @pytest.mark.parametrize("config", [{CONF_APARTMENT_METER: ""}, {CONF_APARTMENT_POWER_SENSOR: ""}])
 async def test_without_detection_or_apartment_meter_every_past_hour_is_victron(
     hass: HomeAssistant, supply_recorder, config: dict

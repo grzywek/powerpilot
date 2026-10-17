@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "6da7188dfede",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "docs/plans/apartment-supply-stage2-2026-10-17.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6d/a7188dfede/0/metadata.json",
+      "transcript": "/6d/a7188dfede/0/full.jsonl",
+      "compact_transcript": "/6d/a7188dfede/0/transcript.jsonl",
+      "content_hash": "/6d/a7188dfede/0/content_hash.txt",
+      "prompt": "/6d/a7188dfede/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1106,
+    "cache_creation_tokens": 1285774,
+    "cache_read_tokens": 277467459,
+    "output_tokens": 581894,
+    "api_call_count": 542
+  }
+}

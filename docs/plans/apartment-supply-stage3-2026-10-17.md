@@ -1,9 +1,6 @@
 # Stage 3: recommending apartment switches (PPE 1 ↔ PPE 2)
 
-Status: draft, rewritten 2026-10-17 after the user's correction of the value
-mechanism. Decisions below are taken; one question for the user at the end.
-Large slice across modules: executed in a separate session from the prompt at
-the end.
+Status: Done 2026-10-17 (slices 1–4).
 
 Parent spec: `docs/apartment-supply-planning.plan.md` (stage 3 of 4; its
 "Ustalenia z 2026-09-14" are settled and not re-asked). Stage 1 (price cap on

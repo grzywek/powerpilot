@@ -270,28 +270,51 @@ liczników*); the form refuses anything else.
   it keeps the confirmed state for the whole horizon and says why
   (`supply_reason`). Switches are modelled only with recommendations turned
   on: a plan assuming switches nobody makes would size the battery for the
-  wrong load. The chart's per-device forecast follows the confirmed state.
-- Recommendations: the plan's runs of meter-2 hours are cycles (id = planned
-  start, or the actual switch time for the one running). Each proposed cycle
-  is re-solved without it, its hours held on the Victron; one saving less than
-  the threshold is dropped and the plan re-solved, until every cycle clears
-  it. `sensor.…_apartment_supply_recommended` is the next hour's planned
-  supply, `binary_sensor.…_apartment_switch_required` is on while it differs
-  from the actual one (switch before the next full hour), and a persistent
-  notification is shown once per cycle and direction while it is on.
-  `sensor.…_apartment_supply_plan` (cycles and hours), `…_apartment_next_switch`,
-  `…_apartment_cycle_savings` and `binary_sensor.…_apartment_switch_available`
-  complete the set, and two numbers set the cycle threshold and the minimum
-  stay (they write the options, which reloads the integration). While switches
-  are not modelled each entity carries the `reason`.
+  wrong load. The chart's per-device forecast follows each hour's supply —
+  the plan's for planned hours, the logged one for past hours — so the
+  apartment's bars and the Victron consumption line agree.
+- Recommendations (opt-in: options → *Zasilanie mieszkania* → recommend
+  switches; off by default): the plan's runs of meter-2 hours are cycles
+  (id = planned start, or the actual switch time for the one running). Each
+  proposed cycle is re-solved without it, its hours held on the Victron; one
+  saving less than the threshold is dropped and the plan re-solved, until
+  every cycle clears it. `sensor.…_apartment_supply_recommended` is the next
+  hour's planned supply, `binary_sensor.…_apartment_switch_required` is on
+  while it differs from the actual one (switch before the next full hour),
+  and while it is on a persistent notification is shown once per cycle and
+  direction — "Przełącz mieszkanie na licznik 2 do HH:00, powrót ok. HH:00,
+  oszczędność ~X zł", or the switch back to the Victron at the cycle's end —
+  and dismissed once the switch is detected or re-planned away.
+  `sensor.…_apartment_supply_plan` (number of cycles; cycles with start,
+  return, hours, kWh and saving, and the hourly planned supply as
+  attributes), `…_apartment_next_switch` (target, planned return, cycle id),
+  `…_apartment_cycle_savings` (the running or next cycle, PLN) and
+  `binary_sensor.…_apartment_switch_available` (not in the quiet window, not
+  on a trip, calendars readable) complete the set, and two numbers set the
+  cycle threshold and the minimum stay (they write the options, which
+  reloads the integration). While switches are not modelled each entity
+  carries the `reason`. PowerPilot does not operate the switch; an
+  automation on `switch_required` can push to a phone or drive a contactor.
+- Panel: the overview chart shades the hours the apartment was on meter 2
+  (solid teal, from the supply log) and the hours the plan puts it there
+  (light teal, dashed), labelled "Mieszkanie na liczniku 2". The card
+  *Zasilanie mieszkania* below it shows the actual supply and since when, the
+  next hour's recommendation and whether a switch is required now, the next
+  switch, the cycles (start → return, hours, kWh, saving), the threshold,
+  minimum stay and quiet window, the reason when nothing is recommended or
+  switching is not modelled, and a Tarcza block per meter (average so far,
+  forecast month-end average against the limit, forecast discount).
 - Unknown: the apartment is planned on the Victron, and the plan carries a
   reminder that its supply is not known yet.
 
 **Diagnostics.** The panel status and the debug export have a `supply` section:
 state, since, history coverage, checkpoint, the last 50 transitions (with the
-total), storage/replay/save errors, thresholds, configured sensors, and how many
+total), storage/replay/save errors, thresholds, configured sensors, how many
 hours the last consumption learning run dropped or kept negative
-(`learning_dropped`).
+(`learning_dropped`), the `recommendation` the entities show and the switching
+`rules`; a `tarcza` section carries both meters' observed month and the plan's
+forecast of it. The chart series marks each hour's `supply_actual` (past) and
+`supply_planned` (plan).
 `scripts/backtest_supply_detector.py` checks the rule against the PPE 2 import
 statistic on exported hourly data; its docstring explains how to export it.
 

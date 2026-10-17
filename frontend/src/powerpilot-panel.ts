@@ -1,4 +1,4 @@
-import { LitElement, html, css, svg, nothing, type TemplateResult } from "lit";
+import { LitElement, html, css, svg, nothing, unsafeCSS, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import ApexCharts from "apexcharts";
 
@@ -122,6 +122,96 @@ interface Status {
   calendars: CalendarSource[];
   modules: { domain: string; error: string | null }[];
   checks: { key: string; label: string; ok: boolean }[];
+  supply?: SupplyStatus;
+  tarcza?: TarczaStatus;
+}
+
+/** Where the apartment is fed from: the Victron (PPE 1) or the second meter
+ *  (PPE 2). Past hours may also be "mixed" (a switch inside the hour) or
+ *  "unknown". */
+type SupplyState = "victron" | "meter_2" | "mixed" | "unknown";
+
+/** A run of planned meter-2 hours (powerpilot/status → supply.recommendation). */
+interface SupplyCycleInfo {
+  id: string;
+  start: string;
+  /** Planned return to the Victron; null when the cycle lasts past the horizon. */
+  return: string | null;
+  hours: number;
+  apartment_kwh: number;
+  running: boolean;
+  /** Marginal saving by re-solve, thresholds excluded; null with a note when
+   *  it cannot be measured. */
+  saving_pln: number | null;
+  saving_note: string | null;
+}
+
+interface SupplyRecommendationInfo {
+  /** Why switching is not modelled; null while it is. */
+  reason: string | null;
+  actual: SupplyState | null;
+  available: boolean | null;
+  unavailable_reason: string | null;
+  /** The plan's supply of the NEXT hour. */
+  recommended: SupplyState | null;
+  switch_required: boolean | null;
+  next_switch: string | null;
+  next_target: SupplyState | null;
+  next_cycle_id: string | null;
+  next_return: string | null;
+  cycle: SupplyCycleInfo | null;
+  cycles: SupplyCycleInfo[];
+  notice_message: string | null;
+}
+
+interface SupplyStatus {
+  enabled: boolean;
+  active: boolean;
+  state: SupplyState | null;
+  since: string | null;
+  plan_dropped_cycles: string[];
+  recommendation: SupplyRecommendationInfo;
+  rules: {
+    recommendations: boolean;
+    cycle_threshold_pln: number;
+    min_stay_hours: number;
+    quiet_start_hour: number;
+    quiet_end_hour: number;
+  };
+}
+
+/** One PPE's month-to-date position under the price cap. */
+interface TarczaPeriod {
+  ppe: string;
+  terms: string;
+  limit_kwh: number;
+  energy_kwh: number;
+  cost_pln: number;
+  average_kwh: number | null;
+  complete: boolean;
+}
+
+/** The plan's month forecast for one PPE (observed + planned + tail). */
+interface TarczaOutcome {
+  period: TarczaPeriod;
+  energy_kwh: number;
+  average_kwh: number | null;
+  cap_binds: boolean | null;
+  available: boolean;
+  unavailable_reason: string | null;
+  discount_pln: number;
+}
+
+interface TarczaMeter {
+  observed: TarczaPeriod | null;
+  forecast: TarczaOutcome | null;
+  reasons: string[];
+}
+
+interface TarczaStatus {
+  enabled: boolean;
+  ppe1: TarczaMeter;
+  ppe2: TarczaMeter;
 }
 
 interface LogEvent {
@@ -240,6 +330,11 @@ interface SeriesHour {
   fixed_cost: number | null;
   devices_real: Record<string, number | null>;
   devices_forecast: Record<string, number | null>;
+  /** The apartment's logged supply (past and current hours); null without
+   *  supply detection. */
+  supply_actual?: SupplyState | null;
+  /** The live plan's supply of the apartment (current and future hours). */
+  supply_planned?: SupplyState | null;
 }
 
 /** One mid-hour re-plan: when it ran, what triggered it, and what the plan then
@@ -579,6 +674,18 @@ const MODE_CODE_NAME: Record<string, string> = {
  *  event itself, so both read separately on the chart. Grays on purpose —
  *  the chart already carries a lot of color in the bars and lines. */
 const TRIP_FILL = { travel: "#9ca3af", event: "#4b5563" };
+
+/** The apartment on the second meter: a teal x-axis band, solid where it was
+ *  (logged supply), lighter with a dashed edge where the plan puts it. */
+const METER2_FILL = "#0d9488";
+const METER2_OPACITY = { actual: 0.18, planned: 0.08 };
+
+const SUPPLY_LABEL: Record<SupplyState, string> = {
+  victron: "Victron (PPE 1)",
+  meter_2: "licznik 2 (PPE 2)",
+  mixed: "przełączane w tej godzinie",
+  unknown: "nieznane",
+};
 
 type RangeMode = "24h" | "3d" | "7d";
 
@@ -1097,12 +1204,175 @@ export class PowerPilotPanel extends LitElement {
           <span style="margin-left:12px">Wyjazd EV:</span>
           <span><span class="dot-sq" style=${"background:" + TRIP_FILL.travel}></span>dojazd/powrót (+margines)</span>
           <span><span class="dot-sq" style=${"background:" + TRIP_FILL.event}></span>zdarzenie</span>
+          ${this._status?.supply?.active
+            ? html`<span style="margin-left:12px">Mieszkanie na liczniku 2:</span>
+                <span><span class="dot-sq" style=${"background:" + METER2_FILL}></span>było</span>
+                <span
+                  ><span
+                    class="dot-sq"
+                    style=${`background:${METER2_FILL}40;border:1px dashed ${METER2_FILL};box-sizing:border-box`}
+                  ></span
+                  >plan</span
+                >`
+            : nothing}
         </div>
         ${this._series && !this._series.hours?.length
           ? html`<div class="empty">Brak danych dla wybranego okna (brak prognozy / poza horyzontem).</div>`
           : nothing}
       </div>
+      ${this._status?.supply?.enabled ? this._renderSupplyCard(this._status) : nothing}
     `;
+  }
+
+  // ------------------------------------------------------------------
+  // Apartment supply: actual state, the switch recommendation, Tarcza
+  // ------------------------------------------------------------------
+  private _supplyLabel(state: SupplyState | null | undefined): string {
+    return state ? SUPPLY_LABEL[state] ?? state : "nieznane";
+  }
+
+  /** "HH:MM" today, "DD.MM HH:MM" on another day. */
+  private _clock(iso: string | null | undefined): string {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    const time = d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() === new Date().toDateString()) return time;
+    return `${d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" })} ${time}`;
+  }
+
+  private _pln(v: number | null | undefined): string {
+    return v == null ? "—" : `${v.toFixed(2)} PLN`;
+  }
+
+  private _renderSupplyCard(status: Status): TemplateResult {
+    const supply = status.supply!;
+    const rec = supply.recommendation;
+    const rules = supply.rules;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return html`
+      <div class="card">
+        <div class="card-title">🏠 Zasilanie mieszkania</div>
+        <div class="check">
+          Teraz: <b>${this._supplyLabel(supply.state)}</b>
+          ${supply.since
+            ? html`<span class="muted">od ${this._clock(supply.since)}</span>`
+            : nothing}
+        </div>
+        ${rec.reason
+          ? html`<div class="check">
+              <span class="dot skip"></span>
+              Przełączanie nie jest planowane — ${rec.reason}
+            </div>`
+          : this._renderSupplyRecommendation(rec, supply)}
+        <div class="check muted">
+          Próg cyklu: ${this._pln(rules.cycle_threshold_pln)} · minimalny pobyt:
+          ${rules.min_stay_hours} h · okno ciszy:
+          ${rules.quiet_start_hour === rules.quiet_end_hour
+            ? "brak"
+            : `${pad(rules.quiet_start_hour)}:00–${pad(rules.quiet_end_hour)}:00`}
+          · rekomendacje: ${rules.recommendations ? "włączone" : "wyłączone"}
+        </div>
+        ${status.tarcza?.enabled ? this._renderTarczaBlock(status.tarcza) : nothing}
+      </div>
+    `;
+  }
+
+  private _renderSupplyRecommendation(
+    rec: SupplyRecommendationInfo,
+    supply: SupplyStatus,
+  ): TemplateResult {
+    const dropped = supply.plan_dropped_cycles?.length ?? 0;
+    return html`
+      <div class="check">
+        Następna godzina: <b>${this._supplyLabel(rec.recommended)}</b>
+        ${rec.switch_required === true
+          ? html`<span class="dot warn"></span><b>przełącz przed pełną godziną</b>`
+          : rec.switch_required === false
+            ? html`<span class="muted">bez zmian</span>`
+            : nothing}
+      </div>
+      ${rec.switch_required && rec.notice_message
+        ? html`<div class="check muted">${rec.notice_message}</div>`
+        : nothing}
+      <div class="check">
+        Przełączenie teraz możliwe: <b>${rec.available ? "tak" : "nie"}</b>
+        ${rec.unavailable_reason
+          ? html`<span class="muted">${rec.unavailable_reason}</span>`
+          : nothing}
+      </div>
+      <div class="check">
+        Następne przełączenie:
+        ${rec.next_switch
+          ? html`<b>${this._clock(rec.next_switch)}</b> → ${this._supplyLabel(rec.next_target)}
+              ${rec.next_target === "meter_2"
+                ? html`<span class="muted">
+                    ${rec.next_return
+                      ? `powrót ok. ${this._clock(rec.next_return)}`
+                      : "powrót po horyzoncie planu"}
+                  </span>`
+                : nothing}`
+          : html`<span class="muted">brak w horyzoncie planu</span>`}
+      </div>
+      ${rec.cycles.length
+        ? html`<div class="supply-cycles">
+            ${rec.cycles.map(
+              (c) => html`<div class="supply-cycle">
+                <span>
+                  ${c.running ? html`<b>trwa</b> · ` : nothing}${this._clock(c.start)} →
+                  ${c.return ? this._clock(c.return) : "po horyzoncie"}
+                </span>
+                <span class="muted">${c.hours.toFixed(1)} h · ${c.apartment_kwh.toFixed(1)} kWh</span>
+                <span>
+                  ${c.saving_pln != null
+                    ? html`oszczędność <b>${this._pln(c.saving_pln)}</b>`
+                    : html`<span class="muted">${c.saving_note ?? "oszczędność nieznana"}</span>`}
+                </span>
+              </div>`,
+            )}
+          </div>`
+        : html`<div class="check muted">
+            Brak cykli w horyzoncie — żadne przełączenie nie oszczędza co najmniej
+            ${this._pln(supply.rules.cycle_threshold_pln)}${dropped
+              ? ` (odrzucone poniżej progu: ${dropped})`
+              : ""}.
+          </div>`}
+    `;
+  }
+
+  /** Both meters' month under the price cap: average so far, the plan's
+   *  month-end average against the limit, and the forecast discount. */
+  private _renderTarczaBlock(tarcza: TarczaStatus): TemplateResult {
+    const meter = (label: string, m: TarczaMeter) => {
+      const obs = m.observed;
+      const fc = m.forecast;
+      const limit = fc?.period.limit_kwh ?? obs?.limit_kwh ?? null;
+      const why = fc?.unavailable_reason ?? (m.reasons.length ? m.reasons.join("; ") : null);
+      return html`<div class="tarcza-meter">
+        <div class="hcol-title">Tarcza ${label}</div>
+        <div class="check">
+          Średnia do dziś:
+          <b>${obs?.average_kwh != null ? `${this._fmtNum(obs.average_kwh, 3)} PLN/kWh` : "—"}</b>
+          ${obs ? html`<span class="muted">${obs.energy_kwh.toFixed(1)} kWh</span>` : nothing}
+        </div>
+        <div class="check">
+          Prognoza na koniec miesiąca:
+          <b>${fc?.available && fc.average_kwh != null ? `${this._fmtNum(fc.average_kwh, 3)} PLN/kWh` : "—"}</b>
+          <span class="muted">limit ${limit != null ? `${this._fmtNum(limit, 3)} PLN/kWh` : "—"}</span>
+          ${fc?.available
+            ? html`<span class=${"dot " + (fc.cap_binds ? "warn" : "ok")}></span>
+                <span class="muted">${fc.cap_binds ? "limit działa" : "pod limitem"}</span>`
+            : nothing}
+        </div>
+        <div class="check">
+          Prognozowany rabat: <b>${fc?.available ? this._pln(fc.discount_pln) : "—"}</b>
+        </div>
+        ${why ? html`<div class="check muted">${why}</div>` : nothing}
+      </div>`;
+    };
+    return html`<div class="tarcza-grid">
+      ${meter("PPE 1", tarcza.ppe1)} ${meter("PPE 2", tarcza.ppe2)}
+    </div>`;
   }
 
   private _renderNavBar(): TemplateResult {
@@ -2388,6 +2658,7 @@ export class PowerPilotPanel extends LitElement {
           ...this._dayBoundaryAnnotations(s),
           ...this._evForcedAnnotations(),
           ...this._evAwayAnnotations(),
+          ...this._supplyAnnotations(s),
           ...this._forecastPinAnnotations(s),
           {
             x: nowTs,
@@ -2435,6 +2706,64 @@ export class PowerPilotPanel extends LitElement {
         },
       },
     ];
+  }
+
+  /** Hours the apartment was (logged supply) or is planned to be (the live
+   *  plan) on the second meter, as labelled x-axis bands — solid for what
+   *  happened, light with a dashed edge for the plan. The running hour splits
+   *  at "now": the elapsed part follows its logged supply, the rest the plan.
+   *  Mixed and unknown hours are not shaded. Consecutive hours merge into one
+   *  band. */
+  private _supplyAnnotations(s: Series): any[] {
+    const HOUR = 3600 * 1000;
+    const nowTs = new Date(s.now).getTime();
+    type Kind = "actual" | "planned";
+    const spans: { kind: Kind; x: number; x2: number }[] = [];
+    const add = (kind: Kind, x: number, x2: number) => {
+      if (x2 <= x) return;
+      const last = spans[spans.length - 1];
+      if (last && last.kind === kind && last.x2 === x) last.x2 = x2;
+      else spans.push({ kind, x, x2 });
+    };
+    const hours = [...s.hours].sort(
+      (a, b) => new Date(a.start).getTime() - new Date(b.start).getTime(),
+    );
+    for (const h of hours) {
+      const start = new Date(h.start).getTime();
+      if (isNaN(start)) continue;
+      const end = start + HOUR;
+      if (h.partial) {
+        const split = Math.min(Math.max(nowTs, start), end);
+        if (h.supply_actual === "meter_2") add("actual", start, split);
+        if (h.supply_planned === "meter_2") add("planned", split, end);
+      } else if (h.is_past) {
+        if (h.supply_actual === "meter_2") add("actual", start, end);
+      } else if (h.supply_planned === "meter_2") {
+        add("planned", start, end);
+      }
+    }
+    return spans.map((span) => {
+      const planned = span.kind === "planned";
+      return {
+        x: span.x,
+        x2: span.x2,
+        fillColor: METER2_FILL,
+        opacity: METER2_OPACITY[span.kind],
+        ...(planned ? { borderColor: METER2_FILL, strokeDashArray: 4 } : {}),
+        label: {
+          text: planned ? "Mieszkanie na liczniku 2 (plan)" : "Mieszkanie na liczniku 2",
+          orientation: "horizontal",
+          position: "top",
+          offsetY: 14,
+          borderColor: METER2_FILL,
+          style: {
+            background: planned ? "transparent" : METER2_FILL,
+            color: planned ? METER2_FILL : "#ffffff",
+            fontSize: "10px",
+          },
+        },
+      };
+    });
   }
 
   /** Calendar deadline targets ("Kotek 100%") and automatic pre-trip minimums
@@ -4582,6 +4911,27 @@ export class PowerPilotPanel extends LitElement {
       align-items: center;
       gap: 8px;
       padding: 4px 0;
+    }
+    .supply-cycles {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin: 4px 0;
+    }
+    .supply-cycle {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+      padding: 4px 8px;
+      border-left: 3px solid ${unsafeCSS(METER2_FILL)};
+    }
+    .tarcza-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--divider-color, #e0e0e0);
     }
     .muted {
       color: var(--secondary-text-color);

@@ -289,6 +289,7 @@ Odpowiedzi użytkownika i regulamin zamykają otwarte punkty powyżej.
    Implemented: see `docs/plans/apartment-supply-stage2-2026-10-17.md`.
 3. Optymalizacja przełączeń: zmienne źródła, cykle, próg, kalendarz,
    encje, panel, eksport z przyczynami.
+   Implemented: see `docs/plans/apartment-supply-stage3-2026-10-17.md`.
 4. CSV dostawcy: import, uzgodnienie, zamknięte miesiące.
 
 ## Stan wdrożenia etapu 1 (2026-09-14)

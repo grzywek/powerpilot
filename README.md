@@ -229,7 +229,9 @@ Its attributes carry the last evidence, the thresholds and any storage errors.
 
 **The rule.** Every 30 s PowerPilot compares the apartment power `a` with
 `r` = Victron output power minus the other sub-meters behind the Victron.
-Below the minimum apartment power (default 300 W) the sample decides nothing.
+Below the minimum apartment power (default 200 W) the sample decides nothing;
+at lower loads the meters disagree by up to ~100 W, and 200 W was the lowest
+minimum without a false meter-2 episode in a 14-day replay of live samples.
 Otherwise it points to meter 2 when `r < share · a` (the Victron covers less
 than the share of the apartment, default 0.5) and to the Victron when not. The
 rule is proportional because the apartment meter and the Victron disagree by a
@@ -242,7 +244,7 @@ hours older than that are classified from hourly means.
 
 **Configuration.** Options → *Zasilanie mieszkania*: the apartment power
 sensor, the Victron output power sensor, the other sub-meters behind the
-Victron, the metered device that is the apartment, and the three thresholds (minimum power 300 W, Victron share 0.5, N = 10).
+Victron, the metered device that is the apartment, and the three thresholds (minimum power 200 W, Victron share 0.5, N = 10).
 The same form holds the plan's switching rules: whether to recommend switches
 at all (off by default), the cycle threshold (2 zł), the minimum stay on one
 source (2 h) and the quiet window (00:00–09:00).

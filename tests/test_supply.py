@@ -59,10 +59,12 @@ SUPPLY_CONFIG = {
     CONF_VICTRON_OTHER_POWER_SENSORS: [GARAGE],
     # The tests below confirm in three ticks; the shipped default is 10.
     CONF_SUPPLY_CONFIRM_SAMPLES: 3,
+    # Their samples are drawn around a 300 W minimum; the shipped default is 200 W.
+    CONF_SUPPLY_MIN_APARTMENT_W: 300.0,
 }
 ENTRY_ID = "supply_entry"
 STORE_KEY = f"{DOMAIN}_{ENTRY_ID}_supply"
-# The rule a log made under SUPPLY_CONFIG carries (default share and minimum).
+# The rule a log made under SUPPLY_CONFIG carries (default share).
 RULE = {"min_apartment_w": 300.0, "victron_share": 0.5, "confirm_samples": 3}
 
 
@@ -103,6 +105,50 @@ def test_rule_is_proportional_not_an_absolute_margin() -> None:
     assert classify_sample(2000.0, 900.0, 300.0, 0.5) == SUPPLY_METER_2
     # The same 150 W gap at 500 W is a real difference of 30 %, still the Victron.
     assert classify_sample(500.0, 350.0, 300.0, 0.5) == SUPPLY_VICTRON
+
+
+def test_default_minimum_confirms_a_switch_at_the_evening_base_load() -> None:
+    """Live 2026-10-17: a switch at 17:58:50 was confirmed only at 18:52.
+
+    The apartment drew ~240 W, under the old 300 W minimum, so almost no sample
+    decided anything. Replaying 14 days of 30 s samples at three grid phases, 200 W
+    confirmed the switch in 4.5 min with no false meter-2 episode (longest false
+    streak 2 of 10, as at 300 W); 120 W gave one.
+    """
+    n = DEFAULTS[CONF_SUPPLY_CONFIRM_SAMPLES]
+    detector = SupplyDetector(
+        DEFAULTS[CONF_SUPPLY_MIN_APARTMENT_W],
+        DEFAULTS[CONF_SUPPLY_VICTRON_SHARE],
+        n,
+        state=SUPPLY_VICTRON,
+        last_decisive=_t(-1),
+    )
+    # Before the switch: apartment 240 W, Victron 490 W minus the garage's 200 W.
+    assert detector.observe(_t(0), 240.0, 290.0) is None
+    # After it the Victron feeds only the garage and its own base.
+    seen = [detector.observe(_t(i), 240.0, 34.0) for i in range(1, n + 1)]
+
+    assert seen[:-1] == [None] * (n - 1)
+    assert seen[-1] is not None
+    assert (seen[-1].state, seen[-1].at, seen[-1].not_before) == (
+        SUPPLY_METER_2,
+        _t(1),
+        _t(0),
+    )
+
+
+def test_default_minimum_leaves_the_low_load_mismatch_undecided() -> None:
+    """The other side of the 2026-10-17 choice: on 14.10 ~15:45, on the Victron,
+    the apartment read ~130 W against ~40 W net for 27 samples in a row."""
+    assert (
+        classify_sample(
+            130.0,
+            40.0,
+            DEFAULTS[CONF_SUPPLY_MIN_APARTMENT_W],
+            DEFAULTS[CONF_SUPPLY_VICTRON_SHARE],
+        )
+        is None
+    )
 
 
 def test_thresholds_are_parameters_not_constants() -> None:

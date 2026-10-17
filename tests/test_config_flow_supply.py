@@ -80,8 +80,8 @@ async def test_supply_section_saves_sensors_meter_and_thresholds(
     hass: HomeAssistant,
 ) -> None:
     entry, result = await _open_supply(hass)
-    # Defaults: 300 W, a share of 0.5, 10 samples.
-    assert _field(result, CONF_SUPPLY_MIN_APARTMENT_W)[0].default() == 300.0
+    # Defaults: 200 W, a share of 0.5, 10 samples.
+    assert _field(result, CONF_SUPPLY_MIN_APARTMENT_W)[0].default() == 200.0
     assert _field(result, CONF_SUPPLY_VICTRON_SHARE)[0].default() == 0.5
     assert _field(result, CONF_SUPPLY_CONFIRM_SAMPLES)[0].default() == 10
     # The apartment is picked among the metered devices.

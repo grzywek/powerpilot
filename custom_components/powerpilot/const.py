@@ -286,8 +286,11 @@ PPE_2: Final = "ppe2"
 # less than ``supply_victron_share`` of the apartment's power (a proportional
 # rule: the meters disagree by a few percent, so an absolute margin gave false
 # meter-2 episodes); ``supply_confirm_samples`` agreeing
-# samples in a row confirm a change. Detection is on only when the apartment
-# sensor, the Victron output sensor and the other sub-meters are all set.
+# samples in a row confirm a change. The 200 W minimum is the lowest that gave
+# no false meter-2 episode in a 14-day replay of 30 s samples; below ~150 W the
+# meters disagree by up to ~100 W and fake meter 2. Detection is on only when
+# the apartment sensor, the Victron output sensor and the other sub-meters are
+# all set.
 CONF_APARTMENT_POWER_SENSOR: Final = "apartment_power_sensor"  # W or kW
 # Which metered device (``hierarchy.metered_sensors``) is the apartment; its
 # meter subtree moves with the apartment between the two supplies.
@@ -387,7 +390,7 @@ DEFAULTS: Final = {
     CONF_EV_EARLY_MAX_EXTRA_PCT: 10.0,
     CONF_TRAVEL_MARGIN_BEFORE_MIN: 30,
     CONF_TRAVEL_MARGIN_AFTER_MIN: 30,
-    CONF_SUPPLY_MIN_APARTMENT_W: 300.0,
+    CONF_SUPPLY_MIN_APARTMENT_W: 200.0,
     CONF_SUPPLY_VICTRON_SHARE: 0.5,
     CONF_SUPPLY_CONFIRM_SAMPLES: 10,
     CONF_SUPPLY_CYCLE_THRESHOLD_PLN: 2.0,

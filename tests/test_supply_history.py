@@ -29,6 +29,7 @@ from custom_components.powerpilot.const import (
     CONF_APARTMENT_POWER_SENSOR,
     CONF_VICTRON_OTHER_POWER_SENSORS,
     CONF_SUPPLY_CONFIRM_SAMPLES,
+    CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_VICTRON_OUTPUT_POWER_SENSOR,
     DEFAULTS,
     DOMAIN,
@@ -60,10 +61,12 @@ SUPPLY_CONFIG = {
     CONF_VICTRON_OTHER_POWER_SENSORS: [GARAGE],
     # The tests below confirm in three ticks; the shipped default is 10.
     CONF_SUPPLY_CONFIRM_SAMPLES: 3,
+    # Their samples are drawn around a 300 W minimum; the shipped default is 200 W.
+    CONF_SUPPLY_MIN_APARTMENT_W: 300.0,
 }
 ENTRY_ID = "supply_history_entry"
 STORE_KEY = f"{DOMAIN}_{ENTRY_ID}_supply"
-# The rule a log made under SUPPLY_CONFIG carries (default share and minimum).
+# The rule a log made under SUPPLY_CONFIG carries (default share).
 RULE = {"min_apartment_w": 300.0, "victron_share": 0.5, "confirm_samples": 3}
 STEP = SUPPLY_SAMPLE_INTERVAL
 

@@ -256,3 +256,11 @@ persisted through `Store` (`{DOMAIN}_{entry_id}_supply`, `{"transitions":
   the base upward; clamping biased it too. `exclusive_series` now keeps them
   as they are and only counts them in `negative`; a missing child reading still
   drops the hour.
+- **Minimum apartment power 200 W** (was 300 W). The first live switch
+  (17.10 17:58:50) was confirmed only at 18:52: the apartment drew ~240 W,
+  and at 300 W only 14 % of the samples decided anything (7 % at night). A
+  replay of 14 days of 30 s samples at three grid phases, with that switch as
+  the positive case: 200 W and 150 W gave no false meter-2 episode (longest
+  false streak 2 of 10, as at 300 W) and confirmed the switch in 4.5 min;
+  120 W gave a false episode (14.10 ~15:45, ~130 W apartment against ~40 W
+  net for 27 samples). 200 W keeps a margin from that edge.

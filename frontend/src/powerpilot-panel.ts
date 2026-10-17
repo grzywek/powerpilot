@@ -317,6 +317,9 @@ interface SeriesHour {
   charge_power_kw: number | null;
   battery_energy_cost: number | null;
   grid_buy_kwh: number | null;
+  /** Meter 2's import for the apartment (null without detection, or in a
+   *  mixed or unknown hour). */
+  ppe2_import_kwh?: number | null;
   ev_charge_kwh: number | null;
   /** Planned charger runtime within the hour (minutes at full power). */
   ev_charge_minutes: number | null;
@@ -352,6 +355,8 @@ interface PlanRevision {
 
 interface TipSide {
   grid: number | null;
+  /** Meter 2's import for the apartment. */
+  grid_ppe2?: number | null;
   discharge: number | null;
   base: number | null;
   ev: number | null;
@@ -381,6 +386,8 @@ interface Series {
   start: string;
   end: string;
   device_ids: string[];
+  /** Supply detection on: the grid import is drawn per meter (PPE 1 / PPE 2). */
+  supply_active?: boolean;
   hours: SeriesHour[];
   /** Trips for the window: live calendar trips + history harvested from
    *  snapshot vintages (past events stay visible after leaving the calendar);
@@ -2080,8 +2087,16 @@ export class PowerPilotPanel extends LitElement {
         : Object.values(h.devices_real ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0) ||
           Object.values(h.devices_forecast ?? {}).reduce<number>((a, v) => a + (v ?? 0), 0);
 
-    // Base household load = total consumption minus the sub-metered devices,
-    // so stacking base + devices does not double-count.
+    // The devices' energy meter 2 carried (the apartment's subtree on PPE 2):
+    // drawn as consumption, but not part of the Victron's reading. 0 without
+    // supply detection; null when unknown (a mixed or unknown hour).
+    const offVictron = (h: SeriesHour, forecast: boolean): number | null => {
+      if (!s.supply_active) return 0;
+      return forecast ? (h.forecast?.grid_ppe2 ?? h.ppe2_import_kwh ?? null) : (h.ppe2_import_kwh ?? null);
+    };
+
+    // Base household load = the Victron's consumption minus the sub-metered
+    // devices it fed, so stacking base + devices does not double-count.
     const baseConsumption = (h: SeriesHour): number | null => {
       // The in-progress hour carries no whole-hour consumption forecast of its
       // own; its plan's base load lives on the forecast side.
@@ -2090,10 +2105,14 @@ export class PowerPilotPanel extends LitElement {
       // forecast — a stale forecast lead blanks realized fields so the bars
       // draw the pinned plan instead of reality.
       if (h.is_past && h.consumption_real != null) {
-        return Math.max(0, h.consumption_real - deviceSum(h));
+        const off = offVictron(h, false);
+        if (off == null) return null;
+        return Math.max(0, h.consumption_real - (deviceSum(h) - off));
       }
       if (h.consumption_forecast == null) return h.base_consumption_forecast;
-      return h.base_consumption_forecast ?? Math.max(0, h.consumption_forecast - deviceSum(h));
+      if (h.base_consumption_forecast != null) return h.base_consumption_forecast;
+      const off = offVictron(h, true);
+      return off == null ? null : Math.max(0, h.consumption_forecast - (deviceSum(h) - off));
     };
 
     const device = (eid: string) => (h: SeriesHour): number | null => {
@@ -2107,7 +2126,7 @@ export class PowerPilotPanel extends LitElement {
     /** A stack component for one hour: the plan while the hour is running,
      *  what was measured once it is over. */
     const flow = (
-      key: "grid" | "discharge" | "ev" | "charge",
+      key: "grid" | "grid_ppe2" | "discharge" | "ev" | "charge",
       live: (h: SeriesHour) => number | null
     ) => (h: SeriesHour): number | null =>
       planned(h) ? (h.forecast?.[key] ?? null) : live(h);
@@ -2121,10 +2140,19 @@ export class PowerPilotPanel extends LitElement {
       get: (h: SeriesHour) => number | null;
     };
     const deviceIds = s.device_ids ?? [];
-    const upRows: Row[] = [
-      { label: "⚡ Import z sieci", color: "#8e44ad", key: "grid", get: flow("grid", (h) => h.grid_buy_kwh) },
-      { label: "🔋 ESS — rozładowanie", color: "#b0a14f", key: "discharge", get: flow("discharge", (h) => h.battery_discharge_kwh) },
-    ];
+    // With supply detection the grid import is drawn per meter: PPE 1 behind
+    // the Victron, PPE 2 the apartment while it is on meter 2 (a lighter shade
+    // of the import's purple; the band's teal is too close to a device colour).
+    const upRows: Row[] = s.supply_active
+      ? [
+          { label: "⚡ Import z sieci — PPE 1", color: "#8e44ad", key: "grid", get: flow("grid", (h) => h.grid_buy_kwh) },
+          { label: "⚡ Import z sieci — PPE 2", color: "#c39bd3", key: "grid_ppe2", get: flow("grid_ppe2", (h) => h.ppe2_import_kwh ?? null) },
+          { label: "🔋 ESS — rozładowanie", color: "#b0a14f", key: "discharge", get: flow("discharge", (h) => h.battery_discharge_kwh) },
+        ]
+      : [
+          { label: "⚡ Import z sieci", color: "#8e44ad", key: "grid", get: flow("grid", (h) => h.grid_buy_kwh) },
+          { label: "🔋 ESS — rozładowanie", color: "#b0a14f", key: "discharge", get: flow("discharge", (h) => h.battery_discharge_kwh) },
+        ];
     const downRows: Row[] = [
       { label: "🏠 Zużycie bazowe", color: "#b5475d", key: "base", get: baseConsumption },
       ...deviceIds.map((eid, idx) => ({

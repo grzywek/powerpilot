@@ -277,9 +277,12 @@ liczników*); the form refuses anything else.
   it keeps the confirmed state for the whole horizon and says why
   (`supply_reason`). Switches are modelled only with recommendations turned
   on: a plan assuming switches nobody makes would size the battery for the
-  wrong load. The chart's per-device forecast follows each hour's supply —
-  the plan's for planned hours, the logged one for past hours — so the
-  apartment's bars and the Victron consumption line agree.
+  wrong load. The chart draws every device whatever feeds it and splits the
+  grid import into PPE 1 (behind the Victron) and PPE 2 (the apartment's
+  subtree while it is on meter 2 — the plan's supply for planned hours, the
+  logged one for past hours), so both stacks balance. A past mixed or
+  unknown hour has no PPE 2 import and no base: its split is not read from
+  whole-hour meters.
 - Recommendations (opt-in: options → *Zasilanie mieszkania* → recommend
   switches; off by default): the plan's runs of meter-2 hours are cycles
   (id = planned start, or the actual switch time for the one running). Each

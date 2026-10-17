@@ -54,6 +54,13 @@ _LOGGER = logging.getLogger(__name__)
 # How many gap descriptions a period carries (the first ones, plus a count).
 _MAX_MISSING_LISTED = 4
 
+# How long a statistic may still be on its way before its absence is a gap.
+# The recorder compiles each 5-minute bucket, and at the top of the hour the
+# hour that ended, about ten seconds after they close; the plan re-runs at the
+# hour boundary itself. 15 minutes lets two compile cycles slip before an
+# absent statistic counts as missing.
+_RECORDER_LATENCY = timedelta(minutes=15)
+
 # What each unusable-terms code means, for the reasons on the entities.
 _PROBLEM_TEXT = {
     CAP_TERMS_DATES_ORDER: "data początku po dacie końca",
@@ -264,6 +271,7 @@ class BillingModule(PowerPilotModule):
         expected = 0
         covered = 0
         missing: list[str] = []
+        pending: list[str] = []
         gaps = 0
 
         def note(reason: str) -> None:
@@ -272,43 +280,63 @@ class BillingModule(PowerPilotModule):
             if len(missing) < _MAX_MISSING_LISTED:
                 missing.append(reason)
 
-        hour = month_start
-        while hour < hour_now:
-            expected += 1
-            label = dt_util.as_local(hour).strftime("%d.%m %H:%M")
-            absent = [eid for eid in sensors if hour not in series[eid]]
+        def settle(label: str, hour: datetime, readings: dict[str, float | None]) -> None:
+            nonlocal energy, cost, covered
+            absent = [eid for eid, value in readings.items() if value is None]
             cap_price = self._prices.cap_price_at(hour, terms)
             if absent:
                 note(f"{label}: brak odczytu {', '.join(absent)}")
             elif cap_price is None:
                 note(f"{label}: brak ceny pod Tarczę")
             else:
-                kwh = sum(series[eid][hour] for eid in sensors)
+                kwh = sum(readings.values())
                 energy += kwh
                 cost += kwh * cap_price
                 covered += 1
+
+        hour = month_start
+        while hour < hour_now:
+            expected += 1
+            label = dt_util.as_local(hour).strftime("%d.%m %H:%M")
+            readings: dict[str, float | None] = {
+                eid: series[eid].get(hour) for eid in sensors
+            }
+            uncompiled = [eid for eid, value in readings.items() if value is None]
+            if uncompiled and now - (hour + timedelta(hours=1)) <= _RECORDER_LATENCY:
+                # The hourly statistic of an hour that just ended is still on
+                # its way: read the hour from its 5-minute buckets. A bucket
+                # not compiled yet is pending; an hour without a single
+                # bucket is a real hole in the recorder.
+                for eid in uncompiled:
+                    readings[eid] = await self._meters.async_partial_kwh(
+                        eid, hour, hour + timedelta(hours=1)
+                    )
+                if all(readings[eid] is not None for eid in uncompiled):
+                    pending.append(
+                        f"{label}: statystyka godzinowa w drodze — "
+                        "liczona z 5-minutowych"
+                    )
+            settle(label, hour, readings)
             hour += timedelta(hours=1)
 
         # The running hour: its elapsed part from 5-minute statistics. Counted
-        # as one more expected segment so a stale recorder shows up as a gap.
+        # as one more expected segment so a stale recorder shows up as a gap —
+        # once its first bucket is overdue, not while it is being compiled.
         if now > hour_now:
             expected += 1
             label = dt_util.as_local(hour_now).strftime("%d.%m %H:%M")
-            partials = {
+            partials: dict[str, float | None] = {
                 eid: await self._meters.async_partial_kwh(eid, hour_now, now)
                 for eid in sensors
             }
-            absent = [eid for eid, value in partials.items() if value is None]
-            cap_price = self._prices.cap_price_at(hour_now, terms)
-            if absent:
-                note(f"{label} (bieżąca): brak odczytu {', '.join(absent)}")
-            elif cap_price is None:
-                note(f"{label} (bieżąca): brak ceny pod Tarczę")
-            else:
-                kwh = sum(partials.values())
-                energy += kwh
-                cost += kwh * cap_price
+            uncompiled = [eid for eid, value in partials.items() if value is None]
+            if uncompiled and now - hour_now <= _RECORDER_LATENCY:
+                # Nothing of this hour compiled yet: its minutes so far are
+                # pending, counted by the next refresh that sees them.
+                pending.append(f"{label} (bieżąca): pierwsze minuty w drodze")
                 covered += 1
+            else:
+                settle(f"{label} (bieżąca)", hour_now, partials)
 
         if gaps > len(missing):
             missing.append(f"… i {gaps - len(missing)} więcej")
@@ -324,6 +352,7 @@ class BillingModule(PowerPilotModule):
             hours_expected=expected,
             hours_covered=covered,
             missing=tuple(missing),
+            pending=tuple(pending),
         )
 
     # --------------------------------------------------------------- contribute

@@ -181,7 +181,10 @@ PowerPilot models it end to end:
 - the month-to-date import of PPE 1 is read from the configured grid-import
   meters (*Tarcza* → *Liczniki importu PPE 1*; summed, an hour missing from any
   of them is unknown, never zero) and priced from the price archive under that
-  month's edition;
+  month's edition. Statistics the recorder is still compiling — the hour that
+  just ended, the first minutes of the running one — are pending for up to
+  15 minutes (an hour that just ended is read from its 5-minute buckets), not
+  gaps;
 - the optimizer settles each capped month it touches as `min(C, limit × E)` and
   plans the battery under that regime, pricing the rest of the month from the
   weekly consumption profile, the archive's price estimate and the learned EV

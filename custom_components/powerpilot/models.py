@@ -202,6 +202,10 @@ class BillingPeriod:
     hours_covered: int = 0
     missing: tuple[str, ...] = ()
     terms_name: str = ""  # the price-cap edition this month is settled under
+    # Statistics the recorder is still compiling (the hour that just ended,
+    # the running hour's first minutes): counted as soon as they land, never
+    # a gap — see ``modules/billing.py``.
+    pending: tuple[str, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -230,6 +234,7 @@ class BillingPeriod:
             "hours_covered": self.hours_covered,
             "complete": self.complete,
             "missing": list(self.missing),
+            "pending": list(self.pending),
         }
 
 

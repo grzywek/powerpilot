@@ -77,11 +77,21 @@ class _StubCoordinator:
 
 
 class _Meters:
-    """Recorder stand-in: hourly kWh per entity + the running hour's partial."""
+    """Recorder stand-in: hourly kWh per entity + 5-minute sums per window.
 
-    def __init__(self, hourly: dict[str, dict[datetime, float]], partial: dict) -> None:
+    ``partial`` answers for the running hour; ``buckets`` for a completed
+    hour read from its 5-minute statistics, keyed ``(entity_id, hour)``.
+    """
+
+    def __init__(
+        self,
+        hourly: dict[str, dict[datetime, float]],
+        partial: dict,
+        buckets: dict | None = None,
+    ) -> None:
         self.hourly = hourly
         self.partial = partial
+        self.buckets = buckets or {}
 
     async def async_range_kwh(self, entity_id, start, end):
         return {
@@ -89,6 +99,8 @@ class _Meters:
         }
 
     async def async_partial_kwh(self, entity_id, start, end):
+        if end - start == timedelta(hours=1):
+            return self.buckets.get((entity_id, start))
         return self.partial.get(entity_id)
 
 
@@ -133,12 +145,18 @@ def _month_hours() -> list[datetime]:
     return _hours(month_start, hour_now)
 
 
-def _fixture(*, drop_b: set | None = None, drop_cap: set | None = None, partial=None):
+def _fixture(
+    *,
+    drop_a: set | None = None,
+    drop_b: set | None = None,
+    drop_cap: set | None = None,
+    partial=None,
+):
     """Full September data up to NOW: A = 1 kWh/h, B = 0.5 kWh/h, cap 0.5 PLN."""
     hour_now = dt_util.now().replace(minute=0, second=0, microsecond=0)
     hours = _month_hours()
     hourly = {
-        A: {h: 1.0 for h in hours},
+        A: {h: 1.0 for h in hours if h not in (drop_a or set())},
         B: {h: 0.5 for h in hours if h not in (drop_b or set())},
     }
     caps = {h: 0.5 for h in hours + [hour_now] if h not in (drop_cap or set())}
@@ -218,6 +236,53 @@ async def test_unreadable_running_hour_is_a_gap() -> None:
     assert period.hours_covered == len(hours)
     assert period.hours_expected == len(hours) + 1
     assert any("(bieżąca)" in m for m in period.missing)
+
+
+async def test_the_hour_that_just_ended_is_read_from_its_5_minute_buckets() -> None:
+    """Incident 2026-10-17: the plan re-runs at the top of the hour, before the
+    recorder has compiled the hour that ended and the first bucket of the new
+    one. Both were reported as missing, so every hour-boundary plan ran
+    without the cap. Statistics still being compiled are pending, not gaps.
+    """
+    with freeze_time("2026-09-14 10:03:00+02:00"):
+        hours = _month_hours()
+        last = hours[-1]  # 09:00, ended three minutes ago
+        meters, prices, _, _ = _fixture(drop_a={last}, drop_b={last}, partial={A: None, B: None})
+        meters.buckets = {(A, last): 0.9, (B, last): 0.4}
+        module = _module(meters, prices)
+        await module.async_update()
+    period = module.periods[PPE_1]
+    assert period.complete
+    assert period.hours_covered == period.hours_expected == len(hours) + 1
+    n = len(hours) - 1
+    assert abs(period.energy_kwh - (n * 1.5 + 1.3)) < 1e-9
+    assert any("09:00" in p and "5-minutowych" in p for p in period.pending)
+    assert any("(bieżąca)" in p for p in period.pending)
+
+
+async def test_an_ended_hour_without_any_bucket_is_a_gap_even_when_recent() -> None:
+    with freeze_time("2026-09-14 10:03:00+02:00"):
+        hours = _month_hours()
+        meters, prices, _, _ = _fixture(drop_b={hours[-1]}, partial={A: None, B: None})
+        module = _module(meters, prices)
+        await module.async_update()
+    period = module.periods[PPE_1]
+    assert not period.complete
+    assert any("09:00: brak odczytu sensor.ev_meter" in m for m in period.missing)
+
+
+async def test_statistics_overdue_past_the_recorder_latency_are_gaps() -> None:
+    with freeze_time("2026-09-14 10:16:00+02:00"):
+        hours = _month_hours()
+        meters, prices, _, _ = _fixture(drop_b={hours[-1]}, partial={A: None, B: None})
+        meters.buckets = {(B, hours[-1]): 0.4}
+        module = _module(meters, prices)
+        await module.async_update()
+    period = module.periods[PPE_1]
+    assert not period.complete
+    assert period.pending == ()
+    assert any("09:00: brak odczytu sensor.ev_meter" in m for m in period.missing)
+    assert any("(bieżąca): brak odczytu" in m for m in period.missing)
 
 
 async def test_many_gaps_are_summarised() -> None:

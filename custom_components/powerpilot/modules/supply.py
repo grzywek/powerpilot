@@ -676,15 +676,75 @@ class SupplyModule(PowerPilotModule):
         stored = await self._store.async_load()
         if stored is not None:
             try:
-                self.transitions, self.covered_from, self.checkpoint = decode_log(stored)
+                decoded = decode_log(stored)
             except ValueError as err:
                 await self._async_move_store_aside(err)
+                return
+            if stored.get("rule") == self.rule:
+                self.transitions, self.covered_from, self.checkpoint = decoded
+            elif not await self._async_archive_for_rule(stored.get("rule")):
                 return
         # Weeks of history are read off the setup path; live sampling starts
         # once the replay has brought the detector up to now.
         self._replay_task = self.coordinator.entry.async_create_background_task(
             self.hass, self._async_replay_then_sample(), "powerpilot_supply_replay"
         )
+
+    @property
+    def rule(self) -> dict[str, Any]:
+        """The detection rule the log is made under, stored with it.
+
+        The log is evidence read through this rule; under another one the same
+        samples confirm other switches, so a log made under a different rule
+        (or one stored before the rule was recorded) is not reused.
+        """
+        return {
+            "min_apartment_w": self.min_apartment_w,
+            "victron_share": self.victron_share,
+            "confirm_samples": self.confirm_samples,
+        }
+
+    async def _async_archive_for_rule(self, stored_rule: Any) -> bool:
+        """Set aside a log made under another rule; rebuild it from history.
+
+        The file is renamed, never deleted, so the old evidence stays for
+        inspection. ``False`` when it cannot be moved: the module then stays
+        inert for this run rather than write over it.
+        """
+        assert self._store is not None
+        path = self._store.path
+        aside = f"{path}.rule-{dt_util.utcnow():%Y-%m-%dT%H%M%S}"
+        try:
+            await self.hass.async_add_executor_job(os.rename, path, aside)
+        except OSError as move_err:
+            _LOGGER.error(
+                "Supply log %s was made under another detection rule (%s) and "
+                "cannot be moved aside (%s); apartment supply detection stays off",
+                path,
+                stored_rule,
+                move_err,
+            )
+            self.store_error = (
+                f"Dziennik zasilania mieszkania powstał przy innej regule "
+                f"wykrywania i nie dało się go odłożyć ({move_err}). Wykrywanie "
+                f"wyłączone — przenieś plik {path} i uruchom ponownie."
+            )
+            self.log_warning(self.store_error)
+            return False
+        _LOGGER.info(
+            "Supply log %s was made under another detection rule (%s, now %s); "
+            "moved to %s and rebuilt from the recorder's history",
+            path,
+            stored_rule,
+            self.rule,
+            aside,
+        )
+        self.log_info(
+            f"Reguła wykrywania zasilania mieszkania się zmieniła — poprzedni "
+            f"dziennik odłożony do {aside}, odbudowa z historii recordera.",
+            extra={"stored_rule": stored_rule, "rule": self.rule},
+        )
+        return True
 
     def _stored_detector(self, source: str) -> SupplyDetector:
         """A detector holding the stored log's last confirmed state.
@@ -811,13 +871,14 @@ class SupplyModule(PowerPilotModule):
             )
         self.log_warning(self.store_error)
 
-    @staticmethod
     def _payload(
+        self,
         transitions: Sequence[SupplyTransition],
         covered_from: datetime | None,
         checkpoint: SupplyCheckpoint | None,
     ) -> dict[str, Any]:
         return {
+            "rule": self.rule,
             "transitions": [t.to_dict() for t in transitions],
             "covered_from": covered_from.isoformat() if covered_from is not None else None,
             "checkpoint": checkpoint.to_dict() if checkpoint is not None else None,

@@ -62,6 +62,8 @@ SUPPLY_CONFIG = {
 }
 ENTRY_ID = "supply_entry"
 STORE_KEY = f"{DOMAIN}_{ENTRY_ID}_supply"
+# The rule a log made under SUPPLY_CONFIG carries (default share and minimum).
+RULE = {"min_apartment_w": 300.0, "victron_share": 0.5, "confirm_samples": 3}
 
 
 def _t(i: int) -> datetime:
@@ -358,7 +360,7 @@ def _stored_log(*transitions: SupplyTransition) -> dict:
         "version": 1,
         "minor_version": 1,
         "key": STORE_KEY,
-        "data": {"transitions": [t.to_dict() for t in transitions]},
+        "data": {"rule": RULE, "transitions": [t.to_dict() for t in transitions]},
     }
 
 

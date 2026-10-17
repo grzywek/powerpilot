@@ -63,6 +63,8 @@ SUPPLY_CONFIG = {
 }
 ENTRY_ID = "supply_history_entry"
 STORE_KEY = f"{DOMAIN}_{ENTRY_ID}_supply"
+# The rule a log made under SUPPLY_CONFIG carries (default share and minimum).
+RULE = {"min_apartment_w": 300.0, "victron_share": 0.5, "confirm_samples": 3}
 STEP = SUPPLY_SAMPLE_INTERVAL
 
 FIXTURE = json.loads(
@@ -175,7 +177,13 @@ def _transition(state: str, at: datetime, not_before: datetime | None = None, **
 
 
 def _stored(data: dict) -> dict:
-    return {"version": 1, "minor_version": 1, "key": STORE_KEY, "data": data}
+    """A stored log made under the current rule unless ``data`` names another."""
+    return {
+        "version": 1,
+        "minor_version": 1,
+        "key": STORE_KEY,
+        "data": {"rule": RULE, **data},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -999,3 +1007,78 @@ def test_unusable_checkpoint_makes_the_log_undecodable(checkpoint) -> None:
 def test_a_checkpoint_needs_a_log_that_covers_something() -> None:
     with pytest.raises(ValueError):
         decode_log({"transitions": [], "checkpoint": _checkpoint(START, None)})
+
+
+# ---------------------------------------------------------------------------
+# A log made under another detection rule
+# ---------------------------------------------------------------------------
+
+
+def _write_store_file(hass: HomeAssistant, tmp_path: Path, monkeypatch, data: dict) -> Path:
+    """The stored log both in the mocked store and as the real file it renames."""
+    monkeypatch.setattr(hass.config, "config_dir", str(tmp_path))
+    storage_dir = tmp_path / ".storage"
+    storage_dir.mkdir()
+    path = storage_dir / STORE_KEY
+    payload = {"version": 1, "minor_version": 1, "key": STORE_KEY, "data": data}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    "stored_rule",
+    [None, {**RULE, "victron_share": 0.9}],
+    ids=["no-rule", "other-share"],
+)
+async def test_a_log_made_under_another_rule_is_set_aside_and_rebuilt(
+    hass: HomeAssistant, hass_storage, supply_recorder, freezer, tmp_path, monkeypatch,
+    stored_rule,
+) -> None:
+    """Incident 2026-10-17: v2.5.0's absolute rule left 13 false meter-2 switches
+    in the log; after the rule changed, reloading that log would have fed them
+    to learning. A log made under another rule (or stored before the rule was
+    recorded) is renamed aside, never deleted, and rebuilt from history.
+    """
+    false = _transition(SUPPLY_METER_2, START + timedelta(minutes=2), START + timedelta(minutes=1))
+    data = {"transitions": [false.to_dict()], "covered_from": START.isoformat()}
+    if stored_rule is not None:
+        data["rule"] = stored_rule
+    hass_storage[STORE_KEY] = {"version": 1, "minor_version": 1, "key": STORE_KEY, "data": data}
+    path = _write_store_file(hass, tmp_path, monkeypatch, data)
+    freezer.move_to(START + timedelta(minutes=30))
+    _set_units(hass)
+    supply_recorder(history=_moved_history())
+
+    module = await _module(hass)
+
+    aside = list(path.parent.glob(f"{STORE_KEY}.rule-*"))
+    assert len(aside) == 1
+    assert json.loads(aside[0].read_text(encoding="utf-8"))["data"] == data
+    assert false not in module.transitions
+    assert [t.state for t in module.transitions] == [SUPPLY_VICTRON, SUPPLY_METER_2]
+    assert module.covered_from == START
+    assert module.store_error is None
+    assert hass_storage[STORE_KEY]["data"]["rule"] == RULE
+
+
+async def test_a_log_under_another_rule_that_cannot_be_moved_is_left_alone(
+    hass: HomeAssistant, hass_storage, supply_recorder, tmp_path, monkeypatch
+) -> None:
+    data = {"transitions": [], "covered_from": None}
+    hass_storage[STORE_KEY] = {"version": 1, "minor_version": 1, "key": STORE_KEY, "data": data}
+    path = _write_store_file(hass, tmp_path, monkeypatch, data)
+    _set_units(hass)
+    supply_recorder(history=_moved_history())
+
+    def refuse(src, dst):
+        raise OSError("read-only")
+
+    monkeypatch.setattr("custom_components.powerpilot.modules.supply.os.rename", refuse)
+    module = SupplyModule(hass, _coordinator())
+    await module.async_setup()
+
+    assert module._replay_task is None
+    assert module.detector is None
+    assert "innej regule" in module.store_error
+    assert path.exists()
+    assert hass_storage[STORE_KEY]["data"] == data

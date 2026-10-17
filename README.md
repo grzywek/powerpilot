@@ -228,7 +228,9 @@ hours older than that are classified from hourly means.
 **Configuration.** Options → *Zasilanie mieszkania*: the apartment power
 sensor, the Victron output power sensor, the other sub-meters behind the
 Victron, the metered device that is the apartment, and the three thresholds (minimum power 300 W, Victron share 0.5, N = 10).
-Leave the three sensors empty to turn detection off. The apartment meter must
+Leave the three sensors empty to turn detection off. The log is evidence read
+through the rule, so changing any threshold sets the old log aside (renamed,
+not deleted) and rebuilds it from the recorder's history. The apartment meter must
 sit directly under the main consumption meter (options → *Hierarchia
 liczników*); the form refuses anything else.
 

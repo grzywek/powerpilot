@@ -57,8 +57,7 @@ realistic price at which that energy would otherwise be replaced.
 Monthly price cap and the apartment's supply
 ---------------------------------------------
 With billing periods each month's energy is settled as ``K = min(C, L·E)``
-(the seller's cap, one regime binary and a big-M per month); the per-hour
-columns then carry only the part of the price that stays outside the
+(the seller's cap); the per-hour columns then carry only the part of the price that stays outside the
 settlement (distribution, excise). While supply detection is active the
 apartment's forecast ``A[t]`` (``HourSlot.apartment_kwh``) is kept apart from
 the Victron's own demand ``F[t]``. Without switching it is fixed to the actual
@@ -82,11 +81,17 @@ unchanged. With switching (stage 3, ``SupplyPlanning``):
 * PPE 1 imports ``g = F + A − A·s + EV + Σc − discharge``; PPE 2 imports
   ``A·s`` (an expression). Every per-hour price is the same on both meters,
   so ``s`` acts only through the discharge and the two settlements: PPE 2's
-  months ``K2 = min(C2_mtd + Σ cap·A·s, L·(E2_mtd + Σ A·s))`` get their own
-  regime binary and big-M next to PPE 1's.
+  months ``K2 = min(C2_mtd + Σ cap·A·s, L·(E2_mtd + Σ A·s))`` are settled
+  next to PPE 1's.
 
-After the solve the regime binaries, ``s`` and ``o`` are pinned and the model
-re-solved, so every settlement is exact.
+``min(C, L·E)`` is concave, so it is not modelled with a regime binary and a
+big-M (whose weak relaxation made the month tail slow). The cap regimes are
+enumerated instead: every combination of "cap does not bind" (the period
+costs ``C``) and "cap binds" (it costs ``L·E``) over all periods of both
+meters is solved with those linear costs, and the cheapest wins. Minimising
+over the plan and over the regimes commute, and at the optimum each chosen
+term is the min, so the settlement is exact — ``2^P`` solves of one model
+whose objective alone changes.
 
 The solver output is replayed through :class:`BatteryModel` so the reported
 ``battery_energy_cost`` / ``battery_use_cost`` and the per-hour cost breakdown
@@ -95,9 +100,11 @@ stay consistent with the rest of the integration.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 import statistics
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -147,11 +154,19 @@ _CHARGE_PRICE_BUCKET = Decimal("0.01")
 # allocator or a stale import.
 EV_ALLOCATOR_VERSION = "pack-level-aware-2026-08"
 
+# A later cap-regime combination replaces the best one only when it is cheaper
+# by more than this (PLN) — the MIP's absolute gap (``mip_abs_gap``), below
+# which two optima are indistinguishable.
+_REGIME_TIE_PLN = 1e-7
+
 # Switch horizon ``T_sw`` (hours from the running one): the apartment's supply
 # may change only on the boundaries before it; later hours, and the month's
 # tail, keep the supply of hour ``T_sw − 1``. Set from the solve-time
-# measurement in ``scripts/bench_supply_model.py`` (stage 3 plan, decision 7).
-SUPPLY_SWITCH_HOURS = 168
+# measurement in ``scripts/bench_supply_model.py`` (stage 3 plan, decision 7,
+# re-measured after the cap regimes became an enumeration): the whole week
+# took 4× longer than 72 h on the base case, and the hourly re-plan brings a
+# later cycle into the window in time.
+SUPPLY_SWITCH_HOURS = 72
 
 
 @dataclass
@@ -364,6 +379,11 @@ class Optimizer:
 
     def __init__(self, config: OptimizerConfig) -> None:
         self.config = config
+        # Cap-regime combinations of the last solve and the wall time (s) of
+        # every MIP it ran — pruned combinations run none (diagnostics and
+        # ``scripts/bench_supply_model.py``).
+        self.last_solve_seconds: list[float] = []
+        self.last_regime_combinations = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -843,7 +863,7 @@ class Optimizer:
         g0 = y0 + (n if min_charge > _EPS else 0)  # first grid-import column
         tail_n = n - tail_start
         v0 = g0 + n  # first tail-EV column (one per tail hour)
-        p0 = v0 + tail_n  # first billing-period block (K, C, E, b per period)
+        p0 = v0 + tail_n  # first billing-period block (C, E per period)
 
         def state_col(t: int) -> int:
             return s0 + t
@@ -854,9 +874,9 @@ class Optimizer:
         def tail_ev_col(t: int) -> int:
             return v0 + (t - tail_start)
 
-        def period_cols(i: int) -> tuple[int, int, int, int]:
-            base = p0 + 4 * i
-            return base, base + 1, base + 2, base + 3  # K, C, E, b
+        def period_cols(i: int) -> tuple[int, int]:
+            base = p0 + 2 * i
+            return base, base + 1  # C, E
 
         # Per-hour grid-side charge cap (kWh over the slot's plannable window).
         # During EV hours the battery may still charge — the real limit is
@@ -946,29 +966,18 @@ class Optimizer:
         for t in range(tail_start, n):
             h.addVar(0.0, tail_ev_cap[t])
 
-        # Billing-period blocks: K (settled energy cost), C (pre-cap cost),
-        # E (import), b (1 = the cap binds). ``min(C, L·E)`` is concave, so
-        # minimising it needs the binary switch with a big-M on each branch.
+        # Billing-period blocks: C (pre-cap cost) and E (import). The month's
+        # settlement ``min(C, L·E)`` is concave; instead of a regime binary
+        # with big-M rows, each solve fixes every period's regime through the
+        # objective (cost 1 on C, or L on E) and the cheapest combination of
+        # regimes wins — see the enumeration below.
         periods = periods or []
-        big_m: list[float] = []
-        for i, cp in enumerate(periods):
-            limit = cp.period.limit_kwh
-            m_val = abs(cp.period.cost_pln - limit * cp.period.energy_kwh) + 1.0
-            for t in cp.hours:
-                g_max = (
-                    demand[t] + apartment[t] + ev_kwh[t] + charge_caps[t] + tail_ev_cap[t]
-                )
-                m_val += abs(settled[t] - limit) * g_max
-            big_m.append(m_val)
-            k_col, c_col, e_col, b_col = period_cols(i)
-            h.addVar(-inf, inf)  # K
+        for _i in range(len(periods)):
             h.addVar(-inf, inf)  # C
             h.addVar(0.0, inf)  # E
-            h.addVar(0.0, 1.0)  # b
-            h.changeColIntegrality(b_col, highspy.HighsVarType.kInteger)
 
         # Recovery shortfall r[t] ≥ e_recover − E[t] (one per hour, recovery only).
-        r0 = p0 + 4 * len(periods)
+        r0 = p0 + 2 * len(periods)
         if recovering:
             for t in range(n):
                 h.addVar(0.0, e_recover)
@@ -977,7 +986,7 @@ class Optimizer:
         # segment 0 = the running hour, fixed to the actual supply), an open
         # indicator per later segment (o ≥ s_k − s_{k−1}, priced at the cycle
         # threshold), the product w[t] = z[t]·s[t] for hours whose discharge
-        # cap the apartment changes, then PPE 2's billing blocks (K, C, E, b).
+        # cap the apartment changes, then PPE 2's billing blocks (C, E).
         sw0 = r0 + (n if recovering else 0)
         seg_k = len(switch.starts) if switch is not None else 0
 
@@ -1003,24 +1012,15 @@ class Optimizer:
                     h.addVar(0.0, 1.0)
         q0 = w0 + len(w_cols)
 
-        def ppe2_cols(i: int) -> tuple[int, int, int, int]:
-            base = q0 + 4 * i
-            return base, base + 1, base + 2, base + 3  # K, C, E, b
+        def ppe2_cols(i: int) -> tuple[int, int]:
+            base = q0 + 2 * i
+            return base, base + 1  # C, E
 
-        big_m2: list[float] = []
-        for i, cp in enumerate(ppe2_periods):
-            limit = cp.period.limit_kwh
-            m_val = abs(cp.period.cost_pln - limit * cp.period.energy_kwh) + 1.0
-            for t in cp.hours:
-                m_val += abs(settled[t] - limit) * apartment[t]
-            big_m2.append(m_val)
-            h.addVar(-inf, inf)  # K
+        for _i in range(len(ppe2_periods)):
             h.addVar(-inf, inf)  # C
             h.addVar(0.0, inf)  # E
-            h.addVar(0.0, 1.0)  # b
-            h.changeColIntegrality(ppe2_cols(i)[3], highspy.HighsVarType.kInteger)
 
-        n_cols = q0 + 4 * len(ppe2_periods)
+        n_cols = q0 + 2 * len(ppe2_periods)
         cost = np.zeros(n_cols, dtype=np.float64)
         for t in range(n):
             # Earliness tie-break: among equally priced hours prefer charging
@@ -1039,12 +1039,9 @@ class Optimizer:
                 cost[w_cols[t]] = -per_kwh * apartment_share[t]
         for t in range(tail_start, n):
             cost[tail_ev_col(t)] = total_price[t] - settled[t]
-        for i in range(len(periods)):
-            cost[period_cols(i)[0]] = 1.0
         for k in range(1, seg_k):
             cost[o_col(k)] = switch.threshold
-        for i in range(len(ppe2_periods)):
-            cost[ppe2_cols(i)[0]] = 1.0
+        # The settlement columns' costs are set per regime combination below.
         if recovering:
             # Dwarfs any price, wear or terminal value: no economic gain can
             # justify leaving the reserve short for another hour.
@@ -1219,12 +1216,9 @@ class Optimizer:
 
         # Monthly settlement per billing period:
         #   C_P = C_mtd + Σ cap_price[t]·g[t]      E_P = E_mtd + Σ g[t]
-        #   K_P ≥ C_P − M·b_P                       K_P ≥ L·E_P − M·(1 − b_P)
-        # Minimising K_P with b_P free picks the cheaper branch, i.e.
-        # K_P = min(C_P, L·E_P) — the seller's month-end settlement.
+        # and the period costs C_P (cap does not bind) or L·E_P (cap binds).
         for i, cp in enumerate(periods):
-            k_col, c_col, e_col, b_col = period_cols(i)
-            limit = cp.period.limit_kwh
+            c_col, e_col = period_cols(i)
             idx = [c_col] + [grid_col(t) for t in cp.hours]
             val = [1.0] + [-settled[t] for t in cp.hours]
             h.addRow(
@@ -1243,29 +1237,14 @@ class Optimizer:
                 np.array(idx, dtype=np.int32),
                 np.array(val, dtype=np.float64),
             )
-            h.addRow(
-                0.0,
-                inf,
-                3,
-                np.array([k_col, c_col, b_col], dtype=np.int32),
-                np.array([1.0, -1.0, big_m[i]], dtype=np.float64),
-            )
-            h.addRow(
-                -big_m[i],
-                inf,
-                3,
-                np.array([k_col, e_col, b_col], dtype=np.int32),
-                np.array([1.0, -limit, -big_m[i]], dtype=np.float64),
-            )
 
         if switch is not None:
             self._add_switch_rows(h, switch, w_cols, d0, s_col, o_col)
         # PPE 2's monthly settlement, its import being A[t]·s[t]:
         #   C2 = C2_mtd + Σ cap_price[t]·A[t]·s[t]     E2 = E2_mtd + Σ A[t]·s[t]
-        #   K2 ≥ C2 − M·b2                            K2 ≥ L·E2 − M·(1 − b2)
+        # settled like PPE 1's months.
         for i, cp in enumerate(ppe2_periods):
-            k_col, c_col, e_col, b_col = ppe2_cols(i)
-            limit = cp.period.limit_kwh
+            c_col, e_col = ppe2_cols(i)
             cost_coef: dict[int, float] = {}
             energy_coef: dict[int, float] = {}
             for t in cp.hours:
@@ -1285,56 +1264,95 @@ class Optimizer:
                     np.array([col0, *coef.keys()], dtype=np.int32),
                     np.array([1.0, *coef.values()], dtype=np.float64),
                 )
-            h.addRow(
-                0.0,
-                inf,
-                3,
-                np.array([k_col, c_col, b_col], dtype=np.int32),
-                np.array([1.0, -1.0, big_m2[i]], dtype=np.float64),
-            )
-            h.addRow(
-                -big_m2[i],
-                inf,
-                3,
-                np.array([k_col, e_col, b_col], dtype=np.int32),
-                np.array([1.0, -limit, -big_m2[i]], dtype=np.float64),
-            )
 
-        h.run()
-        status = h.getModelStatus()
-        if status != highspy.HighsModelStatus.kOptimal:
-            raise RuntimeError(f"HiGHS did not find an optimal plan: {status}")
-        sol = list(h.getSolution().col_value)
+        # Cap regimes by enumeration. Σ_P min(C_P, L·E_P) minimised over the
+        # plan equals the cheapest, over every combination of regimes, of the
+        # plan minimised with each period's regime fixed (min over plans and
+        # min over regimes commute); at that optimum each chosen term is the
+        # min, so the settlement is exact and ``cap_binds`` is the chosen
+        # regime. A fixed regime is a linear cost — C_P, or L·E_P — so no
+        # big-M and no regime binary remain. The model is built once; only
+        # the settlement columns' costs change between solves. Ties: more binding periods first,
+        # then earlier periods binding first; a later combination must beat
+        # the best by more than the MIP's gap. Binding first because a
+        # "does not bind" regime on a degenerate period (C = L·E, e.g. an
+        # empty next month: 0 = 0) prices its kWh below the limit at no real
+        # gain, inviting battery shifts into it that save exactly nothing —
+        # the binding regime plans the same cost without them.
+        settlements = [(cp, period_cols(i)) for i, cp in enumerate(periods)] + [
+            (cp, ppe2_cols(i)) for i, cp in enumerate(ppe2_periods)
+        ]
+        combos = sorted(
+            itertools.product((False, True), repeat=len(settlements)),
+            key=lambda combo: (-sum(combo), [not binds for binds in combo]),
+        )
+        tie_rank = {combo: rank for rank, combo in enumerate(combos)}
 
-        regimes: list[bool] = []
-        regimes2: list[bool] = []
-        if periods:
-            # Polish: the big-M rows leave the settled cost slack of up to
-            # M × integrality tolerance, enough to scramble the micro-PLN
-            # tie-breaks. Pin every regime switch to the value it settled on
-            # and re-solve — with b fixed by bounds the settlement is exact.
-            # The supply columns and their open indicators are pinned too: s
-            # inside the integrality tolerance would let PPE 2's import (A·s)
-            # and the discharge product drift. w is then exact by McCormick
-            # (w = z·s for a 0/1 s), so it is left to the re-solve with z.
-            def pin(col: int) -> bool:
-                on = sol[col] > 0.5
-                h.changeColBounds(col, 1.0 if on else 0.0, 1.0 if on else 0.0)
-                return on
+        def set_regimes(combo: tuple[bool, ...]) -> None:
+            cols: list[int] = []
+            vals: list[float] = []
+            for (cp, (c_col, e_col)), binds in zip(settlements, combo):
+                cols += [c_col, e_col]
+                vals += [0.0, cp.period.limit_kwh] if binds else [1.0, 0.0]
+            if cols:
+                h.changeColsCost(
+                    len(cols),
+                    np.array(cols, dtype=np.int32),
+                    np.array(vals, dtype=np.float64),
+                )
 
-            regimes = [pin(period_cols(i)[3]) for i in range(len(periods))]
-            regimes2 = [pin(ppe2_cols(i)[3]) for i in range(len(ppe2_periods))]
-            for k in range(seg_k):
-                pin(s_col(k))
-            for k in range(1, seg_k):
-                pin(o_col(k))
+        # Exact pruning: a combination's LP relaxation bounds its MIP from
+        # below, so the MIPs run cheapest bound first and one whose bound
+        # exceeds the best plan found is skipped. The others run with the
+        # best objective as HiGHS' ``objective_bound``: only the objective
+        # differs between solves, so the model is feasible for all of them
+        # once the first is optimal, and "infeasible" under a bound means
+        # "nothing cheaper than the best" (pruned, never a tie). No solve is
+        # seeded with another's plan: a seed would decide ties inside a
+        # combination by the order the combinations ran in.
+        lower: dict[tuple[bool, ...], float] = {}
+        if len(combos) > 1:
+            h.setOptionValue("solve_relaxation", True)
+            for combo in combos:
+                set_regimes(combo)
+                h.run()
+                if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+                    raise RuntimeError(
+                        f"HiGHS could not bound cap regimes {combo}: {h.getModelStatus()}"
+                    )
+                lower[combo] = h.getInfo().objective_function_value
+            h.setOptionValue("solve_relaxation", False)
+        order = sorted(combos, key=lambda combo: (lower.get(combo, 0.0), tie_rank[combo]))
+        solved: dict[tuple[bool, ...], tuple[float, list[float]]] = {}
+        best_obj = math.inf
+        self.last_solve_seconds = []
+        self.last_regime_combinations = len(combos)
+        for combo in order:
+            if lower.get(combo, -math.inf) > best_obj + _REGIME_TIE_PLN:
+                continue
+            set_regimes(combo)
+            h.setOptionValue("objective_bound", best_obj + _REGIME_TIE_PLN)
+            began = time.perf_counter()
             h.run()
+            self.last_solve_seconds.append(time.perf_counter() - began)
             status = h.getModelStatus()
+            if status == highspy.HighsModelStatus.kInfeasible and solved:
+                continue  # cannot beat the best plan
             if status != highspy.HighsModelStatus.kOptimal:
                 raise RuntimeError(
-                    f"HiGHS did not find an optimal plan (fixed cap regime): {status}"
+                    f"HiGHS did not find an optimal plan (cap regimes {combo}): {status}"
                 )
-            sol = list(h.getSolution().col_value)
+            objective = h.getInfo().objective_function_value
+            solved[combo] = (objective, list(h.getSolution().col_value))
+            best_obj = min(best_obj, objective)
+        # Among the optima within the MIP's gap of the cheapest, the tie order.
+        regime_combo = min(
+            (combo for combo, (obj, _) in solved.items() if obj <= best_obj + _REGIME_TIE_PLN),
+            key=lambda combo: tie_rank[combo],
+        )
+        sol = solved[regime_combo][1]
+        regimes = list(regime_combo[: len(periods)])
+        regimes2 = list(regime_combo[len(periods) :])
 
         charge = [
             sum(sol[seg_col(t, k)] for k in range(seg_n)) for t in range(n)
@@ -1358,7 +1376,7 @@ class Optimizer:
             tail_ev[t] = max(0.0, sol[tail_ev_col(t)])
         settled_periods: list[tuple[float, float, bool]] = []
         for i in range(len(periods)):
-            _k_col, c_col, e_col, _b_col = period_cols(i)
+            c_col, e_col = period_cols(i)
             settled_periods.append((sol[e_col], sol[c_col], regimes[i]))
         supply = (
             [1.0 if sol[s_col(switch.segment[t])] > 0.5 else 0.0 for t in range(n)]
@@ -1366,7 +1384,7 @@ class Optimizer:
             else []
         )
         ppe2_settled = [
-            (sol[ppe2_cols(i)[2]], sol[ppe2_cols(i)[1]], regimes2[i])
+            (sol[ppe2_cols(i)[1]], sol[ppe2_cols(i)[0]], regimes2[i])
             for i in range(len(ppe2_periods))
         ]
         return _LPSolution(

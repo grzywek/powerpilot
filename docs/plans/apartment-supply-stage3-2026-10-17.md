@@ -148,11 +148,25 @@ slice 1); the actual supply and the last transition; availability.
 - **Switch horizon.** `T_sw` is an internal constant; slice 2 measures solve
   time for `T_sw` = full horizon and 72 h on a recorded week plus month tail
   and sets it. Measured 2026-10-17 with `scripts/bench_supply_model.py` (a
-  synthetic week shaped like the live data, 168 h + 500 h tail, medians of 3
-  runs): no switching 19.2 s, `T_sw` = 168 h 37.7 s, 72 h 45.0 s; the
-  `--winter` variant (switching pays) 12.0 / 17.7 / 12.8 s, with 168 h
-  saving 2.5 zł more than 72 h. 168 h is not clearly slower, so
-  `T_sw` = 168 h (the whole horizon).
+  synthetic week shaped like the live data, 168 h + 500 h tail, clock frozen,
+  medians of 3 runs, seconds). "Before" is slice 2 (one MIP, big-M regime
+  binaries); "after" is slice 2b (cap regimes enumerated, LP-bound pruning:
+  2 combinations without switching, 4 with it, 1 MIP solved in every case).
+  Both settle every case identically.
+
+  | Case | Base before | Base after | Winter before | Winter after |
+  | --- | --- | --- | --- | --- |
+  | no switching, no tail | 3.98 | 0.67 | 3.74 | 0.20 |
+  | no switching (today) | 22.83 | 2.41 | 15.02 | 0.46 |
+  | switching, `T_sw` = 168 h | 24.60 | 9.71 | 14.84 | 1.70 |
+  | switching, `T_sw` = 72 h | 33.15 | 2.38 | 12.63 | 3.23 |
+
+  (`--winter`: apartment ×2, evening prices ×1.5, PPE 1's month at 0.60 zł;
+  there 168 h plans a 6 h cycle that 72 h does not yet see.) On the base
+  case 168 h is clearly slower than 72 h, so `T_sw` = 72 h; the plan is
+  re-solved every hour, so a later cycle is planned once it enters the
+  window. (Slice 2, before the enumeration and with an unfrozen clock, had
+  chosen 168 h: 19.2 / 37.7 / 45.0 s.)
 - **Outputs.** Each decision carries its planned supply; the plan carries both
   meters' `BillingOutcome`s. Recommendations (marginal value per cycle,
   entities, notifications) are slice 3.

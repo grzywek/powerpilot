@@ -514,3 +514,86 @@ def test_the_plan_shows_victron_consumption_under_the_planned_supply() -> None:
         3.0,
         3.0,
     ]
+
+
+def test_four_periods_across_a_month_boundary_match_a_brute_force() -> None:
+    """Both meters over two months (4 periods, 16 cap-regime combinations).
+
+    No battery, so the plan's only choice is the apartment's supply per hour.
+    Every supply sequence is settled by hand — each month of each meter at
+    ``min(C, L·E)`` plus the threshold per opened cycle — and the plan must
+    pick the cheapest one with the same settlement and regimes.
+    """
+    from itertools import product
+
+    boundary = H0 + timedelta(hours=2)
+    prices = [1.5, 0.2, 1.2, 0.1]
+    base = [1.0, 1.0, 1.0, 1.0]
+    apartment = [8.0, 2.0, 3.0, 6.0]
+    threshold = 0.3
+
+    def month(ppe, start, end, energy, cost):
+        return BillingPeriod(
+            ppe=ppe,
+            month_start=start,
+            month_end=end,
+            limit_kwh=LIMIT,
+            energy_kwh=energy,
+            cost_pln=cost,
+            hours_expected=1,
+            hours_covered=1,
+        )
+
+    first = H0 - timedelta(days=10)
+    later = boundary + timedelta(days=31)
+    ppe1 = [month(PPE_1, first, boundary, 100.0, 60.0), month(PPE_1, boundary, later, 0.0, 0.0)]
+    ppe2 = [month(PPE_2, first, boundary, 10.0, 3.0), month(PPE_2, boundary, later, 0.0, 0.0)]
+
+    def settle(seq: tuple[int, ...]) -> tuple[float, list[tuple[float, float]]]:
+        totals = []
+        for meter, periods in ((0, ppe1), (1, ppe2)):
+            for index, period in enumerate(periods):
+                energy, cost = period.energy_kwh, period.cost_pln
+                for t, price in enumerate(prices):
+                    if (t < 2) != (index == 0):
+                        continue
+                    on_2 = seq[t]
+                    kwh = base[t] + (0.0 if on_2 else apartment[t]) if meter == 0 else (
+                        apartment[t] if on_2 else 0.0
+                    )
+                    energy += kwh
+                    cost += price * kwh
+                totals.append((cost, LIMIT * energy))
+        opens = sum(1 for a, b in zip(seq, seq[1:]) if b > a)
+        return sum(min(c, cap) for c, cap in totals) + threshold * opens, totals
+
+    candidates = sorted((settle((0, *rest))[0], (0, *rest)) for rest in product((0, 1), repeat=3))
+    best_cost, best_seq = candidates[0]
+    assert candidates[1][0] - best_cost > 1e-3  # a unique optimum to compare against
+    _, totals = settle(best_seq)
+    # The optimum mixes the regimes: PPE 1 binds only in the first month, PPE 2
+    # only in the second.
+    assert [cap < cost for cost, cap in totals] == [True, False, False, True]
+
+    optimizer = _optimizer(inverter_max_discharge_kw=0.0)
+    plan = optimizer.optimize(
+        Forecast(slots=_slots(prices, base=base, apartment=apartment)),
+        _battery(),
+        billing=ppe1,
+        supply=_planning(
+            cycle_threshold_pln=threshold, ppe2_periods=ppe2, last_transition_at=first
+        ),
+    )
+    assert optimizer.last_regime_combinations == 16
+    assert 1 <= len(optimizer.last_solve_seconds) <= 16  # the rest pruned by bound
+    assert tuple(_on_meter_2(plan)) == best_seq
+    assert [(o.period.ppe, o.period.month_start) for o in plan.billing] == [
+        (p.ppe, p.month_start) for p in (*ppe1, *ppe2)
+    ]
+    opens = sum(1 for a, b in zip(best_seq, best_seq[1:]) if b > a)
+    assert abs(_settled(plan) + threshold * opens - best_cost) < 1e-6
+    for outcome, (cost, cap) in zip(plan.billing, totals):
+        assert abs(outcome.cost_pln - cost) < 1e-6
+        assert abs(outcome.settled_cost_pln - min(cost, cap)) < 1e-6
+        if abs(cost - cap) > 1e-6:
+            assert outcome.cap_binds is (cap < cost)

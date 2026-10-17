@@ -8,12 +8,18 @@ meters under the price cap — and times ``Optimizer.optimize`` for:
 
 * no switching (the plan as before stage 3),
 * switching with ``T_sw`` = 168 h (the whole horizon),
-* switching with ``T_sw`` = 72 h.
+* switching with ``T_sw`` = 72 h,
+* for reference, no switching and no month tail (the settlement then covers
+  the observed month plus the horizon only).
 
-Three runs each; prints the median seconds and what the plan did.
+Three runs each; prints the median seconds, what the plan did, how many
+cap-regime combinations there were, how many MIPs ran (the rest are pruned by
+their LP bound) and the median time of one MIP (of the last run).
 ``--winter`` doubles the apartment's demand, raises the evening prices by
 half and starts PPE 1's month at 0.60 zł/kWh, so moving the apartment pays
 and the search really branches on the supply columns.
+The clock is frozen at ``BENCH_NOW`` (the running hour's fraction and the
+day shapes follow it), so every run times the same problem.
 Run from the repository root with the project's venv:
 
     .venv/bin/python scripts/bench_supply_model.py [--winter]
@@ -25,7 +31,7 @@ import random
 import statistics
 import sys
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -59,6 +65,9 @@ TAIL_H = 500
 RUNS = 3
 LIMIT = 0.61
 WINTER = "--winter" in sys.argv[1:]
+BENCH_NOW = dt_util.as_local(datetime(2026, 10, 17, 12, 37, tzinfo=dt_util.UTC))
+# The optimizer reads the clock through this module attribute too.
+dt_util.now = lambda time_zone=None: BENCH_NOW
 
 # Energy price shape by local hour (zł/kWh, gross) and distribution by band.
 _PRICE = [0.30] * 6 + [0.75] * 3 + [0.45] * 7 + [1.10] * 5 + [0.55] * 3
@@ -172,9 +181,10 @@ def _optimizer() -> Optimizer:
     )
 
 
-def _run(label: str, t_sw: int, switching: bool) -> float:
+def _run(label: str, t_sw: int, switching: bool, with_tail: bool = True) -> float:
     optimizer_module.SUPPLY_SWITCH_HOURS = t_sw
     times = []
+    solves: list[float] = []
     plan = None
     for _ in range(RUNS):
         forecast, tail, billing, ppe2, ev = _case()
@@ -184,11 +194,21 @@ def _run(label: str, t_sw: int, switching: bool) -> float:
             ppe2_periods=ppe2,
             last_transition_at=forecast.slots[0].start - timedelta(days=3),
         )
+        optimizer = _optimizer()
         began = time.perf_counter()
-        plan = _optimizer().optimize(
-            forecast, _battery(), ev, billing=billing, tail=tail, supply=planning
+        plan = optimizer.optimize(
+            forecast,
+            _battery(),
+            ev,
+            billing=billing,
+            tail=tail if with_tail else None,
+            supply=planning,
         )
         times.append(time.perf_counter() - began)
+        # Seconds per solved MIP of the last optimize and the cap-regime
+        # combinations (absent before slice 2b: one MIP with big-M binaries).
+        solves = list(getattr(optimizer, "last_solve_seconds", [times[-1]]))
+        combinations = getattr(optimizer, "last_regime_combinations", 1)
     median = statistics.median(times)
     supplies = [d.supply for d in plan.decisions]
     switches = sum(1 for a, b in zip(supplies, supplies[1:]) if a != b)
@@ -197,6 +217,8 @@ def _run(label: str, t_sw: int, switching: bool) -> float:
     print(
         f"{label:<28} median {median:7.2f} s  runs "
         + ", ".join(f"{t:.2f}" for t in times)
+        + f"  | {combinations} combination(s), {len(solves)} MIP(s) solved, "
+        f"{statistics.median(solves):.2f} s per MIP"
         + f"  | switches {switches}, {on_meter_2} h on meter 2, "
         f"settled {settled:.2f} zł",
         flush=True,
@@ -210,6 +232,7 @@ def main() -> None:
         + (" (winter)" if WINTER else ""),
         flush=True,
     )
+    _run("no switching, no tail", 168, switching=False, with_tail=False)
     _run("no switching (today)", 168, switching=False)
     full = _run("switching, T_sw = 168 h", 168, switching=True)
     short = _run("switching, T_sw = 72 h", 72, switching=True)

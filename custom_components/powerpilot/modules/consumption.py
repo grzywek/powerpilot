@@ -18,11 +18,21 @@ counted exactly once:
     exclusive(node) = reading(node) − Σ reading(direct children)
     base            = exclusive(root)
 
+The apartment's sub-meter is fed from the Victron or from the second meter
+(``modules/supply.py``). Each learned hour uses the supply really in place
+(``SupplyModule.async_past_hour_states``): on meter 2 the apartment's subtree
+is not subtracted from the base, and an hour of mixed or unknown supply gives
+no base sample while the apartment and its sub-meters still learn. An hour a
+node has no exclusive value for is never learned as 0 kWh.
+
 The forecast demand is reconstructed as ``base + Σ(device profiles)`` — where
 each device profile now stores its *exclusive* energy — so totals telescope back
 to the main reading. Because the breakdown is stored per device, a smarter
 forward model (climate by temperature, calendar-driven appliances) can later
 *replace* a device profile without double counting.
+
+While the apartment is on meter 2 its subtree's profiles are left out of the
+(Victron-side) demand.
 
 A sensible default daily shape is used as a fallback until enough history has been
 learned.
@@ -45,7 +55,7 @@ from ..const import (
     CONF_SENSOR_PARENTS,
     DOMAIN,
 )
-from ..hierarchy import exclusive_series, metered_sensors
+from ..hierarchy import ExclusiveSeries, exclusive_series, metered_sensors
 from ..models import Forecast
 from ..profiles import WeeklyAccumulator
 from .base import PowerPilotModule
@@ -354,15 +364,27 @@ class ConsumptionModule(PowerPilotModule):
         if ev_meter and ev_meter not in device_sensors:
             device_sensors.append(ev_meter)
         parents = self.config.get(CONF_SENSOR_PARENTS) or {}
+        supply = self.coordinator.supply
         return [
             main_sensor,
             sorted(device_sensors),
             sorted((str(k), str(v)) for k, v in parents.items()),
+            # Which meter is the apartment and whether its supply is detected:
+            # on meter 2 the apartment's energy no longer leaves the base.
+            supply.apartment_meter or None,
+            supply.enabled,
         ]
 
     async def _maybe_learn(self) -> None:
         main_sensor = self.config.get(CONF_CONSUMPTION_SENSOR)
         if not main_sensor:
+            return
+        supply = self.coordinator.supply
+        if not supply.history_ready:
+            # Days folded now would be attributed from hourly means where the
+            # supply log, still being replayed, has its own answer; and a fold
+            # is never revisited. The stored profile serves meanwhile.
+            _LOGGER.debug("Consumption learning waits for the apartment supply history")
             return
 
         # A changed meter tree invalidates every already-folded day (their kWh
@@ -405,10 +427,19 @@ class ConsumptionModule(PowerPilotModule):
             series[eid] = await self._fetch_hourly_kwh(eid, start, end)
 
         # Collapse the nested meter tree into per-node exclusive energy so a
-        # sub-meter that lives inside another sub-meter is counted once.
-        exclusive = exclusive_series(main_sensor, device_sensors, parents, series)
-        base_excl = exclusive.get(main_sensor, {})
-        device_excl = {eid: exclusive.get(eid, {}) for eid in device_sensors}
+        # sub-meter that lives inside another sub-meter is counted once, with
+        # the apartment attributed to the Victron only where it really fed it.
+        exclusive = exclusive_series(
+            main_sensor,
+            device_sensors,
+            parents,
+            series,
+            apartment=supply.apartment_meter or None,
+            supply=await supply.async_past_hour_states(start, end),
+        )
+        self._log_dropped_hours(exclusive, learn_days)
+        base_excl = exclusive.series.get(main_sensor, {})
+        device_excl = {eid: exclusive.series.get(eid, {}) for eid in device_sensors}
 
         changed = topology_changed  # a reset must persist even with nothing to fold
         day = start.date()
@@ -428,7 +459,14 @@ class ConsumptionModule(PowerPilotModule):
         base_excl: dict[datetime, float],
         device_excl: dict[str, dict[datetime, float]],
     ) -> bool:
-        """Fold one settled day's exclusive hourly data into the accumulators."""
+        """Fold one settled day's exclusive hourly data into the accumulators.
+
+        The day counts once the base has a near-complete day. Each profile then
+        learns the hours it has a value for: an hour with no exclusive value
+        (no reading, a child's reading missing, a negative result, or for the
+        base a mixed or unknown supply) is not 0 kWh, and a device does not
+        lose an hour the base had to drop.
+        """
         day_hours = [
             dt_util.start_of_local_day(day) + timedelta(hours=h) for h in range(24)
         ]
@@ -437,16 +475,50 @@ class ConsumptionModule(PowerPilotModule):
             return False
 
         for hour in present:
-            self.base.observe(hour, base_excl.get(hour, 0.0))
-            for eid, exclusive in device_excl.items():
-                self.devices.setdefault(eid, WeeklyAccumulator()).observe(
-                    hour, exclusive.get(hour, 0.0)
-                )
+            self.base.observe(hour, base_excl[hour])
+        for eid, exclusive in device_excl.items():
+            acc = self.devices.setdefault(eid, WeeklyAccumulator())
+            for hour in day_hours:
+                if hour in exclusive:
+                    acc.observe(hour, exclusive[hour])
 
         self.base.mark_date_observed(day)
         for acc in self.devices.values():
             acc.mark_date_observed(day)
         return True
+
+    def _log_dropped_hours(self, exclusive: ExclusiveSeries, days: int) -> None:
+        """Say which hours of the learning window the meter tree could not attribute."""
+        parts: list[str] = []
+        if exclusive.supply_dropped:
+            parts.append(
+                f"baza: {exclusive.supply_dropped} godz. przy mieszanym lub "
+                "nieznanym zasilaniu mieszkania"
+            )
+        for node, count in exclusive.missing_child.items():
+            parts.append(f"{node.split('.')[-1]}: {count} godz. bez odczytu podlicznika")
+        for node, count in exclusive.negative.items():
+            parts.append(
+                f"{node.split('.')[-1]}: {count} godz. z podlicznikami powyżej "
+                "własnego odczytu"
+            )
+        if not parts:
+            return
+        message = (
+            f"Okno uczenia profilu zużycia ({days} dni) — pominięte godziny: "
+            + "; ".join(parts)
+            + "."
+        )
+        extra = {
+            "window_days": days,
+            "supply_dropped": exclusive.supply_dropped,
+            "missing_child": dict(exclusive.missing_child),
+            "negative": dict(exclusive.negative),
+        }
+        if exclusive.missing_child or exclusive.negative:
+            self.log_warning(message, extra=extra)
+        else:
+            self.log_info(message, extra=extra)
 
     async def _fetch_hourly_kwh(
         self, entity_id: str, start: datetime, end: datetime
@@ -554,19 +626,26 @@ class ConsumptionModule(PowerPilotModule):
         # not part of the household background load. Likewise the climate sensor
         # once its temperature model is ready: the climate module forecasts that
         # device from the outside temperature instead of the weekly average.
+        # While the apartment is on meter 2 its subtree is not Victron demand.
+        return self._device_value(
+            weekday, hour, self.coordinator.supply.victron_detached_devices()
+        )
+
+    def _device_value(self, weekday: int, hour: int, detached: set[str]) -> float:
         ev_meter = self.config.get(CONF_EV_CHARGE_METER_SENSOR)
         climate = self.coordinator.climate
         return sum(
             acc.value(weekday, hour) or 0.0
             for eid, acc in self.devices.items()
-            if eid != ev_meter and not climate.handles(eid)
+            if eid != ev_meter and not climate.handles(eid) and eid not in detached
         )
 
     def contribute(self, forecast: Forecast) -> None:
         learned = self.base.observed_days > 0
+        detached = self.coordinator.supply.victron_detached_devices()
         for slot in forecast.slots:
             weekday, hour = slot.start.weekday(), slot.start.hour
             slot.base_consumption_kwh += self.base_value(weekday, hour)
             if learned:
                 # Add back separately-metered devices with no smarter model yet.
-                slot.extra_load_kwh += self.device_value(weekday, hour)
+                slot.extra_load_kwh += self._device_value(weekday, hour, detached)

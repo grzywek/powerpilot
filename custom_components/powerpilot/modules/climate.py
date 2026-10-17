@@ -597,6 +597,17 @@ class ClimateModule(PowerPilotModule):
                 )
                 + " — te urządzenia na razie planowane z profilu tygodniowego."
             )
+        # On meter 2 the apartment's climate loads are not Victron demand.
+        detached = self.coordinator.supply.victron_detached_devices()
+        off_victron = [eid for eid in active if eid in detached]
+        if off_victron:
+            self.log_info(
+                "Mieszkanie zasilane z licznika 2 — poza zapotrzebowaniem Victrona: "
+                + ", ".join(e.split(".")[-1] for e in off_victron)
+                + ".",
+                extra={"detached": off_victron},
+            )
+            active = [eid for eid in active if eid not in detached]
         if not active:
             return
         total = 0.0

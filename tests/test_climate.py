@@ -177,3 +177,79 @@ def test_profile_reset_clears_cells_and_days() -> None:
     assert profile.observed_days == 0
     assert not profile.is_date_observed(date(2026, 8, 1))
     assert profile.predict(30.0, 14) is None
+
+
+# ---------------------------------------------------------------------------
+# Apartment supply (stage 2, slice 3)
+# ---------------------------------------------------------------------------
+
+
+def _supplied(state: str | None) -> tuple[ClimateModule, datetime]:
+    """AC inside the apartment, heat pump outside it; both models ready."""
+    from custom_components.powerpilot.const import (
+        CONF_APARTMENT_METER,
+        CONF_APARTMENT_POWER_SENSOR,
+        CONF_CONSUMPTION_SENSOR,
+        CONF_DEVICE_SENSORS,
+        CONF_SENSOR_PARENTS,
+        CONF_VICTRON_OTHER_POWER_SENSORS,
+        CONF_VICTRON_OUTPUT_POWER_SENSOR,
+        SUPPLY_SOURCE_LIVE,
+    )
+    from custom_components.powerpilot.models import SupplyTransition
+    from custom_components.powerpilot.modules.supply import SupplyModule
+
+    apartment = "sensor.apartment_energy"
+    config = {
+        CONF_CLIMATE_SENSORS: [AC, HEAT_PUMP],
+        CONF_CONSUMPTION_SENSOR: "sensor.main",
+        CONF_DEVICE_SENSORS: [apartment],
+        CONF_SENSOR_PARENTS: {AC: apartment},
+        CONF_APARTMENT_METER: apartment,
+        CONF_APARTMENT_POWER_SENSOR: "sensor.apartment_power",
+        CONF_VICTRON_OUTPUT_POWER_SENSOR: "sensor.victron_power",
+        CONF_VICTRON_OTHER_POWER_SENSORS: ["sensor.garage_power"],
+    }
+    module = _module(config, observed={AC: MIN_LEARN_DAYS, HEAT_PUMP: MIN_LEARN_DAYS})
+    hour = datetime(2026, 7, 1, 14, tzinfo=dt_util.UTC)
+    for eid, kwh in ((AC, 1.0), (HEAT_PUMP, 0.5)):
+        for _ in range(3):
+            module.profiles[eid].observe(30.0, hour.hour, kwh)
+    module._temps = {module._hour_key(hour): 30.0}
+    supply = SupplyModule(None, SimpleNamespace(config=config))
+    if state is not None:
+        supply.transitions = [
+            SupplyTransition(
+                state=state,
+                at=hour - timedelta(days=1),
+                not_before=None,
+                apartment_w=1000.0,
+                victron_net_w=100.0,
+                source=SUPPLY_SOURCE_LIVE,
+            )
+        ]
+    module.coordinator = SimpleNamespace(
+        supply=supply, log_info=lambda domain, message, extra=None: None
+    )
+    return module, hour
+
+
+def test_climate_forecast_on_meter_2_leaves_out_the_apartments_climate_loads() -> None:
+    from custom_components.powerpilot.const import SUPPLY_METER_2
+    from custom_components.powerpilot.models import Forecast, HourSlot
+
+    module, hour = _supplied(SUPPLY_METER_2)
+    forecast = Forecast(slots=[HourSlot(start=hour)])
+    module.contribute(forecast)
+    assert forecast.slots[0].extra_load_kwh == 0.5  # the heat pump only
+
+
+def test_climate_forecast_on_the_victron_or_unknown_keeps_them() -> None:
+    from custom_components.powerpilot.const import SUPPLY_VICTRON
+    from custom_components.powerpilot.models import Forecast, HourSlot
+
+    for state in (SUPPLY_VICTRON, None):
+        module, hour = _supplied(state)
+        forecast = Forecast(slots=[HourSlot(start=hour)])
+        module.contribute(forecast)
+        assert forecast.slots[0].extra_load_kwh == 1.5, state

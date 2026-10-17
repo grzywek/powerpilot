@@ -25,6 +25,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from custom_components.powerpilot.const import (
+    CONF_APARTMENT_METER,
     CONF_APARTMENT_POWER_SENSOR,
     CONF_VICTRON_OTHER_POWER_SENSORS,
     CONF_VICTRON_OUTPUT_POWER_SENSOR,
@@ -42,9 +43,11 @@ from custom_components.powerpilot.modules.supply import (
     SUPPLY_REPLAY_CHUNK,
     SUPPLY_SAMPLE_INTERVAL,
     SupplyModule,
+    carry_hour_states,
     classify_hours,
     decode_log,
     hour_supply,
+    past_hour_states,
 )
 
 APARTMENT = "sensor.apartment_power"
@@ -535,7 +538,9 @@ def _hours(*means) -> dict:
     return {H + i * HOUR: m for i, m in enumerate(means) if m is not ...}
 
 
-def test_hourly_classification_keeps_steady_runs_only() -> None:
+def test_hourly_classification_keeps_decided_hours_only() -> None:
+    """Undecided hours and hours without a mean are no evidence; changes are
+    left to :func:`carry_hour_states`, which makes their neighbours mixed."""
     means = _hours(
         ON_VICTRON,  # 0
         ON_VICTRON,  # 1
@@ -556,6 +561,8 @@ def test_hourly_classification_keeps_steady_runs_only() -> None:
         H + 2 * HOUR: SUPPLY_VICTRON,
         H + 5 * HOUR: SUPPLY_METER_2,
         H + 6 * HOUR: SUPPLY_METER_2,
+        H + 7 * HOUR: SUPPLY_METER_2,
+        H + 8 * HOUR: SUPPLY_VICTRON,
         H + 11 * HOUR: SUPPLY_VICTRON,
     }
 
@@ -605,6 +612,135 @@ async def test_hourly_states_come_from_mean_statistics_before_the_log(
     # Hours the log covers are its own, not the statistics'.
     module.covered_from = H + 3 * HOUR
     assert set(await module.async_hourly_states(H, H + 7 * HOUR)) == {H, H + HOUR, H + 2 * HOUR}
+
+
+# ---------------------------------------------------------------------------
+# Past hour states for learning (slice 3): hourly states carried forward
+# ---------------------------------------------------------------------------
+
+V, M2, MIX, UNK = SUPPLY_VICTRON, SUPPLY_METER_2, SUPPLY_HOUR_MIXED, SUPPLY_HOUR_UNKNOWN
+
+
+def _states(states: dict, count: int) -> list[str]:
+    return [states[H + i * HOUR] for i in range(count)]
+
+
+def test_a_decided_state_carries_through_undecided_and_missing_hours() -> None:
+    """Plan answer 2, clarified: an undecided hour is no evidence, not unknown."""
+    decided = {H + 1 * HOUR: V, H + 4 * HOUR: V, H + 7 * HOUR: V}
+    states = carry_hour_states(decided, H, H + 10 * HOUR)
+    assert _states(states, 10) == [UNK, V, V, V, V, V, V, V, V, V]
+
+
+def test_a_change_makes_the_hours_between_and_both_neighbours_mixed() -> None:
+    decided = {
+        H: V,
+        H + 2 * HOUR: V,  # last on the Victron
+        H + 5 * HOUR: M2,  # first on PPE 2: the switch was in 2..5
+        H + 6 * HOUR: M2,
+        H + 7 * HOUR: V,  # straight back: 6 and 7 are next to a change
+    }
+    states = carry_hour_states(decided, H, H + 9 * HOUR)
+    assert _states(states, 9) == [V, V, MIX, MIX, MIX, MIX, MIX, MIX, V]
+
+
+def test_hours_before_the_first_decided_hour_are_unknown() -> None:
+    assert carry_hour_states({}, H, H + 3 * HOUR) == {
+        H: UNK, H + HOUR: UNK, H + 2 * HOUR: UNK
+    }
+    assert _states(carry_hour_states({H + 2 * HOUR: M2}, H, H + 4 * HOUR), 4) == [
+        UNK, UNK, M2, M2
+    ]
+
+
+def test_carried_states_meet_an_agreeing_log() -> None:
+    """The log cannot tell the hours up to its first transition; an agreeing
+    carried state fills them, and from there on the log answers."""
+    covered = H + 3 * HOUR + timedelta(minutes=10)
+    first = _transition(V, H + 5 * HOUR + timedelta(minutes=30))
+    switch = _transition(M2, H + 7 * HOUR + timedelta(minutes=5), H + 7 * HOUR)
+    decided = {H: V, H + 1 * HOUR: V}
+    states = past_hour_states(H, H + 9 * HOUR, decided, [first, switch], covered)
+    assert _states(states, 9) == [V, V, V, V, V, V, V, MIX, M2]
+
+
+def test_carried_states_meet_a_disagreeing_log() -> None:
+    """The log's first state differs: the switch happened between the last
+    decided hour and that first confirmation — every hour of it is mixed."""
+    covered = H + 3 * HOUR + timedelta(minutes=10)
+    first = _transition(M2, H + 5 * HOUR + timedelta(minutes=30))
+    decided = {H: V, H + 1 * HOUR: V}
+    states = past_hour_states(H, H + 8 * HOUR, decided, [first], covered)
+    assert _states(states, 8) == [V, MIX, MIX, MIX, MIX, MIX, M2, M2]
+
+
+def test_without_a_log_the_carried_states_reach_the_end() -> None:
+    states = past_hour_states(H, H + 4 * HOUR, {H + HOUR: M2}, [], None)
+    assert _states(states, 4) == [UNK, M2, M2, M2]
+
+
+def test_a_log_without_transitions_stays_unknown_after_it_starts_watching() -> None:
+    states = past_hour_states(H, H + 4 * HOUR, {H: V}, [], H + 2 * HOUR)
+    assert _states(states, 4) == [V, V, UNK, UNK]
+
+
+def test_a_window_ending_before_the_log_still_sees_the_disagreement() -> None:
+    """Decided hours are read up to the log; the window is cut afterwards."""
+    covered = H + 6 * HOUR
+    first = _transition(M2, H + 6 * HOUR + timedelta(minutes=30))
+    states = past_hour_states(H, H + 3 * HOUR, {H + HOUR: V}, [first], covered)
+    assert states == {H: UNK, H + HOUR: MIX, H + 2 * HOUR: MIX}
+
+
+async def test_past_hour_states_join_hourly_means_and_the_log(
+    hass: HomeAssistant, supply_recorder
+) -> None:
+    _set_units(hass)
+
+    def rows(values) -> list[dict]:
+        return [{"start": (H + i * HOUR).timestamp(), "mean": v} for i, v in enumerate(values)]
+
+    recorder = supply_recorder(
+        statistics={
+            APARTMENT: rows([1000, 100, 100]),  # on the Victron, then undecided
+            VICTRON: rows([1300, 300, 300]),
+            GARAGE: rows([200, 200, 200]),
+        }
+    )
+    coordinator = _coordinator()
+    coordinator.config[CONF_APARTMENT_METER] = "sensor.apartment_energy"
+    module = SupplyModule(hass, coordinator)
+    module.covered_from = H + 2 * HOUR + timedelta(minutes=30)
+    module.transitions = [_transition(V, H + 3 * HOUR + timedelta(minutes=10))]
+
+    states = await module.async_past_hour_states(H, H + 5 * HOUR)
+
+    assert _states(states, 5) == [V, V, V, V, V]
+    # Statistics are read only for the hours before the log.
+    assert len(recorder.statistics_calls) == 1
+    assert await module.async_past_hour_states(H + 3 * HOUR, H + 5 * HOUR) == {
+        H + 3 * HOUR: UNK,  # the log alone cannot tell the hour of its first transition
+        H + 4 * HOUR: V,
+    }
+    assert len(recorder.statistics_calls) == 1
+
+
+@pytest.mark.parametrize("config", [{CONF_APARTMENT_METER: ""}, {CONF_APARTMENT_POWER_SENSOR: ""}])
+async def test_without_detection_or_apartment_meter_every_past_hour_is_victron(
+    hass: HomeAssistant, supply_recorder, config: dict
+) -> None:
+    recorder = supply_recorder()
+    coordinator = _coordinator()
+    coordinator.config[CONF_APARTMENT_METER] = "sensor.apartment_energy"
+    coordinator.config.update(config)
+    module = SupplyModule(hass, coordinator)
+    module.transitions = [_transition(M2, H - HOUR)]
+    module.covered_from = H - 2 * HOUR
+
+    states = await module.async_past_hour_states(H, H + 3 * HOUR)
+
+    assert states == {H: V, H + HOUR: V, H + 2 * HOUR: V}
+    assert recorder.statistics_calls == []
 
 
 # ---------------------------------------------------------------------------

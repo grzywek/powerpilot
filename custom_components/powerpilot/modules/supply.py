@@ -11,14 +11,21 @@ point of delivery. Nothing reports its position, so it is told from power
   the last confirmed state holds. Before the first confirmation it is unknown.
 
 The pure part (:func:`classify_sample`, :class:`SupplyDetector`,
-:func:`hour_supply`, :func:`classify_hours`) has no Home Assistant dependency.
+:func:`hour_supply`, :func:`classify_hours`, :func:`carry_hour_states`,
+:func:`past_hour_states`) has no Home Assistant dependency.
 :class:`SupplyModule` samples the configured sensors on a fixed tick and keeps
 the confirmed transitions in an append-only log in its own store. At setup the
 same detector first replays the recorder's state history of the inputs, on the
 same grid, from the last stored transition (or from the oldest history) to now.
 Hours older than the log are classified from hourly means
-(:meth:`SupplyModule.async_hourly_states`). It contributes nothing to the
-forecast yet.
+(:meth:`SupplyModule.async_hourly_states`) and carried forward through
+undecided hours (:func:`carry_hour_states`); :meth:`SupplyModule.async_past_hour_states`
+joins them with the log into one state per past hour for the meter tree
+(``hierarchy.exclusive_series``). The module adds nothing to the forecast
+itself: while the apartment is on meter 2 the consumption and climate modules
+leave its subtree out of the Victron demand
+(:meth:`SupplyModule.victron_detached_devices`), and while the state is unknown
+the plan carries a reminder.
 """
 
 from __future__ import annotations
@@ -50,7 +57,10 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import (
+    CONF_APARTMENT_METER,
     CONF_APARTMENT_POWER_SENSOR,
+    CONF_CONSUMPTION_SENSOR,
+    CONF_SENSOR_PARENTS,
     CONF_SUPPLY_CONFIRM_SAMPLES,
     CONF_SUPPLY_MARGIN_W,
     CONF_SUPPLY_MIN_APARTMENT_W,
@@ -65,6 +75,7 @@ from ..const import (
     SUPPLY_SOURCE_REPLAY,
     SUPPLY_VICTRON,
 )
+from ..hierarchy import metered_sensors, subtree
 from ..models import SupplyTransition
 from .base import PowerPilotModule
 
@@ -274,12 +285,12 @@ def classify_hours(
     min_apartment_w: float,
     margin_w: float,
 ) -> dict[datetime, str]:
-    """The supply of past hours from their means: (apartment W, Victron net W).
+    """The decided hours among past hours, from their means: (apartment W, Victron net W).
 
     The sample rule applied to hourly means (plan answer 2). Hours with a
-    missing mean and undecided hours are dropped; so is every decided hour whose
-    previous or next hour by clock was decided the other way — an hour next to
-    a change may hold part of it and is not trusted.
+    missing mean and undecided hours are no evidence and are left out; what a
+    change between two decided hours means for the hours around it is
+    :func:`carry_hour_states`' business. Keys are UTC hour starts.
     """
     decided: dict[datetime, str] = {}
     for hour, (apartment_w, victron_net_w) in means.items():
@@ -288,12 +299,104 @@ def classify_hours(
         state = classify_sample(apartment_w, victron_net_w, min_apartment_w, margin_w)
         if state is not None:
             decided[hour.astimezone(timezone.utc)] = state
-    return {
-        hour: state
+    return decided
+
+
+def _clock_hours(start: datetime, end: datetime) -> list[datetime]:
+    """UTC starts of the clock hours in ``[start, end)``; ``start`` is an hour start."""
+    hours: list[datetime] = []
+    hour = start.astimezone(timezone.utc)
+    end = end.astimezone(timezone.utc)
+    while hour < end:
+        hours.append(hour)
+        hour += _HOUR
+    return hours
+
+
+def carry_hour_states(
+    decided: Mapping[datetime, str], start: datetime, end: datetime
+) -> dict[datetime, str]:
+    """The supply of every clock hour in ``[start, end)`` from its decided hours.
+
+    An undecided or missing hour is no evidence (plan answer 2, clarified): the
+    state of a decided hour carries forward through such hours until the next
+    decided hour. When that one has the other state the switch was somewhere in
+    between, so every hour between them and both decided hours are ``mixed``.
+    Before the first decided hour the state is ``unknown``; after the last one
+    it carries to ``end``. Keys are UTC hour starts.
+    """
+    hours = _clock_hours(start, end)
+    in_range = sorted(
+        (hour.astimezone(timezone.utc), state)
         for hour, state in decided.items()
-        if decided.get(hour - _HOUR, state) == state
-        and decided.get(hour + _HOUR, state) == state
+        if hours and hours[0] <= hour.astimezone(timezone.utc) <= hours[-1]
+    )
+    states = {hour: SUPPLY_HOUR_UNKNOWN for hour in hours}
+    carried: str | None = None
+    index = 0
+    for hour in hours:
+        if index < len(in_range) and in_range[index][0] == hour:
+            carried = in_range[index][1]
+            index += 1
+        if carried is not None:
+            states[hour] = carried
+    for (earlier, before), (later, after) in zip(in_range, in_range[1:]):
+        if before != after:
+            hour = earlier
+            while hour <= later:
+                states[hour] = SUPPLY_HOUR_MIXED
+                hour += _HOUR
+    return states
+
+
+def past_hour_states(
+    start: datetime,
+    end: datetime,
+    decided: Mapping[datetime, str],
+    transitions: Sequence[SupplyTransition],
+    covered_from: datetime | None,
+) -> dict[datetime, str]:
+    """The supply of every clock hour in ``[start, end)``: the log, and before it the hourly states.
+
+    Hours starting at or after ``covered_from`` are the log's
+    (:func:`hour_supply`); earlier ones come from ``decided`` (the decided
+    hours before the log, :func:`classify_hours`) carried forward up to the log
+    (:func:`carry_hour_states`). Where the two meet, the log cannot tell the
+    hours up to its first transition: a carried state agreeing with that
+    transition fills them, a differing one means the switch happened between
+    the last decided hour and that transition, and all those hours are
+    ``mixed``. Keys are UTC hour starts.
+    """
+    hours = _clock_hours(start, end)
+    if not hours:
+        return {}
+    first_hour = hours[0]
+    log_start: datetime | None = None
+    if covered_from is not None:
+        covered = covered_from.astimezone(timezone.utc)
+        log_start = covered.replace(minute=0, second=0, microsecond=0)
+        if log_start < covered:
+            log_start += _HOUR
+    hourly_end = hours[-1] + _HOUR if log_start is None else max(log_start, first_hour)
+    states = carry_hour_states(decided, first_hour, hourly_end)
+    log_hours = [hour for hour in hours if log_start is not None and hour >= log_start]
+    for hour in log_hours:
+        states[hour] = hour_supply(transitions, covered_from, hour)
+    before_log = {
+        hour.astimezone(timezone.utc): state
+        for hour, state in decided.items()
+        if first_hour <= hour.astimezone(timezone.utc) < hourly_end
     }
+    if before_log and transitions and log_start is not None:
+        last_decided = max(before_log)
+        carried = before_log[last_decided]
+        first = transitions[0]
+        agrees = carried == first.state
+        hour = log_start if agrees else last_decided
+        while hour <= first.at:
+            states[hour] = carried if agrees else SUPPLY_HOUR_MIXED
+            hour += _HOUR
+    return {hour: states[hour] for hour in hours}
 
 
 def _parse_moment(value: Any, name: str) -> datetime:
@@ -433,6 +536,16 @@ class SupplyModule(PowerPilotModule):
         return bool(self.apartment_sensor and self.victron_sensor and self.other_sensors)
 
     @property
+    def apartment_meter(self) -> str:
+        """The metered device that is the apartment; its subtree moves with it."""
+        return str(self.config.get(CONF_APARTMENT_METER) or "")
+
+    @property
+    def active(self) -> bool:
+        """The supply shapes the meter tree: detection on and the apartment's meter set."""
+        return self.enabled and bool(self.apartment_meter)
+
+    @property
     def min_apartment_w(self) -> float:
         return float(self.config[CONF_SUPPLY_MIN_APARTMENT_W])
 
@@ -466,6 +579,42 @@ class SupplyModule(PowerPilotModule):
     def since(self) -> datetime | None:
         last = self.last_transition
         return last.at if last is not None else None
+
+    @property
+    def history_ready(self) -> bool:
+        """Whether past hours can be told from the log as it will stand.
+
+        Not before the stored log is loaded and the history replay has brought
+        it up to now: hours read earlier would be classified from hourly means
+        where the log has its own answer. Always ready when the supply does not
+        shape the meter tree, and when the stored log is unusable (there is no
+        log this run; every past hour is older than it).
+        """
+        return not self.active or self.detector is not None or self.store_error is not None
+
+    def victron_detached_devices(self) -> set[str]:
+        """Metered devices the Victron does not feed now: the apartment's subtree on meter 2.
+
+        The forecast keeps the confirmed state for the whole horizon (plan,
+        design 6); empty on the Victron and while the state is unknown (the
+        apartment is planned on the Victron then, answer 1).
+        """
+        if not self.active or self.state != SUPPLY_METER_2:
+            return set()
+        return subtree(
+            str(self.config.get(CONF_CONSUMPTION_SENSOR) or ""),
+            metered_sensors(self.config),
+            self.config.get(CONF_SENSOR_PARENTS) or {},
+            self.apartment_meter,
+        )
+
+    def collect_reminders(self) -> list[str]:
+        if self.active and self.state is None:
+            return [
+                "Nie wiadomo jeszcze, skąd zasilane jest mieszkanie — plan liczy "
+                "jego zużycie po stronie Victrona."
+            ]
+        return []
 
     def supply_for_hour(self, hour: datetime) -> str:
         """``victron`` / ``meter_2`` / ``mixed`` / ``unknown`` for the hour from ``hour``."""
@@ -904,13 +1053,34 @@ class SupplyModule(PowerPilotModule):
             for state in changes.get(entity_id) or []
         ]
 
+    async def async_past_hour_states(
+        self, start: datetime, end: datetime
+    ) -> dict[datetime, str]:
+        """The supply of every clock hour in ``[start, end)``, for learning and the charts.
+
+        Without detection or without the apartment's meter every hour is
+        ``victron`` (today's tree). Otherwise :func:`past_hour_states` over the
+        log and, for the hours before it, the hourly classification of the
+        mean statistics — read only when the window reaches back before the
+        log, and then up to where the log begins. Keys are UTC hour starts.
+        """
+        if not self.active:
+            return {hour: SUPPLY_VICTRON for hour in _clock_hours(start, end)}
+        covered_from = self.covered_from
+        decided: dict[datetime, str] = {}
+        if covered_from is None or start < covered_from:
+            decided = await self.async_hourly_states(
+                start, end if covered_from is None else covered_from
+            )
+        return past_hour_states(start, end, decided, self.transitions, covered_from)
+
     async def async_hourly_states(self, start: datetime, end: datetime) -> dict[datetime, str]:
         """Supply of the hours in ``[start, end)`` older than the log, from hourly means.
 
         Reads the inputs' hourly ``mean`` statistics; an input without a mean
-        for an hour makes that hour's mean missing. Classified by
-        :func:`classify_hours`; only hours before ``covered_from`` are returned
-        (all of them while the log covers nothing yet). Keys are UTC hour starts.
+        for an hour makes that hour's mean missing. Only the decided hours
+        (:func:`classify_hours`) before ``covered_from`` are returned (all of
+        them while the log covers nothing yet). Keys are UTC hour starts.
         """
         inputs = self.inputs
         factors = {entity_id: self._history_factor(entity_id) for entity_id in inputs}

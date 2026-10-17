@@ -185,7 +185,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # archive through the prices module — injected, not reached for.
         self.billing = BillingModule(hass, self, self.consumption, self.prices)
         # Which point of delivery feeds the apartment (Victron / meter 2),
-        # sampled on its own tick; contributes nothing to the forecast yet.
+        # sampled on its own tick. It adds nothing to the forecast itself; the
+        # consumption and climate modules ask it what the Victron feeds.
         self.supply = SupplyModule(hass, self)
 
         # Order matters: prices/weather first, then derived loads, then the
@@ -1160,11 +1161,20 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # exactly what the optimizer/simulation consumes (base + Σ exclusive
         # device profiles telescope back to the whole-house reading), and it
         # matches the learned 7×24 heatmaps — so every view here is consistent.
+        # The apartment leaves "Tło" only in hours the Victron really fed it;
+        # hours of mixed or unknown supply have no background value.
         background = None
         exclusive: dict = {}
         if main:
             parents = self.config.get(CONF_SENSOR_PARENTS) or {}
-            exclusive = exclusive_series(main, device_ids, parents, hourly)
+            exclusive = exclusive_series(
+                main,
+                device_ids,
+                parents,
+                hourly,
+                apartment=self.supply.apartment_meter or None,
+                supply=await self.supply.async_past_hour_states(start, now),
+            ).series
             background = exclusive.get(main, {})
 
         def _name(eid: str) -> str:
@@ -2054,13 +2064,25 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         # Collapse nested meters into exclusive (own) energy so the stacked
         # device bars sum to the main reading instead of double-counting a
-        # sub-meter that lives inside another sub-meter.
+        # sub-meter that lives inside another sub-meter. The base is the root's
+        # own energy under the apartment's real supply: on meter 2 the
+        # apartment is not part of the Victron reading, and an hour of mixed or
+        # unknown supply (or with a meter gap) has no realized base.
+        base_real_series: dict = {}
         if main_sensor:
             parents = self.config.get(CONF_SENSOR_PARENTS) or {}
             exclusive_real = exclusive_series(
-                main_sensor, device_ids, parents, {main_sensor: main_real, **device_real}
-            )
+                main_sensor,
+                device_ids,
+                parents,
+                {main_sensor: main_real, **device_real},
+                apartment=self.supply.apartment_meter or None,
+                supply=await self.supply.async_past_hour_states(
+                    past_start - timedelta(hours=1), past_end
+                ),
+            ).series
             device_real = {eid: exclusive_real.get(eid, {}) for eid in device_ids}
+            base_real_series = exclusive_real.get(main_sensor, {})
 
         # Optional real battery / grid sensors (kW or kWh, auto-detected).
         async def _read_opt(conf_key: str) -> dict:
@@ -2367,7 +2389,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 else None
             )
             g_real, d_real = grid_import_real.get(h), bat_discharge_real.get(h)
-            c_real, m_real = bat_charge_real.get(h), main_real.get(h)
+            c_real = bat_charge_real.get(h)
             if g_real is not None:
                 # Pre-meter EV tap: fold the unmetered charging back into the
                 # realized import (0.0 when the charger is behind the meters).
@@ -2396,10 +2418,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if d_real is not None and bcost is not None
                 else None
             )
-            dev_real_sum = sum(v for v in dev_real_h.values() if v is not None)
-            base_real = (
-                max(0.0, m_real - dev_real_sum) if m_real is not None else None
-            )
+            base_real = base_real_series.get(h)
             realized_side = _side(
                 grid=g_real,
                 discharge=d_real,
@@ -2585,9 +2604,32 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 else None
             )
 
-            # Realized-so-far per-component breakdown.
-            cur_dev_sum = sum(v for v in cur_devices.values() if v is not None)
-            cur_base = max(0.0, cur_main - cur_dev_sum) if cur_main is not None else None
+            # Realized-so-far per-component breakdown, through the same meter
+            # tree as the past hours: own energy per device, and the base under
+            # the apartment's supply this hour.
+            cur_base = None
+            if main_sensor:
+                partial = {
+                    eid: ({now: value} if value is not None else {})
+                    for eid, value in (
+                        (main_sensor, cur_main),
+                        *cur_devices.items(),
+                    )
+                }
+                exclusive_now = exclusive_series(
+                    main_sensor,
+                    device_ids,
+                    self.config.get(CONF_SENSOR_PARENTS) or {},
+                    partial,
+                    apartment=self.supply.apartment_meter or None,
+                    supply=await self.supply.async_past_hour_states(
+                        now, now + timedelta(hours=1)
+                    ),
+                ).series
+                cur_devices = {
+                    eid: exclusive_now.get(eid, {}).get(now) for eid in device_ids
+                }
+                cur_base = exclusive_now.get(main_sensor, {}).get(now)
             cur_ev_soc = ev_soc_real.get(now)
             if cur_ev_soc is None:
                 cur_ev_soc = self.ev.soc

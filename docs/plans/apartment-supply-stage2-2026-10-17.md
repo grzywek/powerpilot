@@ -1,7 +1,7 @@
 # Stage 2: apartment supply state and switch-aware load model
 
-Status: draft, 2026-10-17. Blocked on the open questions at the end. Binds the
-executing agent once they are answered.
+Status: accepted 2026-10-17 (open questions answered at the end). Binds the
+executing agent.
 
 Parent spec: `docs/apartment-supply-planning.plan.md` (stage 2 of 4; its
 "Ustalenia z 2026-09-14" are settled and are not re-asked). Stage 1 (price cap
@@ -74,20 +74,26 @@ recommendations, PPE 2 billing and the MILP source variables are stage 3.
    live sampling starts — one mechanism, older samples. Days beyond that reach:
    see open question 2.
 4. **Per-hour state** comes from one function, `supply_for_hour(hour) ->
-   victron | meter_2 | split(fractions) | uncertain | unknown`, used by
-   learning, the chart and diagnostics alike.
+   victron | meter_2 | mixed | unknown`, used by learning, the chart and
+   diagnostics alike. `mixed` = the hour contains a transition or overlaps
+   its `[not_before, at]` window. Stage 2 does not split energy inside an
+   hour: a mixed hour is simply not a learning sample for the root (switches
+   are a few a month). Splitting by the recorder's state history stays for
+   stage 3, where PPE 2 billing needs it.
 5. **State-aware meter tree.** `hierarchy.exclusive_series` takes the per-hour
    state: `victron` hours as today; `meter_2` hours detach the apartment
    subtree from the root (root exclusive = root − its other children);
-   `split`, `uncertain` and `unknown` hours give no root or apartment-parent
-   sample (the apartment's own sub-meters stay learnable). While rewriting it,
+   `mixed` and `unknown` hours give no root sample (the apartment and its own
+   sub-meters stay learnable, they do not depend on the source). While rewriting it,
    two existing violations of the data rules go: a missing child reading makes
    the parent's hour unknown (today it counts as 0), and a negative exclusive
    value is skipped and counted in diagnostics (today it is clamped to 0).
 6. **Forecast demand.** The Victron-side demand is fixed loads + the apartment
    profile while the apartment is on the Victron, fixed loads only while on
    PPE 2. With no switching plan yet, the forecast keeps the current confirmed
-   state for the whole horizon. Unknown state: open question 1.
+   state for the whole horizon. Unknown state: the apartment is included, as
+   before this feature, and the entity and the plan's reminders say the state
+   is unknown (answer 1).
 7. **Topology fingerprint** includes the supply configuration, so the existing
    "meter tree changed → relearn" path rebuilds the profiles once, with the
    new attribution.
@@ -100,15 +106,71 @@ recommendations, PPE 2 billing and the MILP source variables are stage 3.
    Victron output power sensor, sub-meters behind the Victron, `P_min`,
    margin, N. Unconfigured = today's behavior, unchanged.
 
+## Data model and interfaces
+
+Constants in `const.py`: `SUPPLY_VICTRON = "victron"`, `SUPPLY_METER_2 =
+"meter_2"`; hour kinds add `"mixed"` and `"unknown"`. Config keys:
+`apartment_power_sensor`, `apartment_meter` (one of the metered devices; its
+subtree is the apartment), `victron_output_power_sensor`,
+`victron_other_power_sensors` (list), `supply_min_apartment_w` (300),
+`supply_margin_w` (100), `supply_confirm_samples` (3). Supply detection is on
+when the three sensor keys are set.
+
+```python
+# models.py
+@dataclass(frozen=True)
+class SupplyTransition:
+    state: str                 # SUPPLY_VICTRON | SUPPLY_METER_2
+    at: datetime               # first of the N agreeing samples (aware, UTC)
+    not_before: datetime | None  # last decisive sample of the previous state;
+                               # None for the first confirmation ever
+    apartment_w: float         # evidence at confirmation
+    victron_net_w: float       # Victron output − other sub-meters
+    source: str                # "live" | "replay"
+    def to_dict(self) -> dict: ...
+    @classmethod
+    def from_dict(cls, data: dict) -> "SupplyTransition": ...  # ValueError if unusable
+
+# modules/supply.py (pure part, no Home Assistant)
+def classify_sample(apartment_w: float, victron_net_w: float,
+                    min_apartment_w: float, margin_w: float) -> str | None:
+    """None = undecided (apartment below the minimum)."""
+
+class SupplyDetector:
+    def __init__(self, min_apartment_w, margin_w, confirm_samples,
+                 state: str | None = None) -> None: ...
+    def observe(self, at: datetime, apartment_w: float | None,
+                victron_net_w: float | None) -> SupplyTransition | None:
+        """Feed one sample; return a transition when one is confirmed."""
+```
+
+Detector semantics: a sample with any input missing resets the streak; an
+undecided sample neither counts nor resets; a decisive sample agreeing with
+the confirmed state resets the streak and becomes the new `not_before`
+candidate; a decisive sample of the other state extends (or starts) the
+streak; the N-th one in a row confirms, with `at` = the first sample of the
+streak. The first confirmation from unknown works the same with
+`not_before = None`.
+
+`SupplyModule(PowerPilotModule)` wraps it: 30 s tick
+(`async_track_time_interval`) reading the current states, an append-only log
+persisted through `Store` (`{DOMAIN}_{entry_id}_supply`, `{"transitions":
+[...]}`), `state` / `since` properties, `supply_for_hour(hour) -> str`, and
+`hourly_state(hour_means) -> str | None` for history older than the log
+(answer 2). The sensor entity reads the module.
+
 ## Slices (each builds, is tested and committed on its own)
 
 1. Model + detector + log + store + entity + config. Tests: rule and
    thresholds, streak broken by unavailable input, undecided zone keeps the
    state, unknown before the first confirmation, restart restores the state,
    corrupt store moved aside.
-2. History replay at setup + `supply_for_hour` with splits and uncertain hours.
-   Tests: replay of a captured real state sequence (fixture from the recorder,
-   fake identities only), a switch mid-hour, an idle gap making hours uncertain.
+2. History replay at setup + `supply_for_hour` (`mixed` hours) + hourly-mean
+   classification for history older than the log. Tests: replay of a captured
+   real state sequence (fixture from the recorder, fake identities only), a
+   switch mid-hour, a long `[not_before, at]` window making several hours
+   mixed, hourly classification skipping undecided hours and hours next to a
+   change.
 3. State-aware `exclusive_series`, learning and demand contribution. Tests:
    `meter_2` hour detaches the subtree, missing child ≠ 0, negative exclusive
    skipped and counted, demand without the apartment while on PPE 2,
@@ -117,7 +179,14 @@ recommendations, PPE 2 billing and the MILP source variables are stage 3.
    (`scripts/backtest_supply_detector.py`) over exported hourly statistics
    against the PPE 2 Tauron series, printing the confusion matrix.
 
-## Open questions (answer before slice 1)
+## Answers (2026-10-17)
+
+1. Unknown state: plan with the apartment included, flagged.
+2. History older than the recorder's state history: the same rule on hourly
+   means, skipping undecided hours and hours next to a detected change.
+3. Build now.
+
+## Questions as asked
 
 1. **State unknown** (fresh install, before the first confirmation): plan the
    Victron load with the apartment included, as today, and say so on the

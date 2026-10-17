@@ -1,100 +1,119 @@
 # Stage 3: recommending apartment switches (PPE 1 ↔ PPE 2)
 
-Status: draft, 2026-10-17. Blocked on the go/no-go question at the end; the
-measured value of the feature is low.
+Status: draft, rewritten 2026-10-17 after the user's correction of the value
+mechanism. Decisions below are taken; one question for the user at the end.
+Large slice across modules: executed in a separate session from the prompt at
+the end.
 
-Parent spec: `docs/apartment-supply-planning.plan.md` (stage 3 of 4: "zmienne
-źródła, cykle, próg, kalendarz, encje, panel, eksport z przyczynami"; its
-"Ustalenia z 2026-09-14" are settled). Stage 1 (price cap on PPE 1) shipped in
-v2.4.x, stage 2 (supply detection, switch-aware load model) in v2.5.2.
+Parent spec: `docs/apartment-supply-planning.plan.md` (stage 3 of 4; its
+"Ustalenia z 2026-09-14" are settled and not re-asked). Stage 1 (price cap on
+PPE 1) shipped in v2.4.x, stage 2 (supply detection, switch-aware load model)
+in v2.5.2.
 
 ## Goal
 
-Recommend manual switches of the apartment to the second meter (PPE 2) when a
-whole cycle — over, a stay of at least 2 h, back — saves more than the cycle
-threshold, given both meters' monthly price caps, the battery and the user's
-availability. The integration never drives the switch.
+Recommend, at any time of day, when to switch the apartment to the second
+meter (PPE 2), for how long, and what the whole cycle saves — sensible for a
+person to carry out by hand (no hour-on, hour-off toggling). The integration
+does not drive the switch now; its recommendation entities are the interface a
+future actuator automation will read.
 
-## Where the money is (measured 2026-10-17 on the live installation)
+## Where the money is
 
-A switch pays only through PPE 2's own monthly cap: if PPE 2 draws only in
-expensive hours, its average exceeds the limit and each of those kWh costs the
-limit instead of the hourly price. On the Victron the battery already covers
-most expensive hours with energy bought at ~0.2–0.3 zł, so moving a kWh the
-battery would have covered costs money. What can be saved is the apartment's
-consumption in hours above the limit that the battery did not cover:
+Each meter has its own monthly cap: its energy bill is `min(C, L·E)`.
 
-| Month 2026 | Hours with cap price > 0.61 | Apartment kWh not covered by the battery | Saving if all of it had been on PPE 2 | Upper bound incl. battery reallocation (all PPE 1 import in those hours) |
-| --- | --- | --- | --- | --- |
-| July | 531 | 8.8 | 0.92 zł | 2.39 zł |
-| August | 576 | 35.3 | 7.99 zł | 27.56 zł |
-| September | 584 | 21.9 | 6.14 zł | 26.88 zł |
-| October 1–16 | 322 | 35.3 | 8.30 zł | 15.30 zł |
+- **The strong mechanism — keep PPE 1 under the limit.** When PPE 1's month
+  would end above the limit, every PPE 1 kWh costs the limit, even the cheap
+  ones the battery and the car bought. Moving the apartment to PPE 2 in the
+  expensive hours the battery cannot cover gives PPE 2 a high average (so it is
+  capped and pays `L` per kWh) and lets PPE 1's average fall below `L`, so PPE 1
+  pays its real, low average. Saving ≈ `E₁' · (L − avg₁')` for the energy left
+  on PPE 1 — e.g. 500 kWh at 0.45 against 0.61 is ~80 zł a month.
+- **The weak mechanism — cap uncovered expensive kWh.** With PPE 1 under the
+  limit anyway, only the apartment's consumption the battery did not cover in
+  hours above the limit gains (price − `L`): measured 0.92 / 7.99 / 6.14 /
+  8.30 zł for Jul / Aug / Sep / Oct 1–16 2026.
+- **No gain** when even PPE 1's cheapest hours are above the limit (the
+  weekend of 17–18.10: cheapest hour 0.60 zł, average 0.90): both meters are
+  capped and every kWh costs `L` on either.
 
-Sources: PPE 1 hourly import from Tauron (`tauron_importer:3685152_…`), the
-apartment meter's hourly energy, cap prices from the price archive. These are
-ceilings assuming perfect, free switching; the settled threshold (5 zł per
-cycle, at least 2 h on the source, no switching 00:00–09:00, the user present)
-leaves a few cycles a month at most. Under the 2027 edition (0.50 net, handling
-fee possibly excluded) fewer hours exceed the limit. Winter months are
-unmeasured (the price archive starts in June) and could be higher.
+The strong mechanism needs months whose PPE 1 average lands above the limit
+because of hours the battery cannot cover while cheap hours stay well below it
+— most likely winter (December 2025: apartment 638 kWh, PPE 1 1172 kWh, against
+~240 / ~720 a month now; battery 30 kWh). No month since June was in that band
+(PPE 1 averages 0.21–0.42), and winter prices are not in the archive, so the
+value cannot be measured yet. The stage-1 entity
+`sensor.…_tarcza_ppe_1_prognoza_sredniej_na_koniec_miesiaca` shows when a month
+approaches it.
 
-## Variant A — the parent spec in full
+## Decisions (taken here, with reasons)
 
-- **Model.** Per horizon hour a binary `s[t]` (apartment on PPE 2) with open
-  and close indicators; the threshold as a fixed cost per opened cycle; a 2 h
-  minimum stay; opening and closing forbidden in the quiet window and in hours
-  the user is unavailable (trips from the calendar module, a calendar read
-  error); every cycle opened in the horizon closes inside it, so the month's
-  tail stays on the Victron. The Victron demand loses the apartment while
-  `s[t] = 1`, so the battery's discharge cap becomes a product of binaries
-  (`z[t]·(1−s[t])`) and needs the usual linearisation. PPE 2 gets its own
-  monthly settlement `min(C₂, L·E₂)` per month with a regime binary, on top of
-  stage 1's PPE 1 settlement; distribution is the same tariff on both meters
-  and cancels out.
-- **Observed PPE 2.** Month-to-date PPE 2 import = apartment energy in
-  `meter_2` intervals; hours containing a switch are split by the recorder's
-  state history (stage 2 left this for here).
-- **Marginal value.** The reference plan without new cycles (an ongoing cycle
-  closes at its planned return) and one re-solve per proposed cycle without
-  it; a cycle is recommended only if its own saving clears the threshold.
-- **Surfaces.** The parent spec's entity table (recommended source, plan,
-  next switch, switch required/available, cycle savings, min-cycle-savings
-  number), PPE 2 price-cap diagnostics, the panel timeline and the export with
-  reasons; notifications keyed by cycle id so a refresh does not repeat them.
-- **Risks.** Several hundred extra binaries over 168 h on a solve that already
-  takes 2–3 s with the month tail (Mac; the HA host is unmeasured), plus one
-  re-solve per cycle. A first slice must measure the solve time and, if
-  needed, restrict switching to the first 48 h.
-- **Size.** Optimizer, billing (PPE 2), supply (splits), calendar
-  availability, entities, panel, websocket and notifications: a large slice
-  across modules — a prompt for a separate session, in four or five slices.
+1. **One joint model, not rules.** The value comes from the interplay of both
+   caps, the battery and the car, so the switch schedule is part of the HiGHS
+   model: a binary `s[t]` per horizon hour (apartment on PPE 2), the apartment's
+   demand moving off the Victron while `s[t] = 1` (the discharge cap becomes a
+   product of binaries, linearised), and PPE 2's monthly settlement with its own
+   regime binary next to PPE 1's. The battery's behaviour follows: with PPE 1
+   kept under the limit its energy arbitrage pays again, which the joint
+   objective sees by itself. Distribution is the same tariff on both meters and
+   cancels out.
+2. **Cycles a person can do.** Opening a cycle costs the threshold (number
+   entity, 5 zł); at least 2 h on a source (number entity); no switch in the
+   quiet window (00:00–09:00, configurable) or while the user is unavailable
+   (calendar trips, calendar read error); switches on hour boundaries. No daily
+   cycle limit (settled). A cycle may last days if that pays.
+3. **The month's tail keeps the state of the last horizon hour** — no switches
+   are planned past the horizon, but the tail is settled under that state on
+   both meters, so a long PPE 2 stay is valued for the whole month.
+4. **Every recommended cycle is worth its threshold on its own:** the plan is
+   re-solved without each proposed cycle (an ongoing one closes at its planned
+   return); a cycle whose own saving is below the threshold is dropped and the
+   plan re-solved. Ties favour fewer switches.
+5. **Observed PPE 2:** month-to-date PPE 2 import = the apartment meter's energy
+   in `meter_2` intervals from the stage-2 log; hours containing a switch are
+   split by the 5-minute statistics at the transition's `at`. A started cycle is
+   recorded, so its return needs no threshold again (parent spec).
+6. **Both meters use the configured Tarcza editions** (same terms per meter,
+   confirmed by the user). Without an edition for a month, that month has no
+   cap on either meter.
+7. **Solve time gates everything.** Slice 2 measures the model on a recorded
+   week; if it is too slow, switch decisions are restricted to the next 72 h
+   and the rest of the horizon keeps the state of hour 72.
+8. **Automation later, no change of meaning.** `switch_required` and the
+   target source are the stable interface; an automation driving a contactor
+   can read them. Not built now.
 
-## Variant B — advisory rule on top of today's plan
+## Slices
 
-No change to the optimizer. After each plan: find windows of at least 2 h,
-outside the quiet window and while the user is available, in which the plan
-imports for the Victron at a cap price above the limit; their saving is the
-apartment's forecast kWh in those hours × (price − limit). If a window clears
-the threshold, recommend switching at its start and back at its end. Requires
-PPE 2's month-to-date average to stay above the limit (checked from the
-observed PPE 2 import; otherwise no recommendation, with the reason). It
-ignores the battery reallocation effect, so it underestimates the saving.
-Entities: recommended source, next switch, switch required, cycle savings.
-Size: medium, one module plus entities.
+1. **PPE 2 observed billing:** apartment energy in `meter_2` intervals, mixed
+   hours split at the transition, PPE 2 periods in the billing module, PPE 2
+   price-cap diagnostics entities. Tests with captured statistics.
+2. **Model:** `s[t]`, open/close indicators, threshold cost, minimum stay,
+   availability and quiet window, product linearisation, PPE 2 settlement,
+   tail under the last state; solve-time measurement on a recorded week
+   (gate of decision 7). Tests: the three regimes above as cases (strong, weak,
+   none), threshold, minimum stay, quiet window, unavailable user.
+3. **Recommendations:** per-cycle marginal saving by re-solve, started-cycle
+   record, entities from the parent spec (recommended source, plan, next
+   switch, switch required/available, cycle savings, min-cycle-savings
+   number), a Home Assistant notification on `switch_required` keyed by cycle
+   id.
+4. **Panel and docs:** supply timeline next to the Victron's work, the
+   with/without-cycles comparison and the reason when nothing is recommended;
+   README; parent spec status.
 
-## Recommendation
+## Question for the user
 
-Do not build either now. The realistic value is single zł to ~25 zł a month for
-manual work at inconvenient hours, under terms whose 2027 basis is still
-unclear. Re-check in January with winter prices in the archive and the first
-2027 invoice; if expensive uncovered hours grow, start with variant B, which
-needs no optimizer change and shows whether recommendations are ever acted on.
+Build now (the prompt below, in a separate session), or when the PPE 1 forecast
+average first approaches the limit?
 
-## Open questions
+## Execution prompt (for a separate session)
 
-1. Build now (A or B), or park stage 3 until January as recommended?
-2. If A: may every cycle be required to close inside the horizon (keeps the
-   month's tail on the Victron and the model small)?
-3. If A or B: how should a recommendation reach you — a Home Assistant
-   notification on `switch_required`, or the entities only?
+> Implement stage 3 of PowerPilot as specified in
+> `docs/plans/apartment-supply-stage3-2026-10-17.md` (read it, the parent spec
+> `docs/apartment-supply-planning.plan.md`, `docs/plans/apartment-supply-stage2-2026-10-17.md`,
+> `AGENTS.md` and `README.md` first). Work slice by slice, in a worktree per
+> slice; each slice builds, its tests pass (`.venv/bin/python -m pytest`),
+> `ruff check` is clean on touched files, and it is committed on its own with a
+> Conventional Commit. Stop after slice 2 and report the measured solve time
+> before going on. Do not push or touch Home Assistant without asking.

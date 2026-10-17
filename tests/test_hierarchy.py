@@ -207,11 +207,15 @@ def test_a_missing_child_reading_drops_the_parents_hour_and_is_counted() -> None
     assert out.negative == {}
 
 
-def test_a_negative_exclusive_value_is_dropped_and_counted() -> None:
-    """Regression: a child above its parent was clamped to 0 and learned as a real 0."""
+def test_a_negative_exclusive_value_is_kept_and_counted() -> None:
+    """Regression: a child above its parent was clamped to 0 and learned as a real 0.
+
+    Live 2026-10: the unmetered base is ~20 W, so 126 of 504 hours were negative
+    meter noise; dropping them biased the base upward. They are kept as is.
+    """
     series = {ROOT: {H: 1.0, H2: 4.0}, WASHER: {H: 2.0, H2: 1.0}}
     out = exclusive_series(ROOT, [WASHER], None, series)
-    assert out.series[ROOT] == {H2: 3.0}
+    assert out.series[ROOT] == {H: -1.0, H2: 3.0}
     assert out.series[WASHER] == {H: 2.0, H2: 1.0}
     assert out.negative == {ROOT: 1}
     assert out.missing_child == {}

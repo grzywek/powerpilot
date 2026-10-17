@@ -15,9 +15,10 @@ kWh is attributed to exactly one node. The two-level model used before this
 module is the special case where every node is a direct child of the root.
 
 Two data rules hold for every node: an hour in which a direct child has no
-reading is unknown for the parent (a gap is not 0 kWh), and a negative exclusive
-value (a child reading above its parent's) is no measurement either. Both hours
-are dropped and counted per node, never clamped or zero-filled.
+reading is unknown for the parent (a gap is not 0 kWh), so it is dropped and
+counted per node, never zero-filled; a negative exclusive value (a child
+reading above its parent's) is meter noise around a small true value, so it is
+kept unclamped and only counted (see :func:`exclusive_series`).
 
 The apartment can be fed from the Victron or from the second meter (stage 2 of
 ``docs/apartment-supply-planning.plan.md``). Given the per-hour supply and the
@@ -138,10 +139,11 @@ def subtree(
 class ExclusiveSeries:
     """Exclusive hourly kWh per node, with the hours that could not be computed.
 
-    ``missing_child`` and ``negative`` count, per node, the hours dropped
-    because a direct child had no reading or the value came out negative;
+    ``missing_child`` counts, per node, the hours dropped because a direct
+    child had no reading; ``negative`` counts the hours whose exclusive value
+    came out negative (kept in the series, not dropped);
     ``supply_dropped`` counts the root's hours dropped because the apartment's
-    supply was mixed or unknown. Nodes with nothing dropped are absent.
+    supply was mixed or unknown. Nodes with nothing to count are absent.
     """
 
     series: dict[str, dict[datetime, float]]
@@ -164,8 +166,15 @@ def exclusive_series(
     ``series`` maps each entity id (root + devices) to its raw ``{hour: kWh}``.
     The result maps the same keys to exclusive ``{hour: kWh}``: raw minus the
     sum of the node's direct children. Hours follow each node's own raw series;
-    an hour with a direct child's reading missing, or with a negative result,
-    is dropped and counted.
+    an hour with a direct child's reading missing is dropped and counted.
+
+    A negative exclusive value (children above the node's own reading) is KEPT
+    as is and only counted in ``negative`` for diagnostics. The unmetered base
+    behind the Victron is ~20 W on average (10 kWh over 21 days against
+    268 kWh), so its hourly value scatters around zero with meter noise: on the
+    live installation 126 of 504 hours came out negative, summing to -6 kWh.
+    Dropping them discarded half the learning days and biased the base upward,
+    and clamping biased it too; the raw values average to the truth.
 
     ``supply`` maps each hour to the apartment's supply (``victron``,
     ``meter_2``, ``mixed`` or ``unknown``; an hour it lacks is ``unknown``) and
@@ -201,7 +210,6 @@ def exclusive_series(
             own = value - sum(r for r in readings if r is not None)
             if own < 0:
                 result.negative[node] = result.negative.get(node, 0) + 1
-                continue
             exclusive[hour] = own
         result.series[node] = exclusive
     return result

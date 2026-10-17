@@ -465,8 +465,8 @@ class ConsumptionModule(PowerPilotModule):
 
         The day counts once the base has a near-complete day. Each profile then
         learns the hours it has a value for: an hour with no exclusive value
-        (no reading, a child's reading missing, a negative result, or for the
-        base a mixed or unknown supply) is not 0 kWh, and a device does not
+        (no reading, a child's reading missing, or for the base a mixed or
+        unknown supply) is not 0 kWh, and a device does not
         lose an hour the base had to drop.
         """
         day_hours = [
@@ -505,25 +505,28 @@ class ConsumptionModule(PowerPilotModule):
             )
         for node, count in exclusive.missing_child.items():
             parts.append(f"{node.split('.')[-1]}: {count} godz. bez odczytu podlicznika")
-        for node, count in exclusive.negative.items():
-            parts.append(
-                f"{node.split('.')[-1]}: {count} godz. z podlicznikami powyżej "
-                "własnego odczytu"
-            )
-        if not parts:
+        # Negative remainders are learned as they are (meter noise around a
+        # near-zero value), so they are reported, but not as skipped hours.
+        kept = [
+            f"{node.split('.')[-1]}: {count} godz. z podlicznikami powyżej "
+            "własnego odczytu (zachowane)"
+            for node, count in exclusive.negative.items()
+        ]
+        if not parts and not kept:
             return
-        message = (
-            f"Okno uczenia profilu zużycia ({days} dni) — pominięte godziny: "
-            + "; ".join(parts)
-            + "."
-        )
+        message = f"Okno uczenia profilu zużycia ({days} dni)"
+        if parts:
+            message += " — pominięte godziny: " + "; ".join(parts)
+        if kept:
+            message += (" — " if parts else ": ") + "; ".join(kept)
+        message += "."
         extra = {
             "window_days": days,
             "supply_dropped": exclusive.supply_dropped,
             "missing_child": dict(exclusive.missing_child),
             "negative": dict(exclusive.negative),
         }
-        if exclusive.missing_child or exclusive.negative:
+        if exclusive.missing_child:
             self.log_warning(message, extra=extra)
         else:
             self.log_info(message, extra=extra)

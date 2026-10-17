@@ -1,9 +1,9 @@
-"""Excise-free cap price and the far-tail estimate of the price archive."""
+"""Cap prices under an edition's terms and the far-tail archive estimate."""
 
 from __future__ import annotations
 
 import zoneinfo
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from homeassistant.util import dt as dt_util
@@ -17,7 +17,7 @@ from custom_components.powerpilot.const import (
     PRICE_TYPE_CERTAIN,
     PRICE_TYPE_FORECAST,
 )
-from custom_components.powerpilot.models import Forecast, HourSlot
+from custom_components.powerpilot.models import Forecast, HourSlot, PriceCapTerms
 from custom_components.powerpilot.modules.prices import (
     PriceArchive,
     PriceModule,
@@ -35,6 +35,16 @@ def _warsaw_time():
 
 def _hour():
     return dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+
+def _terms(fee: bool = True) -> PriceCapTerms:
+    return PriceCapTerms(
+        name="test",
+        valid_from=date(2000, 1, 1),
+        valid_to=date(2099, 12, 31),
+        limit_kwh=0.61,
+        handling_fee_included=fee,
+    )
 
 
 def _formula(tge: float, markup: float = 0.08, excise: float = 0.005, vat: float = 0.23):
@@ -72,13 +82,18 @@ def _module(config: dict | None = None) -> PriceModule:
 
 def test_cap_price_is_energy_plus_markup_with_vat_but_no_excise() -> None:
     entry = {"energy": 9.99, "formula": _formula(tge=0.40)}
-    assert round(cap_price_of(entry), 6) == round((0.40 + 0.08) * 1.23, 6)
+    assert round(cap_price_of(entry, _terms()), 6) == round((0.40 + 0.08) * 1.23, 6)
+
+
+def test_cap_price_without_the_handling_fee_when_the_edition_leaves_it_out() -> None:
+    entry = {"energy": 9.99, "formula": _formula(tge=0.40)}
+    assert round(cap_price_of(entry, _terms(fee=False)), 6) == round(0.40 * 1.23, 6)
 
 
 def test_cap_price_unknown_without_formula() -> None:
-    assert cap_price_of({"energy": 0.5}) is None
-    assert cap_price_of({"energy": 0.5, "formula": None}) is None
-    assert cap_price_of(None) is None
+    assert cap_price_of({"energy": 0.5}, _terms()) is None
+    assert cap_price_of({"energy": 0.5, "formula": None}, _terms()) is None
+    assert cap_price_of(None, _terms()) is None
 
 
 # ----------------------------------------------------------- module resolution
@@ -92,7 +107,7 @@ def test_module_cap_price_prefers_archived_certain_formula() -> None:
     # not outrank the settled (certain) archive entry.
     module._data.buy[h] = 2.0
     module._data.tge[h] = 0.90
-    assert round(module.cap_price_at(h), 6) == round((0.30 + 0.08) * 1.23, 6)
+    assert round(module.cap_price_at(h, _terms()), 6) == round((0.30 + 0.08) * 1.23, 6)
 
 
 def test_module_cap_price_from_live_fetch_uses_current_pricing_config() -> None:
@@ -100,28 +115,30 @@ def test_module_cap_price_from_live_fetch_uses_current_pricing_config() -> None:
     h = _hour()
     module._data.buy[h] = 2.0
     module._data.tge[h] = 0.50
-    assert round(module.cap_price_at(h), 6) == round((0.50 + 0.10) * 1.08, 6)
+    assert round(module.cap_price_at(h, _terms()), 6) == round((0.50 + 0.10) * 1.08, 6)
+    assert round(module.cap_price_at(h, _terms(fee=False)), 6) == round(0.50 * 1.08, 6)
 
 
 def test_module_cap_price_none_for_sensor_source_hours() -> None:
     module = _module()
     h = _hour()
     module.archive.record(h, 1.0, PRICE_TYPE_CERTAIN, "sensor", "t")
-    assert module.cap_price_at(h) is None
+    assert module.cap_price_at(h, _terms()) is None
 
 
-def test_contribute_sets_cap_price_next_to_buy_price() -> None:
+def test_cap_price_for_a_priced_hour_comes_from_the_same_source() -> None:
     module = _module()
     h = _hour()
     module.archive.record(h, 0.60, PRICE_TYPE_FORECAST, "pradcast", "t", formula=_formula(0.40))
     forecast = Forecast(slots=[HourSlot(start=h)])
     module.contribute(forecast)
-    slot = forecast.slots[0]
-    assert slot.buy_price == 0.60
-    assert round(slot.cap_price_kwh, 6) == round((0.40 + 0.08) * 1.23, 6)
+    assert forecast.slots[0].buy_price == 0.60
+    # The price module leaves the cap price to the billing module's edition.
+    assert forecast.slots[0].cap_price_kwh is None
+    assert round(module.cap_price_for(h, _terms()), 6) == round((0.40 + 0.08) * 1.23, 6)
 
 
-def test_contribute_estimates_cap_price_for_unpriced_hours() -> None:
+def test_cap_price_for_an_estimated_hour_uses_the_same_weekly_samples() -> None:
     module = _module()
     h = _hour() + timedelta(days=5)
     for weeks, tge in ((1, 0.30), (2, 0.40), (3, 0.50)):
@@ -135,11 +152,10 @@ def test_contribute_estimates_cap_price_for_unpriced_hours() -> None:
         )
     forecast = Forecast(slots=[HourSlot(start=h)])
     module.contribute(forecast)
-    slot = forecast.slots[0]
-    assert "price_estimated" in slot.tags
+    assert "price_estimated" in forecast.slots[0].tags
     w1, w2, w3 = ESTIMATE_WEEKLY_WEIGHTS
     expected = ((0.30 + 0.08) * w1 + (0.40 + 0.08) * w2 + (0.50 + 0.08) * w3) * 1.23
-    assert round(slot.cap_price_kwh, 6) == round(expected, 6)
+    assert round(module.cap_price_for(h, _terms()), 6) == round(expected, 6)
 
 
 # ------------------------------------------------------------ far-tail estimate

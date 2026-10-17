@@ -219,18 +219,37 @@
       },
       "billing": {
         "title": "PowerPilot – price cap (Tarcza)",
-        "description": "The seller caps the MONTHLY weighted-average energy price (energy + handling fee, gross, excise and distribution excluded): at month end you pay min(cost, limit × kWh) per point of delivery. The planner settles that from the month's start (meters below + the price archive), adds the plan and the estimated tail of the month, and plans the battery under the result. While the cap binds, every further kWh costs the limit whatever the hour.",
+        "description": "The seller caps the MONTHLY weighted-average energy price: at month end you pay min(cost, limit × kWh) per point of delivery — a settlement over the whole month, not an hourly cap. Each edition of the terms has its own validity, limit and basis; months no edition covers have no cap. Editions configured: {count}.",
         "data": {
-          "tarcza_enabled": "Model the price cap in the planner",
-          "tarcza_limit_kwh": "Price limit (PLN/kWh gross, energy + handling)",
-          "tarcza_valid_from": "Valid from",
-          "tarcza_valid_to": "Valid to",
-          "ppe1_import_sensors": "PPE 1 grid-import meters (kWh, summed — e.g. inverter AC-in to AC-out, AC-in to inverter, EV charger meter)"
+          "action": "Action"
+        }
+      },
+      "billing_terms": {
+        "title": "PowerPilot – price cap edition",
+        "description": "Dates must span whole months (from the 1st to the last day) and may not overlap another edition. Excise and distribution are always outside the cap. A net limit is grossed up with the VAT from the price settings.",
+        "data": {
+          "name": "Name (e.g. Tarcza Pstryk 2026)",
+          "valid_from": "Valid from (first day of a month)",
+          "valid_to": "Valid to (last day of a month)",
+          "limit_kwh": "Limit of the monthly average (PLN/kWh)",
+          "limit_includes_vat": "The limit includes VAT (gross) — off: the limit is net",
+          "handling_fee_included": "The handling fee counts in the average (energy + handling fee) — off: energy only"
+        }
+      },
+      "billing_meters": {
+        "title": "PowerPilot – PPE 1 import meters",
+        "description": "Meters (kWh) whose SUM is the grid import of PPE 1. Every load on that connection must be covered — an hour missing from any of them is unknown, never zero.",
+        "data": {
+          "ppe1_import_sensors": "PPE 1 grid-import meters (e.g. inverter AC-in to AC-out, AC-in to inverter, EV charger meter)"
         }
       }
     },
     "error": {
-      "invalid_efficiency_curve": "Invalid efficiency curve — use comma-separated \"power:efficiency%\" pairs, e.g. \"1000:91, 2500:93\""
+      "invalid_efficiency_curve": "Invalid efficiency curve — use comma-separated \"power:efficiency%\" pairs, e.g. \"1000:91, 2500:93\"",
+      "cap_terms_dates_order": "The start date is after the end date.",
+      "cap_terms_whole_months": "The period must span whole months: from the 1st of a month to the last day of a month.",
+      "cap_terms_limit": "The limit must be greater than zero.",
+      "cap_terms_overlap": "This period overlaps another price cap edition."
     }
   },
   "selector": {

@@ -257,16 +257,13 @@ MIN_TRIP_KM: Final = 2.0  # ignore sub-2 km noise when learning kWh/km
 DRAIN_HORIZON_HOURS: Final = 24  # look-ahead window for predicted driving drain
 
 # --- Monthly price cap ("Tarcza Pstryk") ---
-# The seller caps the MONTHLY weighted-average energy price (energy + handling
-# fee, gross, distribution excluded) at ``tarcza_limit_kwh``: at month end the
+# The seller caps the MONTHLY weighted-average energy price: at month end the
 # bill is ``min(Σ kWh × price, limit × Σ kWh)`` per point of delivery (PPE).
 # That is a settlement over the whole month, not an hourly cap — see
-# ``modules/billing.py``. Validity dates are inclusive ISO dates; outside them
-# no cap applies.
-CONF_TARCZA_ENABLED: Final = "tarcza_enabled"
-CONF_TARCZA_LIMIT_KWH: Final = "tarcza_limit_kwh"  # PLN/kWh gross
-CONF_TARCZA_VALID_FROM: Final = "tarcza_valid_from"  # ISO date, inclusive
-CONF_TARCZA_VALID_TO: Final = "tarcza_valid_to"  # ISO date, inclusive
+# ``modules/billing.py``. Each edition of the terms has its own validity
+# (whole months), limit and basis, so the editions are stored as a list of
+# ``models.PriceCapTerms.to_dict()``; an empty list means no cap is modelled.
+CONF_TARCZA_TERMS: Final = "tarcza_terms"
 # Grid-import meters (kWh, total_increasing) whose SUM is the import of the
 # first point of delivery: e.g. the inverter's AC-in counters plus the EV
 # charger meter for a charger tapped in before the inverter. Every load on
@@ -336,10 +333,6 @@ DEFAULTS: Final = {
     CONF_EV_EARLY_MAX_EXTRA_PCT: 10.0,
     CONF_TRAVEL_MARGIN_BEFORE_MIN: 30,
     CONF_TRAVEL_MARGIN_AFTER_MIN: 30,
-    CONF_TARCZA_ENABLED: False,
-    CONF_TARCZA_LIMIT_KWH: 0.61,
-    CONF_TARCZA_VALID_FROM: "2025-01-01",
-    CONF_TARCZA_VALID_TO: "2026-12-31",
 }
 
 # ---------------------------------------------------------------------------

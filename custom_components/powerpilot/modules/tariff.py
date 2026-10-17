@@ -41,7 +41,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import (
-    CONF_TARCZA_ENABLED,
+    CONF_TARCZA_TERMS,
     CONF_TARIFFS,
     DOMAIN,
     STORAGE_VERSION_TARIFF_SNAPSHOTS,
@@ -166,7 +166,7 @@ class TariffModule(PowerPilotModule):
         month's end needs its peak/off-peak classification too.
         """
         days = _FUTURE_DAYS_TO_PREFETCH
-        if self.config.get(CONF_TARCZA_ENABLED):
+        if self.config.get(CONF_TARCZA_TERMS):
             horizon_end = today + timedelta(days=_FUTURE_DAYS_TO_PREFETCH)
             days = max(days, (_next_month_start(horizon_end) - today).days)
         return days

@@ -265,6 +265,43 @@ def test_horizon_crossing_a_month_boundary_settles_two_periods() -> None:
     assert abs(second.settled_cost_pln - LIMIT * 2.0) < 1e-6
 
 
+def test_hours_of_an_uncapped_month_keep_their_hourly_energy_price() -> None:
+    """The horizon runs from a capped month into one no edition covers.
+
+    The capped month binds, so each of its kWh costs the limit (0.61); the next
+    month's 2.00 hours are billed at their hourly price. The battery's two kWh
+    belong in those hours. Regression: an hour without a cap price used to
+    abort the whole cap, and any cap price on it was moved into a settlement
+    that does not include the hour — pricing its energy as free.
+    """
+    boundary = H0 + timedelta(hours=2)
+    slots = _slots([1.0, 1.0, 2.0, 2.0], demand=1.0)
+    for slot in slots[2:]:
+        slot.cap_price_kwh = None  # no edition of the terms covers that month
+    capped = BillingPeriod(
+        ppe=PPE_1,
+        month_start=H0 - timedelta(days=10),
+        month_end=boundary,
+        limit_kwh=LIMIT,
+        energy_kwh=100.0,
+        cost_pln=100.0,
+        hours_expected=1,
+        hours_covered=1,
+    )
+    plan = _optimizer(inverter_max_charge_kw=0.0).optimize(
+        Forecast(slots=slots), _battery(soc=20.0), billing=[capped]
+    )
+    assert _modes(plan) == [
+        InverterMode.PASSTHROUGH,
+        InverterMode.PASSTHROUGH,
+        InverterMode.DISCHARGE,
+        InverterMode.DISCHARGE,
+    ]
+    assert [o.period.month_start for o in plan.billing] == [capped.month_start]
+    assert abs(plan.billing[0].planned_energy_kwh - 2.0) < 1e-6
+    assert "cap_price" not in plan.decisions[2].trace
+
+
 def test_missing_cap_price_is_refused_not_guessed() -> None:
     slots = _slots([0.5, 0.5], demand=1.0)
     slots[1].cap_price_kwh = None

@@ -312,6 +312,9 @@ Odpowiedzi użytkownika i regulamin zamykają otwarte punkty powyżej.
 - Encje diagnostyczne: `tarcza_ppe1_energy`, `tarcza_ppe1_average`,
   `tarcza_ppe1_forecast_average`, `tarcza_ppe1_discount`,
   `binary_sensor tarcza_ppe1_cap_binds`. Konfiguracja: menu „Tarcza".
+- Update 2026-10-17 (English, see `docs/adr/001-dated-price-cap-editions.md`):
+  the single limit + validity was replaced by a list of dated editions, each
+  with its own limit, net/gross basis and handling-fee rule.
 - Taryfa prefetchuje dni robocze do końca miesiąca ogona.
 - Nie zrobione w tym etapie: panel (wykres), eksport serii w snapshotach,
   CSV dostawcy (etap 4), PPE 2 (etapy 2–3).

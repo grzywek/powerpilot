@@ -6,11 +6,15 @@ the energy bill of a point of delivery (PPE) is::
     K = min(C, limit × E)          C = Σ import[t] × cap_price[t]
                                    E = Σ import[t]
 
-over every hour of the calendar month, where ``cap_price`` is the gross energy
-price *without excise* (energy + handling fee — the components the promotion
-covers; akcyza and distribution are billed outside it). This is a settlement
-over the whole month, **not** an hourly cap — ``Σ import[t] × min(price[t],
-limit)`` would be wrong.
+over every hour of the calendar month, where ``cap_price`` is the gross price
+of the hour's kWh as the edition of the terms in force that month averages it
+(``PriceCapTerms.cap_price``: energy, plus the handling fee when the edition
+counts it; excise and distribution never). This is a settlement over the
+whole month, **not** an hourly cap — ``Σ import[t] × min(price[t], limit)``
+would be wrong.
+
+Each edition of the terms (``CONF_TARCZA_TERMS``) spans whole months with its
+own limit and basis; a month no edition covers has no cap at all.
 
 This module owns the *observed* part of that settlement: the import of each
 PPE since the month started and its cost at the cap price, read from the
@@ -31,22 +35,32 @@ from datetime import date, datetime, timedelta
 
 from homeassistant.util import dt as dt_util
 
-from ..const import (
-    CONF_PPE1_IMPORT_SENSORS,
-    CONF_TARCZA_ENABLED,
-    CONF_TARCZA_LIMIT_KWH,
-    CONF_TARCZA_VALID_FROM,
-    CONF_TARCZA_VALID_TO,
-    DEFAULTS,
-    PPE_1,
+from ..const import CONF_PPE1_IMPORT_SENSORS, CONF_PRICE_VAT, CONF_TARCZA_TERMS, PPE_1
+from ..models import (
+    CAP_TERMS_DATES_ORDER,
+    CAP_TERMS_LIMIT,
+    CAP_TERMS_OVERLAP,
+    CAP_TERMS_WHOLE_MONTHS,
+    BillingPeriod,
+    Forecast,
+    PriceCapTerms,
+    price_cap_problems,
+    price_cap_terms_for_day,
 )
-from ..models import BillingPeriod, Forecast, ValidityRange
 from .base import PowerPilotModule
 
 _LOGGER = logging.getLogger(__name__)
 
 # How many gap descriptions a period carries (the first ones, plus a count).
 _MAX_MISSING_LISTED = 4
+
+# What each unusable-terms code means, for the reasons on the entities.
+_PROBLEM_TEXT = {
+    CAP_TERMS_DATES_ORDER: "data początku po dacie końca",
+    CAP_TERMS_WHOLE_MONTHS: "okres nie obejmuje pełnych miesięcy",
+    CAP_TERMS_LIMIT: "limit musi być większy od zera",
+    CAP_TERMS_OVERLAP: "okresy Tarcz nakładają się",
+}
 
 
 def month_bounds(moment: datetime) -> tuple[datetime, datetime]:
@@ -62,14 +76,6 @@ def next_month_start(day: date) -> date:
     if day.month == 12:
         return date(day.year + 1, 1, 1)
     return date(day.year, day.month + 1, 1)
-
-
-def _parse_date(value) -> date | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, date):
-        return value
-    return date.fromisoformat(str(value))
 
 
 class BillingModule(PowerPilotModule):
@@ -88,41 +94,53 @@ class BillingModule(PowerPilotModule):
         self.periods: dict[str, BillingPeriod] = {}
         # Why no period could be built this cycle (empty when fine).
         self.reasons: list[str] = []
-        self._validity_warned = False
+        self._config_warned: str | None = None
 
     # ------------------------------------------------------------ configuration
 
     @property
     def enabled(self) -> bool:
-        return bool(self.config.get(CONF_TARCZA_ENABLED))
+        """Whether any edition of the terms is configured at all."""
+        return bool(self.config.get(CONF_TARCZA_TERMS))
+
+    def terms(self) -> list[PriceCapTerms]:
+        """The configured editions; empty while they are unusable (see below)."""
+        terms, error = self._load_terms()
+        return [] if error else terms
 
     @property
-    def limit_kwh(self) -> float:
-        return float(
-            self.config.get(CONF_TARCZA_LIMIT_KWH, DEFAULTS[CONF_TARCZA_LIMIT_KWH])
-        )
+    def config_error(self) -> str | None:
+        """Why the configured editions cannot be used, ``None`` when they can.
 
-    def validity(self) -> ValidityRange | None:
-        """The configured validity window; ``None`` when a date is malformed."""
+        Unusable terms disable the cap as a whole — a month is never settled
+        under a guessed edition — and the reason travels to the plan.
+        """
+        return self._load_terms()[1]
+
+    def _load_terms(self) -> tuple[list[PriceCapTerms], str | None]:
+        raw = self.config.get(CONF_TARCZA_TERMS) or []
         try:
-            valid_from = _parse_date(
-                self.config.get(CONF_TARCZA_VALID_FROM, DEFAULTS[CONF_TARCZA_VALID_FROM])
+            terms = [PriceCapTerms.from_dict(item) for item in raw]
+        except (TypeError, ValueError, AttributeError) as err:
+            return [], f"niepoprawna konfiguracja Tarczy: {err}"
+        problems = price_cap_problems(terms)
+        if problems:
+            return [], "niepoprawna konfiguracja Tarczy: " + ", ".join(
+                _PROBLEM_TEXT.get(code, code) for code in problems
             )
-            valid_to = _parse_date(
-                self.config.get(CONF_TARCZA_VALID_TO, DEFAULTS[CONF_TARCZA_VALID_TO])
-            )
-        except ValueError:
-            return None
-        return ValidityRange(valid_from=valid_from, valid_to=valid_to)
+        return terms, None
+
+    def terms_on(self, day: date) -> PriceCapTerms | None:
+        """The edition in force on ``day`` (``None``: no cap that day)."""
+        return price_cap_terms_for_day(self.terms(), day)
 
     def active_on(self, day: date) -> bool:
-        """Whether the cap applies on ``day`` (enabled and inside its validity)."""
-        if not self.enabled:
-            return False
-        validity = self.validity()
-        if validity is None:
-            return False
-        return validity.contains(day)
+        """Whether the cap applies on ``day``."""
+        return self.terms_on(day) is not None
+
+    def vat_rate(self) -> float:
+        """VAT rate the pricing config applies — grosses up a net limit."""
+        return float(self.config.get(CONF_PRICE_VAT, 1.0) or 1.0) - 1.0
 
     def ppe_sensors(self) -> dict[str, list[str]]:
         """Configured grid-import meters per PPE (only PPE 1 today)."""
@@ -131,14 +149,17 @@ class BillingModule(PowerPilotModule):
 
     # ------------------------------------------------------------------ periods
 
-    def empty_period(self, ppe: str, month_start: datetime) -> BillingPeriod:
+    def empty_period(
+        self, ppe: str, month_start: datetime, terms: PriceCapTerms
+    ) -> BillingPeriod:
         """A period with nothing observed yet (a month that has not started)."""
         _, month_end = month_bounds(month_start)
         return BillingPeriod(
             ppe=ppe,
             month_start=month_start,
             month_end=month_end,
-            limit_kwh=self.limit_kwh,
+            limit_kwh=terms.gross_limit(self.vat_rate()),
+            terms_name=terms.name,
         )
 
     def periods_touching(
@@ -147,18 +168,21 @@ class BillingModule(PowerPilotModule):
         """Billing periods of ``ppe`` covering the hours ``[first, last]``.
 
         The current month comes from the observed position; later months start
-        empty. Months the cap is not active in are skipped, so an empty result
-        means "no cap applies to any of these hours".
+        empty, each under its own edition of the terms. Months no edition
+        covers are skipped, so an empty result means "no cap applies to any of
+        these hours". The caller must not plan a capped current month without
+        its observed position (``periods``) — this method cannot tell.
         """
         periods: list[BillingPeriod] = []
         month_start, month_end = month_bounds(first)
         while month_start <= last:
-            if self.active_on(dt_util.as_local(month_start).date()):
+            terms = self.terms_on(dt_util.as_local(month_start).date())
+            if terms is not None:
                 observed = self.periods.get(ppe)
                 if observed is not None and observed.month_start == month_start:
                     periods.append(observed)
                 else:
-                    periods.append(self.empty_period(ppe, month_start))
+                    periods.append(self.empty_period(ppe, month_start, terms))
             month_start = month_end
             _, month_end = month_bounds(month_start)
         return periods
@@ -170,29 +194,26 @@ class BillingModule(PowerPilotModule):
         if not self.enabled:
             self.periods = {}
             return
-        validity = self.validity()
-        if validity is None:
+        error = self.config_error
+        if error is not None:
             self.periods = {}
-            self.reasons.append("niepoprawne daty ważności Tarczy w konfiguracji")
-            if not self._validity_warned:
+            self.reasons.append(error)
+            if error != self._config_warned:
                 self.log_warning(
-                    "Daty ważności Tarczy są niepoprawne (oczekiwany format "
-                    "RRRR-MM-DD) — rozliczenie niedostępne.",
-                    extra={
-                        "valid_from": self.config.get(CONF_TARCZA_VALID_FROM),
-                        "valid_to": self.config.get(CONF_TARCZA_VALID_TO),
-                    },
+                    f"{error} — rozliczenie Tarczy niedostępne.",
+                    extra={"terms": self.config.get(CONF_TARCZA_TERMS)},
                 )
-                self._validity_warned = True
+                self._config_warned = error
             return
-        self._validity_warned = False
+        self._config_warned = None
 
         now = dt_util.now()
-        if not validity.contains(now.date()):
+        terms = self.terms_on(dt_util.as_local(now).date())
+        if terms is None:
             self.periods = {}
             self.reasons.append(
-                f"Tarcza nieaktywna dziś (ważność {validity.valid_from} – "
-                f"{validity.valid_to})"
+                f"Tarcza nieaktywna dziś — żadna skonfigurowana Tarcza nie "
+                f"obejmuje {dt_util.as_local(now).date().isoformat()}"
             )
             return
 
@@ -208,7 +229,7 @@ class BillingModule(PowerPilotModule):
         periods: dict[str, BillingPeriod] = {}
         for ppe, sensors in sensors_by_ppe.items():
             try:
-                periods[ppe] = await self._observe(ppe, sensors, now)
+                periods[ppe] = await self._observe(ppe, sensors, now, terms)
             except Exception as err:
                 self.reasons.append(f"błąd odczytu liczników {ppe}: {err}")
                 raise
@@ -224,9 +245,9 @@ class BillingModule(PowerPilotModule):
             )
 
     async def _observe(
-        self, ppe: str, sensors: list[str], now: datetime
+        self, ppe: str, sensors: list[str], now: datetime, terms: PriceCapTerms
     ) -> BillingPeriod:
-        """Read the month-to-date import + cap cost of one PPE."""
+        """Read the month-to-date import + cap cost of one PPE under ``terms``."""
         month_start, month_end = month_bounds(now)
         hour_now = now.replace(minute=0, second=0, microsecond=0)
 
@@ -256,7 +277,7 @@ class BillingModule(PowerPilotModule):
             expected += 1
             label = dt_util.as_local(hour).strftime("%d.%m %H:%M")
             absent = [eid for eid in sensors if hour not in series[eid]]
-            cap_price = self._prices.cap_price_at(hour)
+            cap_price = self._prices.cap_price_at(hour, terms)
             if absent:
                 note(f"{label}: brak odczytu {', '.join(absent)}")
             elif cap_price is None:
@@ -278,7 +299,7 @@ class BillingModule(PowerPilotModule):
                 for eid in sensors
             }
             absent = [eid for eid, value in partials.items() if value is None]
-            cap_price = self._prices.cap_price_at(hour_now)
+            cap_price = self._prices.cap_price_at(hour_now, terms)
             if absent:
                 note(f"{label} (bieżąca): brak odczytu {', '.join(absent)}")
             elif cap_price is None:
@@ -296,7 +317,8 @@ class BillingModule(PowerPilotModule):
             ppe=ppe,
             month_start=month_start,
             month_end=month_end,
-            limit_kwh=self.limit_kwh,
+            limit_kwh=terms.gross_limit(self.vat_rate()),
+            terms_name=terms.name,
             energy_kwh=energy,
             cost_pln=cost,
             hours_expected=expected,
@@ -307,22 +329,29 @@ class BillingModule(PowerPilotModule):
     # --------------------------------------------------------------- contribute
 
     def contribute(self, forecast: Forecast) -> None:
-        """Nothing per slot — the cap is a monthly quantity, not an hourly one."""
+        """Every slot's cap price under the edition in force that month.
+
+        Hours no edition covers keep ``cap_price_kwh = None``: their energy is
+        billed at the hourly price, outside any monthly settlement.
+        """
+        terms = self.terms()
+        if not terms:
+            return
+        for slot in forecast.slots:
+            hour = slot.start.replace(minute=0, second=0, microsecond=0)
+            edition = price_cap_terms_for_day(terms, dt_util.as_local(hour).date())
+            if edition is not None:
+                slot.cap_price_kwh = self._prices.cap_price_for(hour, edition)
 
     # -------------------------------------------------------------- diagnostics
 
     def status(self) -> dict:
-        validity = self.validity()
+        today = self.terms_on(dt_util.as_local(dt_util.now()).date())
         return {
             "enabled": self.enabled,
-            "limit_kwh": self.limit_kwh,
-            "valid_from": validity.valid_from.isoformat()
-            if validity and validity.valid_from
-            else None,
-            "valid_to": validity.valid_to.isoformat()
-            if validity and validity.valid_to
-            else None,
-            "active_today": self.active_on(dt_util.now().date()),
+            "config_error": self.config_error,
+            "terms": [t.to_dict() for t in self.terms()],
+            "active_today": today.name if today is not None else None,
             "sensors": self.ppe_sensors(),
             "reasons": list(self.reasons),
             "periods": {ppe: p.as_dict() for ppe, p in self.periods.items()},

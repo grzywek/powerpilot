@@ -11,11 +11,20 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.powerpilot.const import (
     CONF_PPE1_IMPORT_SENSORS,
-    CONF_TARCZA_ENABLED,
-    CONF_TARCZA_LIMIT_KWH,
-    CONF_TARCZA_VALID_FROM,
-    CONF_TARCZA_VALID_TO,
+    CONF_PRICE_VAT,
+    CONF_TARCZA_TERMS,
     PPE_1,
+)
+from custom_components.powerpilot.models import (
+    CAP_TERMS_DATES_ORDER,
+    CAP_TERMS_LIMIT,
+    CAP_TERMS_OVERLAP,
+    CAP_TERMS_WHOLE_MONTHS,
+    Forecast,
+    HourSlot,
+    PriceCapTerms,
+    price_cap_problems,
+    price_cap_terms_for_day,
 )
 from custom_components.powerpilot.modules.billing import (
     BillingModule,
@@ -25,6 +34,26 @@ from custom_components.powerpilot.modules.billing import (
 
 NOW = "2026-09-14 10:30:00+02:00"
 A, B = "sensor.victron_ac_in", "sensor.ev_meter"
+
+# The two editions of Tarcza Pstryk as their regulations state them.
+TERMS_2026 = {
+    "id": "t2026",
+    "name": "Tarcza Pstryk 2026",
+    "valid_from": "2025-01-01",
+    "valid_to": "2026-12-31",
+    "limit_kwh": 0.61,
+    "limit_includes_vat": True,
+    "handling_fee_included": True,
+}
+TERMS_2027 = {
+    "id": "t2027",
+    "name": "Tarcza Pstryk 2027",
+    "valid_from": "2027-01-01",
+    "valid_to": "2027-12-31",
+    "limit_kwh": 0.50,
+    "limit_includes_vat": False,
+    "handling_fee_included": False,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -64,19 +93,24 @@ class _Meters:
 
 
 class _Prices:
+    """Cap prices per hour; ``cap_price_for`` prices from fixed components."""
+
     def __init__(self, caps: dict[datetime, float]) -> None:
         self.caps = caps
+        self.terms_seen: list[str] = []
 
-    def cap_price_at(self, hour):
+    def cap_price_at(self, hour, terms):
+        self.terms_seen.append(terms.name)
         return self.caps.get(hour)
+
+    def cap_price_for(self, hour, terms):
+        return terms.cap_price(0.40, 0.08, 0.23)
 
 
 def _config(**overrides) -> dict:
     cfg = {
-        CONF_TARCZA_ENABLED: True,
-        CONF_TARCZA_LIMIT_KWH: 0.61,
-        CONF_TARCZA_VALID_FROM: "2025-01-01",
-        CONF_TARCZA_VALID_TO: "2026-12-31",
+        CONF_TARCZA_TERMS: [TERMS_2026],
+        CONF_PRICE_VAT: 1.23,
         CONF_PPE1_IMPORT_SENSORS: [A, B],
     }
     cfg.update(overrides)
@@ -144,6 +178,8 @@ async def test_complete_month_to_date_sums_every_meter_at_the_cap_price() -> Non
     assert abs(period.cost_pln - (n * 1.5 + 0.3) * 0.5) < 1e-9
     assert abs(period.average_kwh - 0.5) < 1e-9
     assert period.limit_kwh == 0.61
+    assert period.terms_name == "Tarcza Pstryk 2026"
+    assert set(prices.terms_seen) == {"Tarcza Pstryk 2026"}
 
 
 async def test_missing_reading_on_one_meter_is_an_unknown_hour_not_zero() -> None:
@@ -201,9 +237,11 @@ async def test_many_gaps_are_summarised() -> None:
 async def test_disabled_or_unconfigured_yields_no_period() -> None:
     with freeze_time(NOW):
         meters, prices, _, _ = _fixture()
-        module = _module(meters, prices, **{CONF_TARCZA_ENABLED: False})
+        module = _module(meters, prices, **{CONF_TARCZA_TERMS: []})
         await module.async_update()
+        assert not module.enabled
         assert module.periods == {}
+        assert module.reasons == []
         assert not module.active_on(dt_util.now().date())
 
         module = _module(meters, prices, **{CONF_PPE1_IMPORT_SENSORS: []})
@@ -215,21 +253,43 @@ async def test_disabled_or_unconfigured_yields_no_period() -> None:
 async def test_outside_validity_is_inactive_with_reason() -> None:
     with freeze_time(NOW):
         meters, prices, _, _ = _fixture()
-        module = _module(meters, prices, **{CONF_TARCZA_VALID_TO: "2026-08-31"})
+        ended = {**TERMS_2026, "valid_to": "2026-08-31"}
+        module = _module(meters, prices, **{CONF_TARCZA_TERMS: [ended]})
         await module.async_update()
         assert module.periods == {}
         assert any("nieaktywna" in r for r in module.reasons)
 
 
-async def test_malformed_validity_dates_disable_the_cap_loudly() -> None:
+async def test_malformed_terms_disable_the_cap_loudly() -> None:
     with freeze_time(NOW):
         meters, prices, _, _ = _fixture()
-        module = _module(meters, prices, **{CONF_TARCZA_VALID_TO: "31.12.2026"})
+        broken = {**TERMS_2026, "valid_to": "31.12.2026"}
+        module = _module(meters, prices, **{CONF_TARCZA_TERMS: [broken]})
         await module.async_update()
         assert module.periods == {}
-        assert module.validity() is None
-        assert any("niepoprawne" in r for r in module.reasons)
-        assert any("niepoprawne" in m for m in module.coordinator.messages)
+        assert module.terms() == []
+        assert "niepoprawna konfiguracja" in module.config_error
+        assert any("niepoprawna" in r for r in module.reasons)
+        assert any("niepoprawna" in m for m in module.coordinator.messages)
+
+
+async def test_overlapping_or_partial_month_terms_are_refused_not_guessed() -> None:
+    with freeze_time(NOW):
+        meters, prices, _, _ = _fixture()
+        overlapping = {**TERMS_2027, "valid_from": "2026-12-01"}
+        module = _module(meters, prices, **{CONF_TARCZA_TERMS: [TERMS_2026, overlapping]})
+        await module.async_update()
+        assert module.periods == {}
+        assert "nakładają" in module.config_error
+        assert not module.active_on(dt_util.now().date())
+
+        partial = {**TERMS_2026, "valid_from": "2025-01-15"}
+        module = _module(meters, prices, **{CONF_TARCZA_TERMS: [partial]})
+        await module.async_update()
+        assert "pełnych miesięcy" in module.config_error
+        # Logged once per distinct problem, not on every refresh.
+        await module.async_update()
+        assert sum("pełnych miesięcy" in m for m in module.coordinator.messages) == 1
 
 
 # ---------------------------------------------------------- horizon periods
@@ -256,3 +316,110 @@ async def test_periods_touching_skips_months_the_cap_is_not_valid_in() -> None:
         first = dt_util.now().replace(minute=0, second=0, microsecond=0)
         periods = module.periods_touching(PPE_1, first, first + timedelta(hours=167))
     assert [p.month_start.month for p in periods] == [12]
+
+
+async def test_each_month_is_settled_under_its_own_edition() -> None:
+    """2026 → 2027: the limit and its basis change with the edition."""
+    with freeze_time("2026-12-28 10:30:00+01:00"):
+        meters, prices, _, _ = _fixture()
+        module = _module(meters, prices, **{CONF_TARCZA_TERMS: [TERMS_2026, TERMS_2027]})
+        await module.async_update()
+        first = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        december, january = module.periods_touching(
+            PPE_1, first, first + timedelta(hours=167)
+        )
+    assert december is module.periods[PPE_1]
+    assert december.terms_name == "Tarcza Pstryk 2026"
+    assert december.limit_kwh == 0.61  # stated gross
+    assert january.terms_name == "Tarcza Pstryk 2027"
+    assert abs(january.limit_kwh - 0.50 * 1.23) < 1e-9  # stated net
+    assert january.energy_kwh == 0.0 and january.complete
+
+
+async def test_a_capped_month_after_an_uncapped_one_is_still_planned() -> None:
+    """Only a 2027 edition configured: December has no cap, January does."""
+    with freeze_time("2026-12-28 10:30:00+01:00"):
+        meters, prices, _, _ = _fixture()
+        module = _module(meters, prices, **{CONF_TARCZA_TERMS: [TERMS_2027]})
+        await module.async_update()
+        assert module.periods == {}
+        first = dt_util.now().replace(minute=0, second=0, microsecond=0)
+        periods = module.periods_touching(PPE_1, first, first + timedelta(hours=167))
+    assert [p.month_start.month for p in periods] == [1]
+
+
+# ------------------------------------------------------------- slot prices
+
+
+def test_contribute_prices_every_slot_under_its_months_edition() -> None:
+    meters, prices, _, _ = _fixture()
+    module = _module(meters, prices, **{CONF_TARCZA_TERMS: [TERMS_2027]})
+    december = dt_util.as_utc(datetime(2026, 12, 31, 23, tzinfo=dt_util.get_default_time_zone()))
+    forecast = Forecast(slots=[HourSlot(start=december), HourSlot(start=december + timedelta(hours=1))])
+    module.contribute(forecast)
+    uncapped, capped = forecast.slots
+    # December: no edition → its energy stays at the hourly price.
+    assert uncapped.cap_price_kwh is None
+    # January 2027: energy only (no handling fee), grossed up.
+    assert abs(capped.cap_price_kwh - 0.40 * 1.23) < 1e-9
+
+
+def test_contribute_counts_the_handling_fee_where_the_edition_does() -> None:
+    meters, prices, _, _ = _fixture()
+    module = _module(meters, prices)
+    hour = dt_util.as_utc(datetime(2026, 9, 14, 12, tzinfo=dt_util.get_default_time_zone()))
+    forecast = Forecast(slots=[HourSlot(start=hour)])
+    module.contribute(forecast)
+    assert abs(forecast.slots[0].cap_price_kwh - (0.40 + 0.08) * 1.23) < 1e-9
+
+
+def test_contribute_leaves_slots_alone_while_the_terms_are_unusable() -> None:
+    meters, prices, _, _ = _fixture()
+    broken = {**TERMS_2026, "limit_kwh": 0}
+    module = _module(meters, prices, **{CONF_TARCZA_TERMS: [broken]})
+    hour = dt_util.as_utc(datetime(2026, 9, 14, 12, tzinfo=dt_util.get_default_time_zone()))
+    forecast = Forecast(slots=[HourSlot(start=hour)])
+    module.contribute(forecast)
+    assert forecast.slots[0].cap_price_kwh is None
+
+
+# --------------------------------------------------------------- the terms
+
+
+def test_terms_price_and_limit_follow_their_edition() -> None:
+    t2026 = PriceCapTerms.from_dict(TERMS_2026)
+    t2027 = PriceCapTerms.from_dict(TERMS_2027)
+    assert abs(t2026.cap_price(0.40, 0.08, 0.23) - 0.48 * 1.23) < 1e-12
+    assert abs(t2027.cap_price(0.40, 0.08, 0.23) - 0.40 * 1.23) < 1e-12
+    assert t2026.gross_limit(0.23) == 0.61
+    assert abs(t2027.gross_limit(0.23) - 0.615) < 1e-12
+    assert PriceCapTerms.from_dict(t2027.to_dict()) == t2027
+
+
+def test_terms_must_span_whole_months_in_order_with_a_positive_limit() -> None:
+    def problems(**changes):
+        return PriceCapTerms.from_dict({**TERMS_2026, **changes}).problems()
+
+    assert problems() == []
+    assert CAP_TERMS_WHOLE_MONTHS in problems(valid_from="2025-01-02")
+    assert CAP_TERMS_WHOLE_MONTHS in problems(valid_to="2026-12-30")
+    assert problems(valid_to="2024-02-29") == [CAP_TERMS_DATES_ORDER]
+    assert problems(limit_kwh=0) == [CAP_TERMS_LIMIT]
+
+
+def test_overlapping_terms_are_reported_and_days_pick_their_edition() -> None:
+    t2026 = PriceCapTerms.from_dict(TERMS_2026)
+    t2027 = PriceCapTerms.from_dict(TERMS_2027)
+    assert price_cap_problems([t2026, t2027]) == []
+    early = PriceCapTerms.from_dict({**TERMS_2027, "valid_from": "2026-12-01"})
+    assert price_cap_problems([t2026, early]) == [CAP_TERMS_OVERLAP]
+    assert price_cap_terms_for_day([t2026, t2027], datetime(2026, 12, 31).date()) is t2026
+    assert price_cap_terms_for_day([t2026, t2027], datetime(2027, 1, 1).date()) is t2027
+    assert price_cap_terms_for_day([t2026, t2027], datetime(2028, 1, 1).date()) is None
+
+
+def test_terms_without_dates_or_limit_do_not_decode() -> None:
+    for missing in ("valid_from", "valid_to", "limit_kwh"):
+        data = {k: v for k, v in TERMS_2026.items() if k != missing}
+        with pytest.raises(ValueError):
+            PriceCapTerms.from_dict(data)

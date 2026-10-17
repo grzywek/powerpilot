@@ -253,18 +253,37 @@
       },
       "billing": {
         "title": "PowerPilot – Tarcza (limit ceny miesięcznej)",
-        "description": "Sprzedawca ogranicza ŚREDNIĄ MIESIĘCZNĄ cenę energii (energia + obsługa, brutto, bez akcyzy i dystrybucji) do limitu: na koniec miesiąca płacisz min(koszt, limit × kWh) na każdym punkcie poboru. Planer liczy to rozliczenie od początku miesiąca (z liczników niżej i archiwum cen), dolicza plan oraz szacowany ogon miesiąca i planuje baterię pod wynik. Gdy limit wiąże, każda kolejna kWh kosztuje limit niezależnie od godziny.",
+        "description": "Sprzedawca ogranicza ŚREDNIĄ MIESIĘCZNĄ cenę energii: na koniec miesiąca płacisz min(koszt, limit × kWh) na każdym punkcie poboru — to rozliczenie całego miesiąca, nie limit godzinowy. Każda Tarcza ma własny okres, limit i sposób liczenia; miesiące bez Tarczy rozliczane są bez limitu. Skonfigurowane Tarcze: {count}.",
         "data": {
-          "tarcza_enabled": "Włącz rozliczenie Tarczy w planerze",
-          "tarcza_limit_kwh": "Limit ceny (PLN/kWh brutto, energia + obsługa)",
-          "tarcza_valid_from": "Obowiązuje od",
-          "tarcza_valid_to": "Obowiązuje do",
-          "ppe1_import_sensors": "Liczniki importu PPE 1 (kWh, sumowane — np. Victron AC-in do AC-out, AC-in do falownika, licznik ładowarki EV)"
+          "action": "Akcja"
+        }
+      },
+      "billing_terms": {
+        "title": "PowerPilot – Tarcza",
+        "description": "Okres musi obejmować pełne miesiące (od 1. do ostatniego dnia) i nie może nachodzić na inną Tarczę. Akcyza i dystrybucja są zawsze poza Tarczą. Limit netto jest przeliczany na brutto stawką VAT z ustawień cen.",
+        "data": {
+          "name": "Nazwa (np. Tarcza Pstryk 2026)",
+          "valid_from": "Obowiązuje od (1. dzień miesiąca)",
+          "valid_to": "Obowiązuje do (ostatni dzień miesiąca)",
+          "limit_kwh": "Limit średniej miesięcznej (PLN/kWh)",
+          "limit_includes_vat": "Limit z VAT (brutto) — wyłączone: limit netto",
+          "handling_fee_included": "Opłata za obsługę wlicza się do średniej (energia + obsługa) — wyłączone: tylko energia"
+        }
+      },
+      "billing_meters": {
+        "title": "PowerPilot – liczniki importu PPE 1",
+        "description": "Liczniki (kWh), których SUMA to import z sieci na PPE 1. Muszą obejmować wszystkie odbiory tego przyłącza — godzina bez odczytu z któregokolwiek jest nieznana, nigdy zerowa.",
+        "data": {
+          "ppe1_import_sensors": "Liczniki importu PPE 1 (np. Victron AC-in do AC-out, AC-in do falownika, licznik ładowarki EV)"
         }
       }
     },
     "error": {
-      "invalid_efficiency_curve": "Niepoprawna krzywa sprawności — podaj pary \"moc:sprawność%\" po przecinku, np. \"1000:91, 2500:93\""
+      "invalid_efficiency_curve": "Niepoprawna krzywa sprawności — podaj pary \"moc:sprawność%\" po przecinku, np. \"1000:91, 2500:93\"",
+      "cap_terms_dates_order": "Data początku jest późniejsza niż data końca.",
+      "cap_terms_whole_months": "Okres musi obejmować pełne miesiące: od 1. dnia miesiąca do ostatniego dnia miesiąca.",
+      "cap_terms_limit": "Limit musi być większy od zera.",
+      "cap_terms_overlap": "Ten okres nachodzi na inną Tarczę."
     }
   },
   "selector": {

@@ -155,25 +155,40 @@ power-setpoint entity — the automation just starts/stops the charger.
 
 ## Monthly price cap (Tarcza)
 
-Some sellers cap the **monthly weighted-average** energy price (energy +
-handling fee, gross, excise and distribution excluded): at month end the bill
-per point of delivery is `min(cost, limit × kWh)`. That is a settlement over
-the whole month, not an hourly cap — and while it binds, every further kWh
-costs the limit whatever the hour, so battery arbitrage on the energy price
-stops paying and only distribution differences matter.
+Some sellers cap the **monthly weighted-average** energy price: at month end
+the bill per point of delivery is `min(cost, limit × kWh)`. That is a
+settlement over the whole month, not an hourly cap — and while it binds, every
+further kWh costs the limit whatever the hour, so battery arbitrage on the
+energy price stops paying and only distribution differences matter.
 
-PowerPilot models it end to end (options → *Tarcza*):
+The terms change between editions, so each edition is configured on its own
+(options → *Tarcza* → *Dodaj Tarczę*):
+
+| Field | Tarcza Pstryk 2026 | Tarcza Pstryk 2027 |
+|-------|--------------------|--------------------|
+| Valid | 2025-01-01 … 2026-12-31 | 2027-01-01 … 2027-12-31 |
+| Limit | 0.61 PLN/kWh | 0.50 PLN/kWh |
+| Limit includes VAT | yes (gross) | no (net) |
+| Handling fee counts in the average | yes | per the regulations' wording only "energy cost" — confirm with the seller |
+
+An edition spans whole months and editions may not overlap; a month no edition
+covers is billed at hourly prices. Excise and distribution are always outside
+the cap. A net limit is grossed up with the VAT of the price settings, so every
+figure below is gross.
+
+PowerPilot models it end to end:
 
 - the month-to-date import of PPE 1 is read from the configured grid-import
-  meters (summed; an hour missing from any of them is unknown, never zero) and
-  priced at the excise-free cap price kept in the price archive;
-- the optimizer settles each month it touches as `min(C, limit × E)` and plans
-  the battery under that regime, pricing the rest of the month from the weekly
-  consumption profile, the archive's price estimate and the learned EV driving
-  profile;
-- when the cap cannot be modelled (incomplete month data, unpriced tail hours,
-  no EV driving profile yet) the plan says why and the battery is planned
-  without it — no substitute data.
+  meters (*Tarcza* → *Liczniki importu PPE 1*; summed, an hour missing from any
+  of them is unknown, never zero) and priced from the price archive under that
+  month's edition;
+- the optimizer settles each capped month it touches as `min(C, limit × E)` and
+  plans the battery under that regime, pricing the rest of the month from the
+  weekly consumption profile, the archive's price estimate and the learned EV
+  driving profile;
+- when the cap cannot be modelled (unusable editions, incomplete month data,
+  unpriced tail hours, no EV driving profile yet) the plan says why and the
+  battery is planned without it — no substitute data.
 
 | Entity | Meaning |
 |--------|---------|

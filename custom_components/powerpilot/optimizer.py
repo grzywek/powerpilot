@@ -323,8 +323,9 @@ class Optimizer:
         ``tail`` carries the estimated hours from the end of the horizon to the
         end of the last such month. Both are required together for the cap to
         be modelled — the tail alone is meaningless and is ignored. Every hour
-        under a cap must carry ``cap_price_kwh`` and every tail hour a price;
-        the caller validates completeness and reports gaps, this method only
+        inside a capped month must carry ``cap_price_kwh`` and every tail hour
+        a price; hours of uncapped months keep their hourly energy price. The
+        caller validates completeness and reports gaps, this method only
         refuses to guess (``ValueError``).
         """
         battery = battery.copy()  # never mutate the live state
@@ -379,16 +380,12 @@ class Optimizer:
         ev_kwh = [ev_alloc.grid.get(slots[t].start, 0.0) for t in range(n)]
         ev_kwh += [0.0] * len(tail_slots)
 
+        # Energy price each hour moves into its month's settlement: the cap
+        # price inside a capped month, nothing outside one (that hour's energy
+        # stays billed at the hourly price).
         cap_price: list[float] | None = None
         periods: list[_CapPeriod] = []
         if billing:
-            cap_price = []
-            for slot in all_slots:
-                if slot.cap_price_kwh is None:
-                    raise ValueError(
-                        f"hour {slot.start.isoformat()} has no cap price"
-                    )
-                cap_price.append(slot.cap_price_kwh)
             for period in billing:
                 hours = [
                     t
@@ -397,6 +394,15 @@ class Optimizer:
                 ]
                 if hours:
                     periods.append(_CapPeriod(period=period, hours=hours))
+            cap_price = [0.0] * total
+            for cp in periods:
+                for t in cp.hours:
+                    price = all_slots[t].cap_price_kwh
+                    if price is None:
+                        raise ValueError(
+                            f"hour {all_slots[t].start.isoformat()} has no cap price"
+                        )
+                    cap_price[t] = price
 
         solution = self._solve_lp(
             battery=battery,
@@ -431,7 +437,15 @@ class Optimizer:
             ev_request=ev_request,
             reminders=reminders,
             fracs=fracs[:n],
-            cap_price=cap_price[:n] if cap_price is not None else None,
+            # Only hours of capped months carry a cap price into the trace.
+            cap_price=(
+                [
+                    cap_price[t] if any(t in cp.hours for cp in periods) else None
+                    for t in range(n)
+                ]
+                if cap_price is not None
+                else None
+            ),
         )
         plan.billing = self._billing_outcomes(periods, solution, n)
         return plan
@@ -584,8 +598,9 @@ class Optimizer:
         capped = bool(periods)
         if capped and (cap_price is None or len(cap_price) != n):
             raise ValueError("cap price required for every hour under a price cap")
-        # Energy-side price that moves into the monthly settlement. Without a
-        # cap nothing moves and the per-column costs are the full prices.
+        # Energy-side price that moves into the monthly settlement — zero for
+        # hours outside every capped month. Without a cap nothing moves and
+        # the per-column costs are the full prices.
         settled = cap_price if capped else [0.0] * n
 
         p_term = (
@@ -1041,7 +1056,7 @@ class Optimizer:
         reminders: list[str] | None = None,
         stored: list[float] | None = None,
         fracs: list[float] | None = None,
-        cap_price: list[float] | None = None,
+        cap_price: list[float | None] | None = None,
     ) -> Plan:
         cfg = self.config
         ceff = max(battery.charge_efficiency, _EPS)
@@ -1216,7 +1231,7 @@ class Optimizer:
                 # the running hour — energies are for that window, powers (kW)
                 # are already normalised by it.
                 decision.trace["hour_fraction"] = round(fracs[t], 4)
-            if cap_price is not None:
+            if cap_price is not None and cap_price[t] is not None:
                 decision.trace["cap_price"] = round(cap_price[t], 4)
 
             if t == 0 and reminders:

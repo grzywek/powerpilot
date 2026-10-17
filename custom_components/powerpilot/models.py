@@ -28,11 +28,12 @@ class HourSlot:
     # published binding prices (typically D+1), otherwise the value is a forecast.
     buy_price: float | None = None
     price_confirmed: bool = False
-    # Energy-side gross price WITHOUT excise — ``(tge + markup) × (1 + VAT)``.
-    # This is the price the seller's monthly cap ("Tarcza") is settled on
-    # (energy + handling fee only; akcyza and distribution are billed outside
-    # it). ``None`` when the components are unknown (sensor price source), in
-    # which case no cap can be computed for the hour.
+    # Gross price of this hour's kWh as the seller's monthly cap ("Tarcza")
+    # averages it, under the edition in force that month (see
+    # ``PriceCapTerms.cap_price``: energy, plus the handling fee when the
+    # edition counts it; excise and distribution never). ``None`` when no
+    # edition covers the hour, or its components are unknown (sensor price
+    # source) — then no cap can be computed for it.
     cap_price_kwh: float | None = None
 
     # Distribution tariff price for this hour (PLN/kWh). ``None`` means no tariff
@@ -192,12 +193,15 @@ class BillingPeriod:
     ppe: str
     month_start: datetime  # first hour of the month (local, tz-aware)
     month_end: datetime  # first hour of the next month (exclusive)
-    limit_kwh: float  # PLN/kWh gross the monthly average is capped at
+    # PLN/kWh GROSS the monthly average is capped at — the terms' own limit,
+    # grossed up when they state it net (see ``PriceCapTerms.gross_limit``).
+    limit_kwh: float
     energy_kwh: float = 0.0
     cost_pln: float = 0.0
     hours_expected: int = 0
     hours_covered: int = 0
     missing: tuple[str, ...] = ()
+    terms_name: str = ""  # the price-cap edition this month is settled under
 
     @property
     def complete(self) -> bool:
@@ -213,6 +217,7 @@ class BillingPeriod:
     def as_dict(self) -> dict[str, Any]:
         return {
             "ppe": self.ppe,
+            "terms": self.terms_name,
             "month_start": self.month_start.isoformat(),
             "month_end": self.month_end.isoformat(),
             "limit_kwh": self.limit_kwh,
@@ -552,3 +557,129 @@ def tariff_for_day(tariffs: list[Tariff], day: date) -> Tariff | None:
 
     candidates.sort(key=_sort_key)
     return candidates[0]
+
+
+# ---------------------------------------------------------------------------
+# Seller's monthly price cap ("Tarcza")
+# ---------------------------------------------------------------------------
+
+# Why a set of terms is unusable — the config flow maps each code to a form
+# error, the billing module to a reason on its entities.
+CAP_TERMS_DATES_ORDER: str = "cap_terms_dates_order"
+CAP_TERMS_WHOLE_MONTHS: str = "cap_terms_whole_months"
+CAP_TERMS_LIMIT: str = "cap_terms_limit"
+CAP_TERMS_OVERLAP: str = "cap_terms_overlap"
+
+
+def _is_last_day_of_month(day: date) -> bool:
+    return (day + timedelta(days=1)).day == 1
+
+
+@dataclass
+class PriceCapTerms:
+    """One edition of the seller's monthly price cap, in force over whole months.
+
+    The seller settles the cap per point of delivery and calendar month as
+    ``min(C, limit × E)``, ``C`` being every hour's import at the price the
+    terms average. What that price includes, and whether the limit is net or
+    gross, changes between editions (Pstryk 2026: energy + handling fee, limit
+    0.61 gross; 2027: "energy cost", limit 0.50 net), so each edition carries
+    its own dates and basis. Prices and limits leave this class in gross PLN —
+    the basis the optimizer plans in. Excise and distribution are billed
+    outside every edition so far.
+    """
+
+    name: str
+    valid_from: date  # first day of a month
+    valid_to: date  # last day of a month, inclusive
+    limit_kwh: float  # PLN/kWh exactly as the terms state it
+    limit_includes_vat: bool = True
+    handling_fee_included: bool = True
+    id: str = field(default_factory=lambda: uuid4().hex)
+
+    def contains(self, day: date) -> bool:
+        return self.valid_from <= day <= self.valid_to
+
+    def cap_price(self, tge: float, markup: float, vat_rate: float) -> float:
+        """Gross price of one kWh as these terms average it."""
+        energy = tge + (markup if self.handling_fee_included else 0.0)
+        return energy * (1.0 + vat_rate)
+
+    def gross_limit(self, vat_rate: float) -> float:
+        """The limit in gross PLN/kWh (a net limit is grossed up by ``vat_rate``)."""
+        if self.limit_includes_vat:
+            return self.limit_kwh
+        return self.limit_kwh * (1.0 + vat_rate)
+
+    def problems(self) -> list[str]:
+        """Codes of what makes these terms unusable on their own (empty = fine).
+
+        The seller settles whole calendar months, and no edition defines what
+        a month only partly under the cap would cost — so the dates must span
+        whole months rather than be guessed into one.
+        """
+        found: list[str] = []
+        if self.valid_from > self.valid_to:
+            found.append(CAP_TERMS_DATES_ORDER)
+        if self.valid_from.day != 1 or not _is_last_day_of_month(self.valid_to):
+            found.append(CAP_TERMS_WHOLE_MONTHS)
+        if self.limit_kwh <= 0:
+            found.append(CAP_TERMS_LIMIT)
+        return found
+
+    def overlaps(self, other: "PriceCapTerms") -> bool:
+        return self.valid_from <= other.valid_to and other.valid_from <= self.valid_to
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "valid_from": self.valid_from.isoformat(),
+            "valid_to": self.valid_to.isoformat(),
+            "limit_kwh": self.limit_kwh,
+            "limit_includes_vat": self.limit_includes_vat,
+            "handling_fee_included": self.handling_fee_included,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PriceCapTerms":
+        """Decode stored terms; ``ValueError`` when a required field is unusable."""
+        valid_from = _parse_date(data.get("valid_from"))
+        valid_to = _parse_date(data.get("valid_to"))
+        if valid_from is None or valid_to is None:
+            raise ValueError("price cap terms need both validity dates")
+        limit = data.get("limit_kwh")
+        if limit is None:
+            raise ValueError("price cap terms need a limit")
+        return cls(
+            id=str(data.get("id") or uuid4().hex),
+            name=str(data.get("name") or ""),
+            valid_from=valid_from,
+            valid_to=valid_to,
+            limit_kwh=float(limit),
+            limit_includes_vat=bool(data.get("limit_includes_vat", True)),
+            handling_fee_included=bool(data.get("handling_fee_included", True)),
+        )
+
+
+def price_cap_problems(terms: list[PriceCapTerms]) -> list[str]:
+    """Codes of what makes a set of terms unusable (each edition + overlaps)."""
+    found: list[str] = []
+    for i, current in enumerate(terms):
+        for code in current.problems():
+            if code not in found:
+                found.append(code)
+        if any(current.overlaps(other) for other in terms[i + 1 :]):
+            if CAP_TERMS_OVERLAP not in found:
+                found.append(CAP_TERMS_OVERLAP)
+    return found
+
+
+def price_cap_terms_for_day(
+    terms: list[PriceCapTerms], day: date
+) -> PriceCapTerms | None:
+    """The edition in force on ``day`` (terms never overlap once validated)."""
+    for current in terms:
+        if current.contains(day):
+            return current
+    return None

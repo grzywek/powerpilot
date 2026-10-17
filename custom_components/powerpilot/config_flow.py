@@ -68,10 +68,7 @@ from .const import (
     CONF_PRICE_VAT,
     CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
-    CONF_TARCZA_ENABLED,
-    CONF_TARCZA_LIMIT_KWH,
-    CONF_TARCZA_VALID_FROM,
-    CONF_TARCZA_VALID_TO,
+    CONF_TARCZA_TERMS,
     CONF_TARIFFS,
     CONF_TRAVEL_MARGIN_AFTER_MIN,
     CONF_TRAVEL_MARGIN_BEFORE_MIN,
@@ -85,7 +82,13 @@ from .const import (
     charge_curve_band_key,
 )
 from .hierarchy import PARENT_ROOT, metered_sensors
-from .models import Tariff, TariffPeriod, ValidityRange
+from .models import (
+    CAP_TERMS_OVERLAP,
+    PriceCapTerms,
+    Tariff,
+    TariffPeriod,
+    ValidityRange,
+)
 
 _NUMBER = selector.NumberSelector
 _NUM = selector.NumberSelectorConfig
@@ -212,33 +215,52 @@ def _core_schema(data: dict[str, Any]) -> vol.Schema:
     )
 
 
-def _billing_schema(data: dict[str, Any]) -> vol.Schema:
-    """Monthly price cap (Tarcza) + the meters that make up PPE 1's import."""
-
-    def d(key):
-        return data.get(key, DEFAULTS.get(key))
-
+def _billing_meters_schema(data: dict[str, Any]) -> vol.Schema:
+    """The meters whose sum is PPE 1's grid import (for the price cap)."""
     return vol.Schema(
         {
-            vol.Required(
-                CONF_TARCZA_ENABLED, default=bool(d(CONF_TARCZA_ENABLED))
-            ): selector.BooleanSelector(),
-            vol.Optional(CONF_TARCZA_LIMIT_KWH, default=d(CONF_TARCZA_LIMIT_KWH)): _NUMBER(
-                _NUM(min=0, max=5, step=0.01, unit_of_measurement="PLN/kWh brutto", mode="box")
-            ),
-            vol.Optional(
-                CONF_TARCZA_VALID_FROM, default=d(CONF_TARCZA_VALID_FROM)
-            ): selector.DateSelector(),
-            vol.Optional(
-                CONF_TARCZA_VALID_TO, default=d(CONF_TARCZA_VALID_TO)
-            ): selector.DateSelector(),
             vol.Optional(
                 CONF_PPE1_IMPORT_SENSORS,
-                default=list(d(CONF_PPE1_IMPORT_SENSORS) or []),
+                default=list(data.get(CONF_PPE1_IMPORT_SENSORS) or []),
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor", multiple=True)
             ),
         }
+    )
+
+
+def _cap_terms_schema(defaults: dict[str, Any]) -> vol.Schema:
+    """One edition of the price cap: dates, limit and what the average counts."""
+
+    def default(key: str) -> Any:
+        value = defaults.get(key)
+        return vol.UNDEFINED if value is None else value
+
+    return vol.Schema(
+        {
+            vol.Required("name", default=default("name")): selector.TextSelector(),
+            vol.Required("valid_from", default=default("valid_from")): selector.DateSelector(),
+            vol.Required("valid_to", default=default("valid_to")): selector.DateSelector(),
+            vol.Required("limit_kwh", default=default("limit_kwh")): _NUMBER(
+                _NUM(min=0, max=10, step="any", unit_of_measurement="PLN/kWh", mode="box")
+            ),
+            vol.Required(
+                "limit_includes_vat", default=defaults.get("limit_includes_vat", True)
+            ): selector.BooleanSelector(),
+            vol.Required(
+                "handling_fee_included",
+                default=defaults.get("handling_fee_included", True),
+            ): selector.BooleanSelector(),
+        }
+    )
+
+
+def _cap_terms_label(terms: PriceCapTerms) -> str:
+    basis = "brutto" if terms.limit_includes_vat else "netto"
+    fee = "z opłatą za obsługę" if terms.handling_fee_included else "bez opłaty za obsługę"
+    return (
+        f"{terms.name or 'Tarcza'} — {terms.valid_from.isoformat()} … "
+        f"{terms.valid_to.isoformat()}, {terms.limit_kwh:.4g} PLN/kWh {basis}, {fee}"
     )
 
 
@@ -532,6 +554,8 @@ class PowerPilotOptionsFlow(OptionsFlow):
         self._loaded = False
         # Edit context for the tariff sub-flow.
         self._editing_tariff_id: str | None = None
+        # Edit context for the price-cap editions (``None`` = adding one).
+        self._editing_cap_terms_id: str | None = None
         self._editing_period_id: str | None = None
         self._editing_range_id: str | None = None
 
@@ -549,6 +573,13 @@ class PowerPilotOptionsFlow(OptionsFlow):
 
     def _save_tariffs(self, tariffs: list[Tariff]) -> None:
         self._data[CONF_TARIFFS] = [t.to_dict() for t in tariffs]
+
+    def _cap_terms(self) -> list[PriceCapTerms]:
+        return [PriceCapTerms.from_dict(t) for t in self._data.get(CONF_TARCZA_TERMS) or []]
+
+    def _save_cap_terms(self, terms: list[PriceCapTerms]) -> None:
+        ordered = sorted(terms, key=lambda t: t.valid_from)
+        self._data[CONF_TARCZA_TERMS] = [t.to_dict() for t in ordered]
 
     def _current_tariff(self) -> Tariff | None:
         if not self._editing_tariff_id:
@@ -722,12 +753,105 @@ class PowerPilotOptionsFlow(OptionsFlow):
             return await self.async_step_init()
         return self.async_show_form(step_id="prices", data_schema=_price_schema(self._data))
 
+    # ------------------------------------------------------- price cap (Tarcza)
+
     async def async_step_billing(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """The editions of the price cap + the PPE 1 import meters."""
+        self._ensure_loaded()
+        terms = self._cap_terms()
+
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "__back__":
+                return await self.async_step_init()
+            if action == "__add__":
+                self._editing_cap_terms_id = None
+                return await self.async_step_billing_terms()
+            if action == "__meters__":
+                return await self.async_step_billing_meters()
+            kind, _, terms_id = action.partition(":")
+            if kind == "edit":
+                self._editing_cap_terms_id = terms_id
+                return await self.async_step_billing_terms()
+            if kind == "del":
+                self._save_cap_terms([t for t in terms if t.id != terms_id])
+            return await self.async_step_billing()
+
+        meters = self._data.get(CONF_PPE1_IMPORT_SENSORS) or []
+        options: list[selector.SelectOptionDict] = [
+            selector.SelectOptionDict(value="__add__", label="➕ Dodaj Tarczę"),
+        ]
+        for t in terms:
+            options.append(
+                selector.SelectOptionDict(value=f"edit:{t.id}", label=f"✎ {_cap_terms_label(t)}")
+            )
+            options.append(
+                selector.SelectOptionDict(value=f"del:{t.id}", label=f"🗑 Usuń: {t.name or 'Tarcza'}")
+            )
+        options.append(
+            selector.SelectOptionDict(
+                value="__meters__", label=f"⚡ Liczniki importu PPE 1 ({len(meters)})"
+            )
+        )
+        options.append(selector.SelectOptionDict(value="__back__", label="← Powrót do menu"))
+        return self.async_show_form(
+            step_id="billing",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options, mode=selector.SelectSelectorMode.LIST
+                        )
+                    )
+                }
+            ),
+            description_placeholders={"count": str(len(terms))},
+        )
+
+    async def async_step_billing_terms(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Add or edit one edition of the price cap."""
+        self._ensure_loaded()
+        terms = self._cap_terms()
+        existing = next((t for t in terms if t.id == self._editing_cap_terms_id), None)
+
+        if user_input is not None:
+            candidate = PriceCapTerms.from_dict(
+                {**user_input, "id": existing.id if existing else None}
+            )
+            candidate.name = candidate.name.strip()
+            others = [t for t in terms if t.id != candidate.id]
+            problems = candidate.problems()
+            if any(candidate.overlaps(other) for other in others):
+                problems.append(CAP_TERMS_OVERLAP)
+            if problems:
+                return self.async_show_form(
+                    step_id="billing_terms",
+                    data_schema=_cap_terms_schema(user_input),
+                    errors={"base": problems[0]},
+                )
+            self._save_cap_terms([*others, candidate])
+            self._editing_cap_terms_id = None
+            return await self.async_step_billing()
+
+        return self.async_show_form(
+            step_id="billing_terms",
+            data_schema=_cap_terms_schema(existing.to_dict() if existing else {}),
+        )
+
+    async def async_step_billing_meters(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         self._ensure_loaded()
         if user_input is not None:
-            self._data.update(user_input)
-            return await self.async_step_init()
-        return self.async_show_form(step_id="billing", data_schema=_billing_schema(self._data))
+            self._data[CONF_PPE1_IMPORT_SENSORS] = list(
+                user_input.get(CONF_PPE1_IMPORT_SENSORS) or []
+            )
+            return await self.async_step_billing()
+        return self.async_show_form(
+            step_id="billing_meters", data_schema=_billing_meters_schema(self._data)
+        )
 
     async def async_step_calendars(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._ensure_loaded()

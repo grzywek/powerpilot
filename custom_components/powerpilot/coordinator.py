@@ -613,7 +613,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
         )
         if billing_reason is not None:
-            plan.billing = self._unavailable_outcomes(billing_reason)
+            plan.billing = self._unavailable_outcomes(billing_reason, forecast)
         elif billing_periods:
             self._billing_unavailable_logged = None
 
@@ -643,28 +643,41 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         """
         if not self.billing.enabled or not forecast.slots:
             return None, None, None
+        error = self.billing.config_error
+        if error is not None:
+            return None, None, error
         first = forecast.slots[0].start
         last = forecast.slots[-1].start
-        in_horizon = self.billing.active_on(
-            dt_util.as_local(first).date()
-        ) or self.billing.active_on(dt_util.as_local(last).date())
-        observed = self.billing.periods.get(PPE_1)
-        if observed is None:
-            if not in_horizon:
-                return None, None, None
-            return None, None, "; ".join(self.billing.reasons) or "brak rozliczenia PPE 1"
-        if not observed.complete:
-            return (
-                None,
-                None,
-                f"niekompletne dane od początku miesiąca "
-                f"({observed.hours_covered}/{observed.hours_expected} h): "
-                + "; ".join(observed.missing),
-            )
         periods = self.billing.periods_touching(PPE_1, first, last)
         if not periods:
             return None, None, None
-        uncapped = [slot for slot in forecast.slots if slot.cap_price_kwh is None]
+        # A capped running month (the one of the first slot, the running hour)
+        # is settled on what already happened in it, so its observed position
+        # must exist and cover every hour so far. A month that has not started
+        # yet needs nothing observed.
+        month_start, _ = month_bounds(first)
+        if periods[0].month_start == month_start:
+            observed = self.billing.periods.get(PPE_1)
+            if observed is None or observed.month_start != month_start:
+                return (
+                    None,
+                    None,
+                    "; ".join(self.billing.reasons) or "brak rozliczenia PPE 1",
+                )
+            if not observed.complete:
+                return (
+                    None,
+                    None,
+                    f"niekompletne dane od początku miesiąca "
+                    f"({observed.hours_covered}/{observed.hours_expected} h): "
+                    + "; ".join(observed.missing),
+                )
+        uncapped = [
+            slot
+            for slot in forecast.slots
+            if slot.cap_price_kwh is None
+            and any(p.month_start <= slot.start < p.month_end for p in periods)
+        ]
         if uncapped:
             return (
                 None,
@@ -717,12 +730,19 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             None,
         )
 
-    def _unavailable_outcomes(self, reason: str) -> list[BillingOutcome]:
-        """Observed-only outcome for a month whose cap could not be modelled."""
+    def _unavailable_outcomes(self, reason: str, forecast) -> list[BillingOutcome]:
+        """Observed-only outcome for a month whose cap could not be modelled.
+
+        The month shown is the observed one, else the first capped month the
+        horizon touches; with neither (unusable terms) there is no outcome and
+        the entities carry the billing module's reasons instead.
+        """
         observed = self.billing.periods.get(PPE_1)
-        if observed is None:
-            month_start, _ = month_bounds(dt_util.now())
-            observed = self.billing.empty_period(PPE_1, month_start)
+        if observed is None and forecast.slots:
+            touching = self.billing.periods_touching(
+                PPE_1, forecast.slots[0].start, forecast.slots[-1].start
+            )
+            observed = touching[0] if touching else None
         if reason != self._billing_unavailable_logged:
             self.log_warning(
                 "billing",
@@ -731,6 +751,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 extra={"reason": reason},
             )
             self._billing_unavailable_logged = reason
+        if observed is None:
+            return []
         return [
             BillingOutcome(
                 period=observed,

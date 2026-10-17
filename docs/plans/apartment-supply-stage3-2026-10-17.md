@@ -104,6 +104,54 @@ approaches it.
    with/without-cycles comparison and the reason when nothing is recommended;
    README; parent spec status.
 
+## Slice 2 model design (binding)
+
+Inputs per horizon hour `t`: the Victron-side demand without the apartment
+`F[t]`, the apartment's forecast `A[t]` (the apartment subtree's device
+profiles plus the climate module's forecast for climate sensors inside it),
+EV energy, prices, cap prices; both meters' billing periods (PPE 2 from
+slice 1); the actual supply and the last transition; availability.
+
+- **Forecast split.** While supply detection is active, consumption and climate
+  put the apartment subtree into a new `HourSlot.apartment_kwh` instead of the
+  slot's demand, in every state; the optimizer adds it back per its supply.
+  This replaces stage 2's exclusion of the subtree while on the second meter
+  (`victron_detached_devices`) with one path: with switching not modelled the
+  supply is fixed to the actual state (unknown → Victron, as stage 2 decided),
+  so plans stay what they are today.
+- **Variables.** `s[t] ∈ {0,1}` (apartment on PPE 2) for switch hours
+  `t < T_sw`; beyond `T_sw` (and in the month tail) `s` equals `s[T_sw − 1]`.
+  `s[0]` (the running hour) is fixed to the actual state; while the actual
+  state is unknown no `s` exists (no recommendation). Open indicator
+  `o[t] ≥ s[t] − s[t−1]`, `o ≥ 0`, cost = cycle threshold (zł) — exact under
+  minimisation. The battery's binary discharge switch `z[t]` gets the product
+  `w[t] = z[t]·s[t]` (McCormick: `w ≤ z`, `w ≤ s`, `w ≥ z + s − 1`, `w ≥ 0`;
+  exact because `s` is binary; also valid for the tail's continuous `z`).
+- **Flows.** Discharge delivered = `D0[t]·z[t] − (D0[t] − D1[t])·w[t]` with
+  `D0 = min(F + A, inverter·frac)`, `D1 = min(F, inverter·frac)`. PPE 1 import
+  `g1 = F + A − A·s + EV + Σc − discharge`; PPE 2 import `g2 = A·s` (an
+  expression, no column).
+- **Costs.** Distribution, excise and the hourly price are the same on both
+  meters, so `s` cancels out of every per-hour term; it acts only through the
+  discharge and the two monthly settlements: `C1/E1` sum `settled·g1`/`g1` as
+  today, `C2 = C2_mtd + Σ settled·A·s`, `E2 = E2_mtd + Σ A·s`, each month
+  `K2 = min(C2, L·E2)` with its own regime binary and big-M, next to PPE 1's.
+  A month without a Tarcza edition has `settled = 0` on both meters.
+- **Rules.** Switching at boundary `t` (between `t−1` and `t`) only when slot
+  `t`'s local start hour is outside the quiet window (config, default
+  00:00–09:00) and the user is available at that time (calendar trips, with
+  their travel margins, and a calendar read error make the user unavailable;
+  no events = present); elsewhere `s[t] = s[t−1]`. Minimum stay `H` hours on
+  either source (config, default 2): `s[t] − s[t−1] ≤ s[τ]` and
+  `s[t−1] − s[t] ≤ 1 − s[τ]` for `τ ∈ [t, t+H)`; the actual last transition
+  counts, so a switch back is impossible before `transition.at + H`.
+- **Switch horizon.** `T_sw` is an internal constant; slice 2 measures solve
+  time for `T_sw` = full horizon and 72 h on a recorded week plus month tail
+  and sets it.
+- **Outputs.** Each decision carries its planned supply; the plan carries both
+  meters' `BillingOutcome`s. Recommendations (marginal value per cycle,
+  entities, notifications) are slice 3.
+
 ## Backtest on October 1–17, 2026 (live data)
 
 Hourly apartment energy, the Victron's grid-to-loads energy split between the

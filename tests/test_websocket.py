@@ -513,3 +513,208 @@ async def test_ws_diagnostics(hass: HomeAssistant, hass_ws_client) -> None:
         for item in group["items"]:
             assert item["status"] in ("ok", "warn", "error", "skip")
             assert item["message"]
+
+
+# ------------------------------------------------- apartment supply (stage 3)
+
+APT = "sensor.apartment_energy"
+BOILER = "sensor.boiler_energy"
+
+
+async def _supply_series_coordinator(hass: HomeAssistant, monkeypatch):
+    """A coordinator whose chart has the apartment and a boiler as devices.
+
+    Detection is forced active with the apartment's subtree = the apartment;
+    the recorder readers are stubbed, the logged supply is given per hour.
+    """
+    from types import SimpleNamespace
+
+    from custom_components.powerpilot.const import CONF_DEVICE_SENSORS
+    from custom_components.powerpilot.modules.supply import SupplyModule
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+    coordinator.config[CONF_DEVICE_SENSORS] = [APT, BOILER]
+    monkeypatch.setattr(SupplyModule, "active", property(lambda self: True))
+    coordinator.supply.apartment_devices = lambda: {APT}
+    coordinator.consumption.devices = {
+        APT: SimpleNamespace(value=lambda wd, hr: 0.4),
+        BOILER: SimpleNamespace(value=lambda wd, hr: 0.25),
+    }
+
+    async def fake_range(sensor, start, end):
+        return {}
+
+    async def fake_partial(sensor, start, end):
+        return None
+
+    async def fake_active_minutes(sensor, start, end):
+        return {}
+
+    coordinator.consumption.async_range_kwh = fake_range
+    coordinator.consumption.async_partial_kwh = fake_partial
+    coordinator.consumption.async_active_minutes = fake_active_minutes
+    return coordinator
+
+
+async def test_series_device_forecast_follows_the_planned_supply(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """Planned meter-2 hours leave the apartment out of the device bars.
+
+    Stage 3, slice 4: the per-device forecast followed the ACTUAL supply, so a
+    planned meter-2 hour drew the apartment's bar while the Victron line
+    (``consumption_forecast``) left it out. Now both follow the plan's supply
+    of the hour, and the base plus the device bars add up to the line.
+    """
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.powerpilot.const import (
+        SUPPLY_HOUR_MIXED,
+        SUPPLY_METER_2,
+        SUPPLY_VICTRON,
+    )
+
+    coordinator = await _supply_series_coordinator(hass, monkeypatch)
+    now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    prev_hour = now - timedelta(hours=1)
+    before = now - timedelta(hours=2)
+
+    async def logged(start, end):
+        # On meter 2 the hour before last, switched back during the last one,
+        # on the Victron since (the actual state now).
+        states = {before: SUPPLY_METER_2, prev_hour: SUPPLY_HOUR_MIXED, now: SUPPLY_VICTRON}
+        return {h: s for h, s in states.items() if start <= h < end}
+
+    coordinator.supply.async_past_hour_states = logged
+    for hour in (before, prev_hour):
+        coordinator.snapshots.add(
+            {"run_at": hour.isoformat(), "start": hour.isoformat(), "n": 1, "soc": [50.0]}
+        )
+
+    plan = coordinator.data
+    assert len(plan.decisions) >= 3
+    for index, supply in ((0, SUPPLY_VICTRON), (1, SUPPLY_METER_2), (2, SUPPLY_VICTRON)):
+        plan.decisions[index].supply = supply
+        slot = plan.forecast.slots[index]
+        slot.base_consumption_kwh, slot.extra_load_kwh, slot.apartment_kwh = 0.3, 0.25, 0.4
+
+    result = await coordinator.get_series(past_hours=2)
+    rows = {h["start"]: h for h in result["hours"]}
+
+    on_meter_2 = rows[plan.decisions[1].start.isoformat()]
+    on_victron = rows[plan.decisions[2].start.isoformat()]
+    assert on_meter_2["supply_planned"] == SUPPLY_METER_2
+    assert on_meter_2["devices_forecast"] == {APT: None, BOILER: 0.25}
+    assert on_victron["supply_planned"] == SUPPLY_VICTRON
+    assert on_victron["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
+    for row in (on_meter_2, on_victron):
+        bars = row["base_consumption_forecast"] + sum(
+            v for v in row["devices_forecast"].values() if v is not None
+        )
+        assert abs(bars - row["consumption_forecast"]) < 1e-9
+
+    # Past hours: the logged supply, for the shading and the forecast alike.
+    past_meter_2 = rows[before.isoformat()]
+    assert past_meter_2["supply_actual"] == SUPPLY_METER_2
+    assert past_meter_2["devices_forecast"] == {APT: None, BOILER: 0.25}
+    past_mixed = rows[prev_hour.isoformat()]
+    assert past_mixed["supply_actual"] == SUPPLY_HOUR_MIXED
+    assert past_mixed["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
+    assert "supply_planned" not in past_mixed
+
+    current = next(h for h in result["hours"] if h.get("partial"))
+    assert current["supply_actual"] == SUPPLY_VICTRON
+    assert current["supply_planned"] == SUPPLY_VICTRON
+    assert current["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
+
+
+async def test_series_without_detection_carries_no_supply(hass: HomeAssistant) -> None:
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+    result = await coordinator.get_series(past_hours=2)
+    past = [h for h in result["hours"] if h["is_past"] and not h.get("partial")]
+    future = [h for h in result["hours"] if not h["is_past"]]
+    assert past and future
+    assert all(h["supply_actual"] is None for h in past)
+    assert all(h["supply_planned"] is None for h in future)
+
+
+async def test_ws_status_carries_the_recommendation_rules_and_both_meters(
+    hass: HomeAssistant, hass_ws_client
+) -> None:
+    """The panel's card reads the recommendation and the Tarcza from the status."""
+    from datetime import timedelta
+
+    from custom_components.powerpilot.const import PPE_1, PPE_2, SUPPLY_SOURCE_LIVE
+    from custom_components.powerpilot.models import SupplyTransition
+    from custom_components.powerpilot.supply_cycles import REASON_NOT_ACTIVE, settle_cycles
+    from tests.test_optimizer_supply import H0, _period, _planning
+    from tests.test_supply_cycles import _weak
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+    client = await hass_ws_client(hass)
+
+    await client.send_json({"id": 1, "type": "powerpilot/status"})
+    msg = await client.receive_json()
+    assert msg["success"]
+    supply = msg["result"]["supply"]
+    assert supply["recommendation"]["reason"] == REASON_NOT_ACTIVE
+    assert supply["recommendation"]["cycles"] == []
+    assert supply["rules"] == {
+        "recommendations": False,
+        "cycle_threshold_pln": 2.0,
+        "min_stay_hours": 2,
+        "quiet_start_hour": 0,
+        "quiet_end_hour": 9,
+    }
+    tarcza = msg["result"]["tarcza"]
+    for ppe in (PPE_1, PPE_2):
+        assert tarcza[ppe] == {"observed": None, "forecast": None, "reasons": []}
+
+    # A modelled plan with one proposed cycle; the apartment on the Victron.
+    planning = _planning()
+    plan = settle_cycles(_weak(), planning)
+    [cycle] = plan.supply_cycles
+    coordinator.data = plan
+    coordinator.supply_planning = planning
+    coordinator.supply.transitions = [
+        SupplyTransition(
+            state="victron",
+            at=planning.last_transition_at,
+            not_before=None,
+            apartment_w=1000.0,
+            victron_net_w=1050.0,
+            source=SUPPLY_SOURCE_LIVE,
+        )
+    ]
+    observed = _period(PPE_2, 12.0, 6.0)
+    coordinator.billing.periods = {PPE_2: observed}
+
+    await client.send_json({"id": 2, "type": "powerpilot/status"})
+    msg = await client.receive_json()
+    assert msg["success"]
+    rec = msg["result"]["supply"]["recommendation"]
+    assert rec["reason"] is None
+    assert rec["actual"] == "victron"
+    assert rec["recommended"] == "meter_2"
+    assert rec["switch_required"] is True
+    assert rec["next_switch"] == (H0 + timedelta(hours=1)).isoformat()
+    assert rec["next_target"] == "meter_2"
+    assert rec["next_cycle_id"] == cycle.id
+    assert rec["next_return"] is None  # the cycle lasts past the horizon
+    assert rec["cycle"] == cycle.as_dict()
+    assert rec["cycles"] == [cycle.as_dict()]
+    assert rec["cycles"][0]["saving_pln"] == round(cycle.saving_pln, 2)
+    assert rec["notice_message"].startswith("Przełącz mieszkanie na licznik 2")
+
+    tarcza = msg["result"]["tarcza"]
+    assert tarcza[PPE_2]["observed"] == observed.as_dict()
+    assert tarcza[PPE_1]["observed"] is None
+    ppe1 = next(o for o in plan.billing if o.period.ppe == PPE_1)
+    assert tarcza[PPE_1]["forecast"] == ppe1.as_dict()
+    for key in ("average_kwh", "discount_pln", "cap_binds", "available"):
+        assert key in tarcza[PPE_1]["forecast"]

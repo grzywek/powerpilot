@@ -24,6 +24,7 @@ from custom_components.powerpilot.const import (
     DEFAULTS,
     DOMAIN,
     SUPPLY_HOUR_MIXED,
+    SUPPLY_HOUR_UNKNOWN,
     SUPPLY_METER_2,
     SUPPLY_SOURCE_LIVE,
     SUPPLY_VICTRON,
@@ -235,9 +236,6 @@ def test_the_apartment_subtree_is_forecast_apart_in_every_state() -> None:
         assert slot.extra_load_kwh == 0.25, state  # the boiler only
         assert slot.apartment_kwh == 1.5, state
         assert module.device_value(HOUR.weekday(), HOUR.hour) == 0.25, state
-        # The chart's per-device forecast still follows the actual state.
-        detached = module.coordinator.supply.victron_detached_devices()
-        assert detached == ({APARTMENT, WASHER} if state == SUPPLY_METER_2 else set())
 
 
 def test_unknown_supply_adds_a_plan_reminder() -> None:
@@ -255,8 +253,8 @@ def test_meter_2_without_an_apartment_meter_detaches_nothing() -> None:
     config = {k: v for k, v in SUPPLY_CFG.items() if k != CONF_APARTMENT_METER}
     module = _module(config, {APARTMENT: 1.0, BOILER: 0.25})
     _confirm(module, SUPPLY_METER_2)
-    assert module.coordinator.supply.victron_detached_devices() == set()
     assert module.coordinator.supply.apartment_devices() == set()
+    assert _forecast(module, APARTMENT, SUPPLY_METER_2) == 1.0
     assert module.device_value(HOUR.weekday(), HOUR.hour) == 1.25
     module.base = _acc(1.1, observed=True)
     forecast = Forecast(slots=[HourSlot(start=HOUR)])
@@ -380,7 +378,7 @@ async def test_turning_supply_detection_on_relearns_the_profiles() -> None:
     assert module.base.observed_days == 1  # relearned at once, not tomorrow
 
 
-def _forecast(module: ConsumptionModule, entity_id: str) -> float | None:
+def _forecast(module: ConsumptionModule, entity_id: str, supply: str | None) -> float | None:
     """The chart's per-device forecast, as the coordinator computes it."""
     from custom_components.powerpilot.coordinator import PowerPilotCoordinator
 
@@ -389,19 +387,27 @@ def _forecast(module: ConsumptionModule, entity_id: str) -> float | None:
         consumption=module,
         supply=module.coordinator.supply,
     )
-    return PowerPilotCoordinator._device_forecast_kwh(stub, entity_id, HOUR)
+    return PowerPilotCoordinator._device_forecast_kwh(stub, entity_id, HOUR, supply)
 
 
-def test_chart_forecast_leaves_out_the_subtree_on_meter_2() -> None:
+def test_chart_forecast_leaves_out_the_subtree_in_a_meter_2_hour() -> None:
+    """The hour's supply decides, not the actual state (stage 3, slice 4).
+
+    A planned meter-2 hour while the apartment is still on the Victron leaves
+    the subtree out, a planned Victron hour while it is on meter 2 keeps it —
+    the device bars then match the Victron demand the plan carries. Mixed and
+    unknown hours keep it, as ``HourSlot.victron_consumption_kwh`` does.
+    """
     module = _module(SUPPLY_CFG, {APARTMENT: 1.0, WASHER: 0.5, BOILER: 0.25})
-    _confirm(module, SUPPLY_VICTRON)
-    assert _forecast(module, APARTMENT) == 1.0
-    assert _forecast(module, WASHER) == 0.5
-    _confirm(module, SUPPLY_METER_2)
-    # The apartment and the washer inside it are not on the Victron; the boiler is.
-    assert _forecast(module, APARTMENT) is None
-    assert _forecast(module, WASHER) is None
-    assert _forecast(module, BOILER) == 0.25
+    for actual in (SUPPLY_VICTRON, SUPPLY_METER_2):
+        _confirm(module, actual)
+        # The apartment and the washer inside it are not on the Victron; the boiler is.
+        assert _forecast(module, APARTMENT, SUPPLY_METER_2) is None, actual
+        assert _forecast(module, WASHER, SUPPLY_METER_2) is None, actual
+        assert _forecast(module, BOILER, SUPPLY_METER_2) == 0.25, actual
+        for supply in (SUPPLY_VICTRON, SUPPLY_HOUR_MIXED, SUPPLY_HOUR_UNKNOWN, None):
+            assert _forecast(module, APARTMENT, supply) == 1.0, (actual, supply)
+            assert _forecast(module, WASHER, supply) == 0.5, (actual, supply)
 
 
 def test_supply_status_lists_the_log_tail_and_the_configuration() -> None:

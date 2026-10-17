@@ -627,16 +627,6 @@ class SupplyModule(PowerPilotModule):
             self.apartment_meter,
         )
 
-    def victron_detached_devices(self) -> set[str]:
-        """Metered devices the Victron does not feed now: the apartment's subtree on meter 2.
-
-        Only the chart's per-device forecast reads this (it follows the
-        confirmed state); empty on the Victron and while the state is unknown.
-        """
-        if self.state != SUPPLY_METER_2:
-            return set()
-        return self.apartment_devices()
-
     def collect_reminders(self) -> list[str]:
         if self.active and self.state is None:
             return [

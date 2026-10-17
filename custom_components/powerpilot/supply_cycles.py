@@ -202,6 +202,30 @@ class SupplyRecommendation:
     notice_title: str | None = None
     notice_message: str | None = None
 
+    def as_dict(self) -> dict[str, Any]:
+        """The recommendation for the panel (the hourly supply rides on the series)."""
+        next_cycle = self.next_cycle
+        return {
+            "reason": self.reason,
+            "actual": self.actual,
+            "available": self.available,
+            "unavailable_reason": self.unavailable_reason,
+            "recommended": self.recommended,
+            "switch_required": self.switch_required,
+            "next_switch": self.next_switch.isoformat() if self.next_switch else None,
+            "next_target": self.next_target,
+            "next_cycle_id": next_cycle.id if next_cycle else None,
+            "next_return": (
+                next_cycle.planned_return.isoformat()
+                if next_cycle and next_cycle.planned_return
+                else None
+            ),
+            "cycle": self.cycle.as_dict() if self.cycle else None,
+            "cycles": [c.as_dict() for c in self.cycles],
+            # The switch notification's text while a switch is required.
+            "notice_message": self.notice_message,
+        }
+
 
 def _clock(moment: datetime, reference: datetime) -> str:
     local = dt_util.as_local(moment)

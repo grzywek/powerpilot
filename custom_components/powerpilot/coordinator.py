@@ -70,6 +70,7 @@ from .const import (
     PTYPE_CODE,
     PTYPE_CODE_INV,
     STORAGE_VERSION_SNAPSHOTS,
+    SUPPLY_METER_2,
     InverterMode,
 )
 from . import pricing
@@ -2133,15 +2134,20 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             boundary += timedelta(hours=1)
         return out
 
-    def _device_forecast_kwh(self, eid: str, hour: datetime) -> float | None:
-        """Per-device forecast for the chart series.
+    def _device_forecast_kwh(
+        self, eid: str, hour: datetime, supply: str | None
+    ) -> float | None:
+        """Per-device forecast for the chart series, with the apartment on ``supply``.
 
         The climate-owned devices read their temperature models (matching what
         the optimizer plans); every other device uses the learned weekly average.
-        A device the Victron does not feed (the apartment's subtree on meter 2)
-        has none, matching the Victron demand the optimizer plans.
+        ``supply`` is the hour's supply the forecast is drawn under — the
+        plan's decision for a planned hour, the logged state for a past one —
+        with the same rule as ``HourSlot.victron_consumption_kwh``: on
+        ``meter_2`` the apartment's subtree is not Victron demand and has no
+        forecast here; in any other state it does.
         """
-        if eid in self.supply.victron_detached_devices():
+        if supply == SUPPLY_METER_2 and eid in self.supply.apartment_devices():
             return None
         if self.climate.handles(eid):
             value = self.climate.forecast_kwh(eid, hour)
@@ -2264,6 +2270,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # own energy under the apartment's real supply: on meter 2 the
         # apartment is not part of the Victron reading, and an hour of mixed or
         # unknown supply (or with a meter gap) has no realized base.
+        # The same logged states place the past hours' device forecasts and
+        # are the actual supply the chart shades (``supply_actual``).
+        past_supply = await self.supply.async_past_hour_states(
+            past_start - timedelta(hours=1), past_end
+        )
         base_real_series: dict = {}
         if main_sensor:
             parents = self.config.get(CONF_SENSOR_PARENTS) or {}
@@ -2273,9 +2284,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 parents,
                 {main_sensor: main_real, **device_real},
                 apartment=self.supply.apartment_meter or None,
-                supply=await self.supply.async_past_hour_states(
-                    past_start - timedelta(hours=1), past_end
-                ),
+                supply=past_supply,
             ).series
             device_real = {eid: exclusive_real.get(eid, {}) for eid in device_ids}
             base_real_series = exclusive_real.get(main_sensor, {})
@@ -2560,8 +2569,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         while h < past_end:
             wd, hr = h.weekday(), h.hour
             base_fc = self.consumption.base_value(wd, hr) if learned else None
+            # A past hour's forecast is compared with what happened, so it is
+            # drawn under the supply the hour actually had.
+            h_supply = past_supply.get(h)
             dev_forecast = {
-                eid: self._device_forecast_kwh(eid, h) for eid in device_ids
+                eid: self._device_forecast_kwh(eid, h, h_supply) for eid in device_ids
             }
             dev_real_h = {
                 eid: round(device_real[eid][h], 3) if h in device_real.get(eid, {}) else None
@@ -2730,6 +2742,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "fixed_cost": self.tariff.fixed_hourly_for(h),
                     "devices_real": dev_real_h,
                     "devices_forecast": dev_forecast if fc_origin is not None else None,
+                    # The apartment's logged supply this hour (``victron`` /
+                    # ``meter_2`` / ``mixed`` / ``unknown``); ``None`` without
+                    # supply detection.
+                    "supply_actual": h_supply if self.supply.active else None,
                 }
             )
             if h in soc_real:
@@ -2788,8 +2804,25 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 )
             live_soc = self._read_soc()
             wd, hr = now.weekday(), now.hour
+            # The live plan's decision for this hour (slot 0, planned on the
+            # actual supply), and the hour's logged supply so far.
+            cur_dec = cur_slot = None
+            if self.data and self.data.decisions:
+                for _sl, _dc in zip(self.data.forecast.slots, self.data.decisions):
+                    if _sl.start == now:
+                        cur_slot, cur_dec = _sl, _dc
+                        break
+            cur_supply_states = await self.supply.async_past_hour_states(
+                now, now + timedelta(hours=1)
+            )
+            cur_supply = cur_supply_states.get(now)
+            # The whole-hour forecast is the plan's, so its devices follow the
+            # plan's supply; without a plan decision for the hour, the logged one.
             dev_forecast = {
-                eid: self._device_forecast_kwh(eid, now) for eid in device_ids
+                eid: self._device_forecast_kwh(
+                    eid, now, cur_dec.supply if cur_dec is not None else cur_supply
+                )
+                for eid in device_ids
             }
             buy_price = self.prices.price_at(now)
             dist_price = self.tariff.distribution_for(now)
@@ -2818,9 +2851,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     self.config.get(CONF_SENSOR_PARENTS) or {},
                     partial,
                     apartment=self.supply.apartment_meter or None,
-                    supply=await self.supply.async_past_hour_states(
-                        now, now + timedelta(hours=1)
-                    ),
+                    supply=cur_supply_states,
                 ).series
                 cur_devices = {
                     eid: exclusive_now.get(eid, {}).get(now) for eid in device_ids
@@ -2843,14 +2874,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             )
             # Whole-hour forecast for the current hour, from today's plan's
             # current-hour decision.
-            cur_dec = cur_slot = None
             forecast_side = None
             cur_fc_origin: str | None = None
-            if self.data and self.data.decisions:
-                for _sl, _dc in zip(self.data.forecast.slots, self.data.decisions):
-                    if _sl.start == now:
-                        cur_slot, cur_dec = _sl, _dc
-                        break
             if pin_requested:
                 # Keep the current hour on the SAME pinned plan as the rest of
                 # the pinned prognoza, so the dashed line has no one-hour blip
@@ -2997,6 +3022,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         for eid, v in cur_devices.items()
                     },
                     "devices_forecast": dev_forecast,
+                    # Logged supply of the hour so far, and the plan's for it.
+                    "supply_actual": cur_supply if self.supply.active else None,
+                    "supply_planned": cur_dec.supply if cur_dec is not None else None,
                 }
             )
             emitted_current = True
@@ -3050,8 +3078,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if slot.start < forecast_cutoff:
                     # Plan slot already covered by past / current-partial → skip.
                     continue
+                # Planned hours draw the apartment where the plan puts it, so
+                # the device bars agree with ``consumption_forecast`` below.
                 dev_forecast = {
-                    eid: self._device_forecast_kwh(eid, slot.start)
+                    eid: self._device_forecast_kwh(eid, slot.start, decision.supply)
                     for eid in device_ids
                 }
                 if pin_requested:
@@ -3140,6 +3170,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "fixed_cost": round(decision.fixed_cost, 4),
                         "devices_real": {eid: None for eid in device_ids},
                         "devices_forecast": dev_forecast,
+                        # The live plan's supply of the apartment this hour
+                        # (also at a pinned prognoza: vintages do not record it).
+                        "supply_planned": decision.supply,
                     }
                 )
                 prev_soc = decision.battery_soc
@@ -3715,5 +3748,37 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     round(self.data.supply_resolve_seconds, 3) if self.data else None
                 ),
                 "plan_dropped_cycles": self.data.supply_dropped if self.data else [],
+                # What the recommendation entities show, and the switching
+                # rules the plan is held to (the options behind the numbers).
+                "recommendation": self.supply_recommendation().as_dict(),
+                "rules": {
+                    "recommendations": bool(self.config[CONF_SUPPLY_RECOMMENDATIONS]),
+                    "cycle_threshold_pln": float(
+                        self.config[CONF_SUPPLY_CYCLE_THRESHOLD_PLN]
+                    ),
+                    "min_stay_hours": int(self.config[CONF_SUPPLY_MIN_STAY_HOURS]),
+                    "quiet_start_hour": int(self.config[CONF_SUPPLY_QUIET_START_HOUR]),
+                    "quiet_end_hour": int(self.config[CONF_SUPPLY_QUIET_END_HOUR]),
+                },
             },
+            # Both meters' month under the price cap, as the Tarcza entities
+            # show it: observed so far, the plan's month forecast, and why
+            # either is missing.
+            "tarcza": {
+                "enabled": self.billing.enabled,
+                **{ppe: self._tarcza_status(ppe) for ppe in (PPE_1, PPE_2)},
+            },
+        }
+
+    def _tarcza_status(self, ppe: str) -> dict:
+        """One PPE's observed month and the plan's forecast of it."""
+        period = self.billing.periods.get(ppe)
+        outcome = next(
+            (o for o in (self.data.billing if self.data else []) if o.period.ppe == ppe),
+            None,
+        )
+        return {
+            "observed": period.as_dict() if period is not None else None,
+            "forecast": outcome.as_dict() if outcome is not None else None,
+            "reasons": self.billing.reasons_for(ppe),
         }

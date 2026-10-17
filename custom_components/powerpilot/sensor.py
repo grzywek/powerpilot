@@ -187,10 +187,10 @@ class PlanSensor(PowerPilotEntity, SensorEntity):
                     "start": s.start.isoformat(),
                     "buy_price": s.buy_price,
                     "price_confirmed": s.price_confirmed,
-                    "consumption_kwh": round(s.total_consumption_kwh, 3),
+                    "consumption_kwh": round(self.plan.victron_consumption_kwh(i), 3),
                     "temperature": s.temperature,
                 }
-                for s in self.plan.forecast.slots
+                for i, s in enumerate(self.plan.forecast.slots)
             ],
         }
 

@@ -216,27 +216,28 @@ def _confirm(module: ConsumptionModule, state: str | None) -> SupplyModule:
     return supply
 
 
-def test_demand_on_meter_2_leaves_out_the_apartment_subtree() -> None:
-    """The Victron does not carry the apartment, its washer included, on PPE 2."""
-    module = _module(SUPPLY_CFG, {APARTMENT: 1.0, WASHER: 0.5, BOILER: 0.25})
-    module.base = _acc(1.1, observed=True)
-    _confirm(module, SUPPLY_METER_2)
-    forecast = Forecast(slots=[HourSlot(start=HOUR)])
+def test_the_apartment_subtree_is_forecast_apart_in_every_state() -> None:
+    """Stage 3: the apartment, its washer included, goes to ``apartment_kwh``.
 
-    module.contribute(forecast)
-
-    assert forecast.slots[0].base_consumption_kwh == 1.1
-    assert forecast.slots[0].extra_load_kwh == 0.25  # the boiler only
-
-
-def test_demand_on_the_victron_or_unknown_keeps_the_apartment() -> None:
-    for state in (SUPPLY_VICTRON, None):
+    In every state — the optimizer places it on the Victron or on meter 2 per
+    the hour's supply, so the Victron demand never carries it here.
+    """
+    for state in (SUPPLY_METER_2, SUPPLY_VICTRON, None):
         module = _module(SUPPLY_CFG, {APARTMENT: 1.0, WASHER: 0.5, BOILER: 0.25})
         module.base = _acc(1.1, observed=True)
         _confirm(module, state)
         forecast = Forecast(slots=[HourSlot(start=HOUR)])
+
         module.contribute(forecast)
-        assert forecast.slots[0].extra_load_kwh == 1.75, state
+
+        slot = forecast.slots[0]
+        assert slot.base_consumption_kwh == 1.1, state
+        assert slot.extra_load_kwh == 0.25, state  # the boiler only
+        assert slot.apartment_kwh == 1.5, state
+        assert module.device_value(HOUR.weekday(), HOUR.hour) == 0.25, state
+        # The chart's per-device forecast still follows the actual state.
+        detached = module.coordinator.supply.victron_detached_devices()
+        assert detached == ({APARTMENT, WASHER} if state == SUPPLY_METER_2 else set())
 
 
 def test_unknown_supply_adds_a_plan_reminder() -> None:
@@ -255,7 +256,13 @@ def test_meter_2_without_an_apartment_meter_detaches_nothing() -> None:
     module = _module(config, {APARTMENT: 1.0, BOILER: 0.25})
     _confirm(module, SUPPLY_METER_2)
     assert module.coordinator.supply.victron_detached_devices() == set()
+    assert module.coordinator.supply.apartment_devices() == set()
     assert module.device_value(HOUR.weekday(), HOUR.hour) == 1.25
+    module.base = _acc(1.1, observed=True)
+    forecast = Forecast(slots=[HourSlot(start=HOUR)])
+    module.contribute(forecast)
+    assert forecast.slots[0].apartment_kwh == 0.0
+    assert forecast.slots[0].extra_load_kwh == 1.25
 
 
 def test_topology_fingerprint_includes_the_supply_configuration() -> None:

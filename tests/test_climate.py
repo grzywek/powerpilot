@@ -234,22 +234,15 @@ def _supplied(state: str | None) -> tuple[ClimateModule, datetime]:
     return module, hour
 
 
-def test_climate_forecast_on_meter_2_leaves_out_the_apartments_climate_loads() -> None:
-    from custom_components.powerpilot.const import SUPPLY_METER_2
+def test_climate_loads_inside_the_apartment_are_forecast_apart_in_every_state() -> None:
+    """Stage 3: the AC inside the apartment goes to ``apartment_kwh``, the heat pump stays."""
+    from custom_components.powerpilot.const import SUPPLY_METER_2, SUPPLY_VICTRON
     from custom_components.powerpilot.models import Forecast, HourSlot
 
-    module, hour = _supplied(SUPPLY_METER_2)
-    forecast = Forecast(slots=[HourSlot(start=hour)])
-    module.contribute(forecast)
-    assert forecast.slots[0].extra_load_kwh == 0.5  # the heat pump only
-
-
-def test_climate_forecast_on_the_victron_or_unknown_keeps_them() -> None:
-    from custom_components.powerpilot.const import SUPPLY_VICTRON
-    from custom_components.powerpilot.models import Forecast, HourSlot
-
-    for state in (SUPPLY_VICTRON, None):
+    for state in (SUPPLY_METER_2, SUPPLY_VICTRON, None):
         module, hour = _supplied(state)
         forecast = Forecast(slots=[HourSlot(start=hour)])
         module.contribute(forecast)
-        assert forecast.slots[0].extra_load_kwh == 1.5, state
+        assert forecast.slots[0].extra_load_kwh == 0.5, state  # the heat pump
+        assert forecast.slots[0].apartment_kwh == 1.0, state  # the AC
+        assert "climate" in forecast.slots[0].tags

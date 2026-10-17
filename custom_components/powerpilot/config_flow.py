@@ -71,6 +71,10 @@ from .const import (
     CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
     CONF_SUPPLY_CONFIRM_SAMPLES,
+    CONF_SUPPLY_CYCLE_THRESHOLD_PLN,
+    CONF_SUPPLY_MIN_STAY_HOURS,
+    CONF_SUPPLY_QUIET_END_HOUR,
+    CONF_SUPPLY_QUIET_START_HOUR,
     CONF_SUPPLY_VICTRON_SHARE,
     CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_TARCZA_TERMS,
@@ -298,6 +302,19 @@ def _supply_schema(
             vol.Required(
                 CONF_SUPPLY_CONFIRM_SAMPLES, default=d(CONF_SUPPLY_CONFIRM_SAMPLES)
             ): _NUMBER(_NUM(min=1, max=20, step=1, mode="box")),
+            # Switching rules of the plan (stage 3).
+            vol.Required(
+                CONF_SUPPLY_CYCLE_THRESHOLD_PLN, default=d(CONF_SUPPLY_CYCLE_THRESHOLD_PLN)
+            ): _NUMBER(_NUM(min=0, max=100, step=0.5, unit_of_measurement="zł", mode="box")),
+            vol.Required(
+                CONF_SUPPLY_MIN_STAY_HOURS, default=d(CONF_SUPPLY_MIN_STAY_HOURS)
+            ): _NUMBER(_NUM(min=1, max=72, step=1, unit_of_measurement="h", mode="box")),
+            vol.Required(
+                CONF_SUPPLY_QUIET_START_HOUR, default=d(CONF_SUPPLY_QUIET_START_HOUR)
+            ): _NUMBER(_NUM(min=0, max=23, step=1, mode="box")),
+            vol.Required(
+                CONF_SUPPLY_QUIET_END_HOUR, default=d(CONF_SUPPLY_QUIET_END_HOUR)
+            ): _NUMBER(_NUM(min=0, max=23, step=1, mode="box")),
         }
     )
     return vol.Schema(fields)
@@ -975,6 +992,15 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 self._data[CONF_SUPPLY_CONFIRM_SAMPLES] = int(
                     user_input[CONF_SUPPLY_CONFIRM_SAMPLES]
                 )
+                self._data[CONF_SUPPLY_CYCLE_THRESHOLD_PLN] = float(
+                    user_input[CONF_SUPPLY_CYCLE_THRESHOLD_PLN]
+                )
+                for key in (
+                    CONF_SUPPLY_MIN_STAY_HOURS,
+                    CONF_SUPPLY_QUIET_START_HOUR,
+                    CONF_SUPPLY_QUIET_END_HOUR,
+                ):
+                    self._data[key] = int(user_input[key])
                 return await self.async_step_init()
         return self.async_show_form(
             step_id="supply",

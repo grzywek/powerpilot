@@ -51,11 +51,16 @@ from .const import (
     CONF_MIN_SOC,
     CONF_PHASES,
     CONF_SOC_SENSOR,
+    CONF_SUPPLY_CYCLE_THRESHOLD_PLN,
+    CONF_SUPPLY_MIN_STAY_HOURS,
+    CONF_SUPPLY_QUIET_END_HOUR,
+    CONF_SUPPLY_QUIET_START_HOUR,
     DEFAULTS,
     DOMAIN,
     MODE_CODE,
     MODE_CODE_INV,
     PPE_1,
+    PPE_2,
     PRICE_ROUNDING_PER_BUCKET,
     PRICE_TYPE_CERTAIN,
     PRICE_TYPE_ESTIMATED,
@@ -80,6 +85,7 @@ from .models import (
     ESSRequest,
     MonthTail,
     Plan,
+    SupplyPlanning,
     tariff_for_day,
 )
 from .modules.billing import BillingModule, month_bounds
@@ -159,9 +165,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # with its cause.
         self._pending_triggers: list[str] = []
         self._trigger_roles: dict[str, str] = {}
-        # Last reason the monthly price cap could not be modelled — logged once
-        # per distinct reason instead of on every refresh.
-        self._billing_unavailable_logged: str | None = None
+        # Last reason each PPE's monthly price cap could not be modelled, and
+        # why apartment switches were not planned — logged once per distinct
+        # reason instead of on every refresh.
+        self._billing_unavailable_logged: dict[str, str] = {}
+        self._supply_reason_logged: str | None = None
 
         super().__init__(
             hass,
@@ -607,6 +615,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         billing_periods, tail, billing_reason = await self._billing_inputs(
             forecast, ev_request
         )
+        # Where the apartment may be planned (Victron / meter 2) and PPE 2's
+        # months, while supply detection is active.
+        supply_planning, ppe2_reason = self._supply_inputs(
+            forecast, billing_periods, billing_reason
+        )
         plan = await self.hass.async_add_executor_job(
             partial(
                 optimizer.optimize,
@@ -617,12 +630,18 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 ess_request=ess_request,
                 billing=billing_periods,
                 tail=tail,
+                supply=supply_planning,
             )
         )
         if billing_reason is not None:
-            plan.billing = self._unavailable_outcomes(billing_reason, forecast)
+            plan.billing = self._unavailable_outcomes(billing_reason, forecast, PPE_1)
         elif billing_periods:
-            self._billing_unavailable_logged = None
+            self._billing_unavailable_logged.pop(PPE_1, None)
+        if ppe2_reason is not None:
+            plan.billing += self._unavailable_outcomes(ppe2_reason, forecast, PPE_2)
+        else:
+            self._billing_unavailable_logged.pop(PPE_2, None)
+        self._note_supply_reason(plan.supply_reason)
 
         current = self.current_decision(plan)
         if current is not None:
@@ -662,23 +681,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # is settled on what already happened in it, so its observed position
         # must exist and cover every hour so far. A month that has not started
         # yet needs nothing observed.
-        month_start, _ = month_bounds(first)
-        if periods[0].month_start == month_start:
-            observed = self.billing.periods.get(PPE_1)
-            if observed is None or observed.month_start != month_start:
-                return (
-                    None,
-                    None,
-                    "; ".join(self.billing.reasons) or "brak rozliczenia PPE 1",
-                )
-            if not observed.complete:
-                return (
-                    None,
-                    None,
-                    f"niekompletne dane od początku miesiąca "
-                    f"({observed.hours_covered}/{observed.hours_expected} h): "
-                    + "; ".join(observed.missing),
-                )
+        problem = self._observed_month_problem(PPE_1, periods, first)
+        if problem is not None:
+            return None, None, problem
         uncapped = [
             slot
             for slot in forecast.slots
@@ -737,27 +742,130 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             None,
         )
 
-    def _unavailable_outcomes(self, reason: str, forecast) -> list[BillingOutcome]:
-        """Observed-only outcome for a month whose cap could not be modelled.
+    def _observed_month_problem(
+        self, ppe: str, periods: list[BillingPeriod], first
+    ) -> str | None:
+        """Why ``ppe``'s running month cannot be settled, ``None`` when it can.
+
+        A capped running month (the one of the first slot, the running hour)
+        is settled on what already happened in it, so its observed position
+        must exist and cover every hour so far. A month that has not started
+        yet needs nothing observed.
+        """
+        month_start, _ = month_bounds(first)
+        if not periods or periods[0].month_start != month_start:
+            return None
+        observed = self.billing.periods.get(ppe)
+        if observed is None or observed.month_start != month_start:
+            label = "PPE 1" if ppe == PPE_1 else "PPE 2"
+            return "; ".join(self.billing.reasons_for(ppe)) or f"brak rozliczenia {label}"
+        if not observed.complete:
+            return (
+                f"niekompletne dane od początku miesiąca "
+                f"({observed.hours_covered}/{observed.hours_expected} h): "
+                + "; ".join(observed.missing)
+            )
+        return None
+
+    def _supply_inputs(
+        self, forecast, billing_periods, billing_reason
+    ) -> tuple[SupplyPlanning | None, str | None]:
+        """Where the optimizer may place the apartment, and why PPE 2 is not settled.
+
+        Returns ``(planning, ppe2_reason)``; ``planning`` is ``None`` without
+        supply detection. Switches are modelled only with the actual supply
+        known and both meters' months complete — PPE 2's are the same months
+        as PPE 1's, under the same editions; otherwise ``planning`` keeps the
+        actual supply (unknown → Victron) and says why. ``ppe2_reason`` is set
+        when PPE 2's months exist but cannot be settled (its outcome then
+        carries the reason, like PPE 1's).
+        """
+        supply = self.supply
+        if not supply.active or not forecast.slots:
+            return None, None
+        ppe2_periods: list[BillingPeriod] = []
+        ppe2_reason: str | None = billing_reason
+        if billing_reason is None and billing_periods:
+            touching = self.billing.periods_touching(
+                PPE_2, forecast.slots[0].start, forecast.slots[-1].start
+            )
+            ppe2_reason = self._observed_month_problem(
+                PPE_2, touching, forecast.slots[0].start
+            )
+            if ppe2_reason is None:
+                ppe2_periods = touching
+
+        if supply.state is None:
+            reason = "nie wiadomo jeszcze, skąd zasilane jest mieszkanie"
+        elif billing_reason is not None:
+            reason = f"rozliczenie Tarczy PPE 1 niedostępne — {billing_reason}"
+        elif not billing_periods:
+            reason = (
+                "Tarcza nie obejmuje horyzontu — bez limitu oba liczniki "
+                "kosztują tyle samo"
+            )
+        elif ppe2_reason is not None:
+            reason = f"rozliczenie Tarczy PPE 2 niedostępne — {ppe2_reason}"
+        else:
+            reason = None
+
+        calendar = self.calendar
+        calendar_errors = list(calendar.read_errors)
+        if calendar.last_error is not None:
+            calendar_errors.append(calendar.last_error)
+        planning = SupplyPlanning(
+            actual=supply.state,
+            switching_reason=reason,
+            ppe2_periods=ppe2_periods,
+            last_transition_at=supply.since,
+            cycle_threshold_pln=float(self.config[CONF_SUPPLY_CYCLE_THRESHOLD_PLN]),
+            min_stay_hours=int(self.config[CONF_SUPPLY_MIN_STAY_HOURS]),
+            quiet_start_hour=int(self.config[CONF_SUPPLY_QUIET_START_HOUR]),
+            quiet_end_hour=int(self.config[CONF_SUPPLY_QUIET_END_HOUR]),
+            unavailable=[(trip.depart, trip.return_end) for trip in calendar.trips],
+            calendar_error="; ".join(calendar_errors) if calendar_errors else None,
+        )
+        return planning, ppe2_reason
+
+    def _note_supply_reason(self, reason: str | None) -> None:
+        """Log, once per distinct reason, why no apartment switch is planned."""
+        if reason is not None and reason != self._supply_reason_logged:
+            self.log_info(
+                "supply",
+                f"Zasilanie mieszkania: przełączanie nie jest planowane — {reason}. "
+                "Plan trzyma mieszkanie na obecnym źródle.",
+                extra={"reason": reason},
+            )
+        self._supply_reason_logged = reason
+
+    def _unavailable_outcomes(
+        self, reason: str, forecast, ppe: str
+    ) -> list[BillingOutcome]:
+        """Observed-only outcome for a month of ``ppe`` whose cap could not be modelled.
 
         The month shown is the observed one, else the first capped month the
         horizon touches; with neither (unusable terms) there is no outcome and
         the entities carry the billing module's reasons instead.
         """
-        observed = self.billing.periods.get(PPE_1)
+        observed = self.billing.periods.get(ppe)
         if observed is None and forecast.slots:
             touching = self.billing.periods_touching(
-                PPE_1, forecast.slots[0].start, forecast.slots[-1].start
+                ppe, forecast.slots[0].start, forecast.slots[-1].start
             )
             observed = touching[0] if touching else None
-        if reason != self._billing_unavailable_logged:
+        if reason != self._billing_unavailable_logged.get(ppe):
+            label = "PPE 1" if ppe == PPE_1 else "PPE 2"
             self.log_warning(
                 "billing",
-                f"Tarcza: rozliczenie niedostępne — {reason}. "
-                "Bateria planowana bez limitu miesięcznego.",
-                extra={"reason": reason},
+                f"Tarcza {label}: rozliczenie niedostępne — {reason}. "
+                + (
+                    "Bateria planowana bez limitu miesięcznego."
+                    if ppe == PPE_1
+                    else "Mieszkanie planowane bez przełączania liczników."
+                ),
+                extra={"reason": reason, "ppe": ppe},
             )
-            self._billing_unavailable_logged = reason
+            self._billing_unavailable_logged[ppe] = reason
         if observed is None:
             return []
         return [
@@ -900,7 +1008,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "buy": [_r(s.buy_price) for s in slots],
             "dist": [_r(s.distribution_price_kwh) for s in slots],
             "ptype": [PTYPE_CODE[self._slot_ptype(s)] for s in slots],
-            "cons_fc": [_r(s.total_consumption_kwh, 3) for s in slots],
+            "cons_fc": [_r(plan.victron_consumption_kwh(i), 3) for i in range(len(slots))],
             "base_fc": [_r(s.base_consumption_kwh, 3) for s in slots],
             "mode": [MODE_CODE.get(d.inverter_mode, "p") for d in decisions],
             "soc": [_r(d.battery_soc, 1) for d in decisions],
@@ -2914,7 +3022,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "price_confirmed": slot.price_confirmed,
                         "price_type": self._slot_ptype(slot),
                         "consumption_real": None,
-                        "consumption_forecast": round(slot.total_consumption_kwh, 3),
+                        "consumption_forecast": round(
+                            slot.victron_consumption_kwh(decision.supply), 3
+                        ),
                         "base_consumption_forecast": round(slot.base_consumption_kwh, 3),
                         "soc": round(decision.battery_soc, 1),
                         "ev_soc": (
@@ -3510,5 +3620,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "supply": {
                 **self.supply.status(),
                 "learning_dropped": self.consumption.learning_dropped,
+                # Whether the current plan may move the apartment, and why not.
+                "plan_switching": self.data.supply_switching if self.data else None,
+                "plan_switching_reason": self.data.supply_reason if self.data else None,
             },
         }

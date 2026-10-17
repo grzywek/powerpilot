@@ -137,3 +137,37 @@ async def test_trip_carries_the_calendar_of_the_event_it_came_from() -> None:
     await module._build_trips()
 
     assert [t.calendar for t in module.trips] == ["calendar.rodzina"]
+
+
+async def test_a_calendar_read_error_is_kept_until_the_next_good_read() -> None:
+    """Stage 3: an unreadable calendar makes the user unavailable for switches."""
+
+    class _FailingServices:
+        def __init__(self) -> None:
+            self.fail = True
+
+        async def async_call(self, *args, **kwargs):
+            if self.fail:
+                raise RuntimeError("calendar entity missing")
+            return {"calendar.work": {"events": []}}
+
+    class _ServiceHass(_Hass):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.services = _FailingServices()
+
+    module = _module({}, ["calendar.work"])
+    module.hass = _ServiceHass()
+    module.coordinator = type(
+        "C", (), {"log_warning": lambda *a, **k: None, "log_info": lambda *a, **k: None}
+    )()
+    module._resolver = None
+    module.ess_targets, module.ess_forced_hours = [], set()
+
+    await module.async_update()
+    assert len(module.read_errors) == 1
+    assert "calendar.work" in module.read_errors[0]
+
+    module.hass.services.fail = False
+    await module.async_update()
+    assert module.read_errors == []

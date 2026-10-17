@@ -147,7 +147,12 @@ slice 1); the actual supply and the last transition; availability.
   counts, so a switch back is impossible before `transition.at + H`.
 - **Switch horizon.** `T_sw` is an internal constant; slice 2 measures solve
   time for `T_sw` = full horizon and 72 h on a recorded week plus month tail
-  and sets it.
+  and sets it. Measured 2026-10-17 with `scripts/bench_supply_model.py` (a
+  synthetic week shaped like the live data, 168 h + 500 h tail, medians of 3
+  runs): no switching 19.2 s, `T_sw` = 168 h 37.7 s, 72 h 45.0 s; the
+  `--winter` variant (switching pays) 12.0 / 17.7 / 12.8 s, with 168 h
+  saving 2.5 zł more than 72 h. 168 h is not clearly slower, so
+  `T_sw` = 168 h (the whole horizon).
 - **Outputs.** Each decision carries its planned supply; the plan carries both
   meters' `BillingOutcome`s. Recommendations (marginal value per cycle,
   entities, notifications) are slice 3.

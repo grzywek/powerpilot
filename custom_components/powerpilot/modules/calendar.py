@@ -225,6 +225,10 @@ class CalendarModule(PowerPilotModule):
         # deadlines (moment, SoC %, label) and bare ``#ess`` hours to charge in.
         self.ess_targets: list[tuple[datetime, float, str]] = []
         self.ess_forced_hours: set[datetime] = set()
+        # Calendars that could not be read this cycle ("<entity>: <error>").
+        # The plan then cannot tell when the user is away, so no apartment
+        # switch is planned (stage 3).
+        self.read_errors: list[str] = []
         self._resolver: TravelResolver | None = None
 
     async def async_setup(self) -> None:
@@ -245,6 +249,7 @@ class CalendarModule(PowerPilotModule):
         self.trips = []
         self.ess_targets = []
         self.ess_forced_hours = set()
+        self.read_errors = []
         if not calendars:
             return
 
@@ -498,7 +503,8 @@ class CalendarModule(PowerPilotModule):
         """Read events via the public ``calendar.get_events`` service.
 
         Returns ``[]`` (and logs) when the calendar entity is unavailable — there
-        is no alternative source, so the plan simply runs without that calendar.
+        is no alternative source, so the plan simply runs without that calendar;
+        the error is kept in ``read_errors`` for the cycle.
         """
         try:
             response = await self.hass.services.async_call(
@@ -517,6 +523,7 @@ class CalendarModule(PowerPilotModule):
                 f"Nie udało się odczytać kalendarza {cal_entity}: {err}.",
                 extra={"calendar": cal_entity},
             )
+            self.read_errors.append(f"{cal_entity}: {err}")
             return []
 
         data = (response or {}).get(cal_entity) or {}

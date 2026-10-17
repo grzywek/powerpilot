@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.powerpilot.const import (
@@ -14,6 +15,10 @@ from custom_components.powerpilot.const import (
     CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
     CONF_SUPPLY_CONFIRM_SAMPLES,
+    CONF_SUPPLY_CYCLE_THRESHOLD_PLN,
+    CONF_SUPPLY_MIN_STAY_HOURS,
+    CONF_SUPPLY_QUIET_END_HOUR,
+    CONF_SUPPLY_QUIET_START_HOUR,
     CONF_SUPPLY_VICTRON_SHARE,
     CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_VICTRON_OTHER_POWER_SENSORS,
@@ -189,3 +194,54 @@ async def test_saving_the_step_drops_the_obsolete_margin_and_stores_the_share(
 
     assert "supply_margin_w" not in entry.options
     assert entry.options[CONF_SUPPLY_VICTRON_SHARE] == 0.4
+
+
+async def test_switching_rules_default_and_save(hass: HomeAssistant) -> None:
+    """Stage 3: cycle threshold, minimum stay and the quiet window."""
+    entry, result = await _open_supply(hass)
+    assert _field(result, CONF_SUPPLY_CYCLE_THRESHOLD_PLN)[0].default() == 2.0
+    assert _field(result, CONF_SUPPLY_MIN_STAY_HOURS)[0].default() == 2
+    assert _field(result, CONF_SUPPLY_QUIET_START_HOUR)[0].default() == 0
+    assert _field(result, CONF_SUPPLY_QUIET_END_HOUR)[0].default() == 9
+
+    result = await _configure(
+        hass,
+        result,
+        {
+            **SENSORS,
+            CONF_APARTMENT_METER: "sensor.apartment_energy",
+            CONF_SUPPLY_CYCLE_THRESHOLD_PLN: 3.5,
+            CONF_SUPPLY_MIN_STAY_HOURS: 4,
+            CONF_SUPPLY_QUIET_START_HOUR: 22,
+            CONF_SUPPLY_QUIET_END_HOUR: 7,
+        },
+    )
+    await _finish(hass, result)
+    options = entry.options
+    assert options[CONF_SUPPLY_CYCLE_THRESHOLD_PLN] == 3.5
+    assert options[CONF_SUPPLY_MIN_STAY_HOURS] == 4
+    assert options[CONF_SUPPLY_QUIET_START_HOUR] == 22
+    assert options[CONF_SUPPLY_QUIET_END_HOUR] == 7
+    for key in (
+        CONF_SUPPLY_MIN_STAY_HOURS,
+        CONF_SUPPLY_QUIET_START_HOUR,
+        CONF_SUPPLY_QUIET_END_HOUR,
+    ):
+        assert isinstance(options[key], int), key
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (CONF_SUPPLY_CYCLE_THRESHOLD_PLN, -1),
+        (CONF_SUPPLY_MIN_STAY_HOURS, 0),
+        (CONF_SUPPLY_QUIET_START_HOUR, 24),
+        (CONF_SUPPLY_QUIET_END_HOUR, -1),
+    ],
+)
+async def test_switching_rules_out_of_range_are_refused(
+    hass: HomeAssistant, key: str, value: float
+) -> None:
+    _, result = await _open_supply(hass)
+    with pytest.raises(InvalidData):
+        await _configure(hass, result, {**SENSORS, key: value})

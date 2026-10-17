@@ -298,6 +298,15 @@ CONF_VICTRON_OTHER_POWER_SENSORS: Final = "victron_other_power_sensors"
 CONF_SUPPLY_MIN_APARTMENT_W: Final = "supply_min_apartment_w"
 CONF_SUPPLY_VICTRON_SHARE: Final = "supply_victron_share"
 CONF_SUPPLY_CONFIRM_SAMPLES: Final = "supply_confirm_samples"
+# Switching rules of the plan (stage 3, ``optimizer.py``): opening a cycle (the
+# apartment moved to meter 2) costs the threshold in zł, so a cycle must save
+# more than that; each source is kept at least the minimum stay; no switch is
+# planned on a boundary whose local hour lies in the quiet window
+# ``[start, end)`` (wrapping past midnight; equal hours = no quiet window).
+CONF_SUPPLY_CYCLE_THRESHOLD_PLN: Final = "supply_cycle_threshold_pln"
+CONF_SUPPLY_MIN_STAY_HOURS: Final = "supply_min_stay_hours"
+CONF_SUPPLY_QUIET_START_HOUR: Final = "supply_quiet_start_hour"
+CONF_SUPPLY_QUIET_END_HOUR: Final = "supply_quiet_end_hour"
 
 SUPPLY_VICTRON: Final = "victron"  # apartment fed from the Victron (PPE 1)
 SUPPLY_METER_2: Final = "meter_2"  # apartment fed from the second meter (PPE 2)
@@ -377,6 +386,10 @@ DEFAULTS: Final = {
     CONF_SUPPLY_MIN_APARTMENT_W: 300.0,
     CONF_SUPPLY_VICTRON_SHARE: 0.5,
     CONF_SUPPLY_CONFIRM_SAMPLES: 10,
+    CONF_SUPPLY_CYCLE_THRESHOLD_PLN: 2.0,
+    CONF_SUPPLY_MIN_STAY_HOURS: 2,
+    CONF_SUPPLY_QUIET_START_HOUR: 0,
+    CONF_SUPPLY_QUIET_END_HOUR: 9,
 }
 
 # ---------------------------------------------------------------------------

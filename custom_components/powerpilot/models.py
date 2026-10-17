@@ -58,6 +58,12 @@ class HourSlot:
     # Energy (kWh) expected during this hour.
     base_consumption_kwh: float = 0.0  # learned household profile
     extra_load_kwh: float = 0.0  # sub-metered devices + EV + scheduled loads + climate
+    # The apartment's own forecast (its meter subtree's device profiles plus the
+    # climate loads inside it) while supply detection is active, in every
+    # state. It is NOT part of ``total_consumption_kwh``: the optimizer places
+    # it on the Victron or on meter 2 per the hour's supply. 0 without
+    # detection, when the apartment stays in the demand as any other device.
+    apartment_kwh: float = 0.0
 
     temperature: float | None = None  # °C, for climate modelling
 
@@ -66,8 +72,19 @@ class HourSlot:
 
     @property
     def total_consumption_kwh(self) -> float:
-        """Total demand for the hour."""
+        """Demand on the Victron for the hour, the apartment's share left out."""
         return max(0.0, self.base_consumption_kwh + self.extra_load_kwh)
+
+    def victron_consumption_kwh(self, supply: str | None) -> float:
+        """Demand the Victron carries with the apartment on ``supply``.
+
+        ``supply`` is the hour's planned supply (``Decision.supply``): on meter
+        2 the apartment is not Victron demand; on the Victron, and without
+        supply detection (``None``, ``apartment_kwh`` is 0 then), it is.
+        """
+        if supply == SUPPLY_METER_2:
+            return self.total_consumption_kwh
+        return self.total_consumption_kwh + self.apartment_kwh
 
     @property
     def total_price_kwh(self) -> float | None:
@@ -104,6 +121,10 @@ class Decision:
     # Projected EV state-of-charge (%) at the end of the hour. ``None`` when the
     # EV SoC sensor is unset so the trajectory can't be projected.
     ev_soc: float | None = None
+    # Planned supply of the apartment this hour (``victron`` / ``meter_2``);
+    # ``None`` without supply detection. ``grid_buy_kwh`` and the hour's costs
+    # are PPE 1's: on meter 2 the apartment's energy is PPE 2's import.
+    supply: str | None = None
 
     # Resulting battery state at the *end* of the hour.
     battery_soc: float = 0.0  # %
@@ -153,6 +174,7 @@ class Decision:
             "ev_grid_kwh": round(self.ev_grid_kwh, 3),
             "ev_charge_minutes": self.ev_charge_minutes,
             "ev_soc": round(self.ev_soc, 1) if self.ev_soc is not None else None,
+            "supply": self.supply,
             "battery_soc": round(self.battery_soc, 1),
             "battery_energy_cost": round(self.battery_energy_cost, 4),
             "grid_buy_kwh": round(self.grid_buy_kwh, 3),
@@ -301,6 +323,59 @@ class BillingOutcome:
 
 
 @dataclass
+class SupplyPlanning:
+    """What the optimizer needs to place the apartment between the two meters.
+
+    Given only while supply detection is active (``SupplyModule.active``).
+    ``actual`` is the confirmed supply now (``None``: unknown, the apartment is
+    planned on the Victron, as stage 2 decided). Switches are modelled only
+    when ``actual`` is known and ``switching_reason`` is ``None``; otherwise
+    every hour keeps ``actual`` and the reason travels to the plan.
+
+    ``ppe2_periods`` are PPE 2's billing months (the same months as PPE 1's,
+    under the same editions), each with its observed month-to-date position;
+    empty when PPE 2 cannot be settled. ``unavailable`` lists the windows the
+    user is away (calendar trips with their travel margins);
+    ``calendar_error`` (a calendar could not be read) makes the user
+    unavailable all the time. Switches happen on hour boundaries outside the
+    quiet window ``[quiet_start_hour, quiet_end_hour)`` (local hours, wrapping
+    past midnight; equal hours = no window), at least ``min_stay_hours`` after
+    the previous one, ``last_transition_at`` included; each opened cycle (the
+    apartment moved to meter 2) costs ``cycle_threshold_pln``.
+    """
+
+    actual: str | None
+    switching_reason: str | None = None
+    ppe2_periods: list[BillingPeriod] = field(default_factory=list)
+    last_transition_at: datetime | None = None
+    cycle_threshold_pln: float = 2.0
+    min_stay_hours: int = 2
+    quiet_start_hour: int = 0
+    quiet_end_hour: int = 9
+    unavailable: list[tuple[datetime, datetime]] = field(default_factory=list)
+    calendar_error: str | None = None
+
+    @property
+    def switching(self) -> bool:
+        """Whether the plan may move the apartment between the meters."""
+        return self.actual is not None and self.switching_reason is None
+
+    def in_quiet_window(self, local_hour: int) -> bool:
+        start, end = self.quiet_start_hour, self.quiet_end_hour
+        if start == end:
+            return False
+        if start < end:
+            return start <= local_hour < end
+        return local_hour >= start or local_hour < end
+
+    def user_available(self, moment: datetime) -> bool:
+        """Whether the user can operate the switch at ``moment``."""
+        if self.calendar_error is not None:
+            return False
+        return not any(start <= moment < end for start, end in self.unavailable)
+
+
+@dataclass
 class MonthTail:
     """Accounting-only hours past the planning horizon, to the billing month's end.
 
@@ -337,8 +412,13 @@ class Plan:
     decisions: list[Decision] = field(default_factory=list)
     created_at: datetime | None = None
     # Month forecasts under the seller's price cap, one per billing period the
-    # plan touches (empty when no cap is configured / active).
+    # plan touches (empty when no cap is configured / active): PPE 1's months
+    # first, then PPE 2's (``outcome.period.ppe``) while supply detection is on.
     billing: list[BillingOutcome] = field(default_factory=list)
+    # Whether the plan was free to move the apartment between the meters, and
+    # why not (``None`` while modelled, or without supply detection).
+    supply_switching: bool = False
+    supply_reason: str | None = None
 
     @property
     def current(self) -> Decision | None:
@@ -352,6 +432,12 @@ class Plan:
                 return decision
         return None
 
+    def victron_consumption_kwh(self, index: int) -> float:
+        """Victron demand of forecast slot ``index`` under the planned supply."""
+        slot = self.forecast.slots[index]
+        decision = self.decisions[index] if index < len(self.decisions) else None
+        return slot.victron_consumption_kwh(decision.supply if decision else None)
+
     @property
     def total_cost(self) -> float:
         # Consumption-driven grid cost plus the flat fixed distribution charge
@@ -363,6 +449,8 @@ class Plan:
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "total_cost": round(self.total_cost, 4),
             "billing": [b.as_dict() for b in self.billing],
+            "supply_switching": self.supply_switching,
+            "supply_reason": self.supply_reason,
             "hours": [d.as_dict() for d in self.decisions],
             "forecast": [
                 {
@@ -372,10 +460,11 @@ class Plan:
                     "distribution_price_kwh": s.distribution_price_kwh,
                     "total_price_kwh": s.total_price_kwh,
                     "price_confirmed": s.price_confirmed,
-                    "consumption_kwh": round(s.total_consumption_kwh, 3),
+                    "consumption_kwh": round(self.victron_consumption_kwh(i), 3),
+                    "apartment_kwh": round(s.apartment_kwh, 3),
                     "temperature": s.temperature,
                 }
-                for s in self.forecast.slots
+                for i, s in enumerate(self.forecast.slots)
             ],
         }
 

@@ -54,6 +54,40 @@ of the horizon (so the LP does not irrationally dump the battery on the last
 hour). It is the discharge-adjusted average grid price of the horizon, i.e. the
 realistic price at which that energy would otherwise be replaced.
 
+Monthly price cap and the apartment's supply
+---------------------------------------------
+With billing periods each month's energy is settled as ``K = min(C, L·E)``
+(the seller's cap, one regime binary and a big-M per month); the per-hour
+columns then carry only the part of the price that stays outside the
+settlement (distribution, excise). While supply detection is active the
+apartment's forecast ``A[t]`` (``HourSlot.apartment_kwh``) is kept apart from
+the Victron's own demand ``F[t]``. Without switching it is fixed to the actual
+supply (unknown → Victron) and simply joins or leaves ``F`` — the model above,
+unchanged. With switching (stage 3, ``SupplyPlanning``):
+
+* ``s[t] ∈ {0,1}`` – apartment on meter 2 (PPE 2). Hours between two allowed
+  switch boundaries share one column; the running hour's is fixed to the
+  actual supply, and from the switch horizon ``SUPPLY_SWITCH_HOURS`` on (the
+  month tail included) every hour keeps the last switch hour's column.
+  A boundary allows a switch only outside the quiet window, while the user is
+  available and at least the minimum stay ``H`` after the actual last
+  transition; each switch keeps its source for ``H`` hours
+  (``s[t] − s[t−1] ≤ s[τ]``, ``s[t−1] − s[t] ≤ 1 − s[τ]``, ``τ ∈ [t, t+H)``).
+* ``o[t] ≥ s[t] − s[t−1]`` – a cycle opened (to meter 2), priced at the cycle
+  threshold; returning is free.
+* ``w[t] = z[t]·s[t]`` (McCormick: ``w ≤ z``, ``w ≤ s``, ``w ≥ z + s − 1``) –
+  the discharge delivered is ``D0·z − (D0 − D1)·w`` with
+  ``D0 = min(F + A, inverter)`` and ``D1 = min(F, inverter)``: on meter 2 the
+  battery covers only the Victron's own demand.
+* PPE 1 imports ``g = F + A − A·s + EV + Σc − discharge``; PPE 2 imports
+  ``A·s`` (an expression). Every per-hour price is the same on both meters,
+  so ``s`` acts only through the discharge and the two settlements: PPE 2's
+  months ``K2 = min(C2_mtd + Σ cap·A·s, L·(E2_mtd + Σ A·s))`` get their own
+  regime binary and big-M next to PPE 1's.
+
+After the solve the regime binaries, ``s`` and ``o`` are pinned and the model
+re-solved, so every settlement is exact.
+
 The solver output is replayed through :class:`BatteryModel` so the reported
 ``battery_energy_cost`` / ``battery_use_cost`` and the per-hour cost breakdown
 stay consistent with the rest of the integration.
@@ -73,7 +107,7 @@ import numpy as np
 from homeassistant.util import dt as dt_util
 
 from .battery import RECOVERY_MARGIN_SOC, BatteryModel
-from .const import ChargePower, InverterMode
+from .const import SUPPLY_METER_2, SUPPLY_VICTRON, ChargePower, InverterMode
 from .models import (
     BillingOutcome,
     BillingPeriod,
@@ -82,6 +116,7 @@ from .models import (
     Forecast,
     MonthTail,
     Plan,
+    SupplyPlanning,
 )
 from .modules.ev import EVRequest
 
@@ -111,6 +146,12 @@ _CHARGE_PRICE_BUCKET = Decimal("0.01")
 # so it's obvious from a JSON paste whether the running code is the current
 # allocator or a stale import.
 EV_ALLOCATOR_VERSION = "pack-level-aware-2026-08"
+
+# Switch horizon ``T_sw`` (hours from the running one): the apartment's supply
+# may change only on the boundaries before it; later hours, and the month's
+# tail, keep the supply of hour ``T_sw − 1``. Set from the solve-time
+# measurement in ``scripts/bench_supply_model.py`` (stage 3 plan, decision 7).
+SUPPLY_SWITCH_HOURS = 168
 
 
 @dataclass
@@ -286,15 +327,36 @@ class _CapPeriod:
 
 
 @dataclass
+class _SwitchModel:
+    """The apartment's supply columns ``s`` mapped onto the LP's hours.
+
+    Hours between two allowed switch boundaries share one column (``s[t] =
+    s[t−1]`` wherever no switch may happen), so ``segment[t]`` is the column
+    index of hour ``t`` and ``starts[k]`` the first hour of column ``k``.
+    Column 0 holds the running hour and is fixed to the actual supply.
+    """
+
+    segment: list[int]
+    starts: list[int]
+    actual: float  # 1.0 = on meter 2
+    threshold: float  # zł per opened cycle
+    min_stay: int  # hours
+
+
+@dataclass
 class _LPSolution:
     """Per-hour flows the solver settled on (planning horizon + month tail)."""
 
     charge: list[float]  # grid kWh into the battery
     discharge: list[float]  # kWh delivered to the house from the battery
     stored: list[float]  # post-loss kWh stored
-    grid: list[float]  # grid import
+    grid: list[float]  # grid import (PPE 1)
     tail_ev: list[float]  # expected EV import placed in tail hours
     periods: list[tuple[float, float, bool]]  # (energy, pre-cap cost, cap binds)
+    # Apartment on meter 2 per hour (1.0) and PPE 2's settled months; empty
+    # unless switching was modelled.
+    supply: list[float] = field(default_factory=list)
+    ppe2_periods: list[tuple[float, float, bool]] = field(default_factory=list)
 
 
 class Optimizer:
@@ -315,6 +377,7 @@ class Optimizer:
         ess_request: ESSRequest | None = None,
         billing: list[BillingPeriod] | None = None,
         tail: MonthTail | None = None,
+        supply: SupplyPlanning | None = None,
     ) -> Plan:
         """Plan the horizon; with ``billing`` also settle each month under its cap.
 
@@ -327,12 +390,22 @@ class Optimizer:
         a price; hours of uncapped months keep their hourly energy price. The
         caller validates completeness and reports gaps, this method only
         refuses to guess (``ValueError``).
+
+        ``supply`` (while supply detection is active) places each slot's
+        ``apartment_kwh`` on the Victron or on meter 2: fixed to the actual
+        supply (unknown → Victron) unless switching is modelled, when the
+        plan chooses it hour by hour under the switching rules and settles
+        PPE 2's months (``supply.ppe2_periods``) next to PPE 1's. Switching
+        needs both meters' periods; without them it is refused.
         """
         battery = battery.copy()  # never mutate the live state
         slots = forecast.slots
         n = len(slots)
         if n == 0:
             return Plan(forecast=forecast, decisions=[], created_at=dt_util.now())
+        switching = supply is not None and supply.switching
+        if switching and not (billing and supply.ppe2_periods):
+            raise ValueError("switching the apartment needs PPE 1's and PPE 2's periods")
         tail_slots = list(tail.slots) if (tail is not None and billing) else []
         all_slots = slots + tail_slots
         total = len(all_slots)
@@ -369,9 +442,14 @@ class Optimizer:
         distribution = [s.distribution_price_kwh or 0.0 for s in all_slots]
         total_price = [energy_price[t] + distribution[t] for t in range(total)]
         charge_order_price = [_charge_order_price(price) for price in total_price]
+        # Victron-side demand without the apartment, and the apartment's own
+        # forecast, both over the slot's plannable window.
         demand = [
             max(0.0, s.total_consumption_kwh) * fracs[t]
             for t, s in enumerate(all_slots)
+        ]
+        apartment = [
+            max(0.0, s.apartment_kwh) * fracs[t] for t, s in enumerate(all_slots)
         ]
         # The LP and every cost see GRID energy; the pack-side ("added") energy
         # and the fitted amps ride along into the plan for SoC/control. The
@@ -404,10 +482,41 @@ class Optimizer:
                         )
                     cap_price[t] = price
 
+        # PPE 2's months: the same months as PPE 1's (both meters are settled
+        # under the same editions), so every hour of one carries its cap price.
+        ppe2_periods: list[_CapPeriod] = []
+        if supply is not None and billing:
+            ppe1_months = {cp.period.month_start for cp in periods}
+            for period in supply.ppe2_periods:
+                hours = [
+                    t
+                    for t, slot in enumerate(all_slots)
+                    if period.month_start <= slot.start < period.month_end
+                ]
+                if not hours:
+                    continue
+                if period.month_start not in ppe1_months:
+                    raise ValueError(
+                        f"PPE 2 month {period.month_start.isoformat()} has no PPE 1 month"
+                    )
+                ppe2_periods.append(_CapPeriod(period=period, hours=hours))
+
+        # Without switching the apartment sits where it is for every hour and
+        # simply joins (or leaves) the Victron demand — the stage-2 model.
+        fixed_s = 1.0 if supply is not None and supply.actual == SUPPLY_METER_2 else 0.0
+        switch = (
+            self._switch_model(all_slots, supply, n) if switching else None
+        )
+        lp_demand = (
+            demand
+            if switch is not None
+            else [demand[t] + apartment[t] * (1.0 - fixed_s) for t in range(total)]
+        )
+
         solution = self._solve_lp(
             battery=battery,
             total_price=total_price,
-            demand=demand,
+            demand=lp_demand,
             ev_kwh=ev_kwh,
             ev_charger_kw=ev_charger_kw,
             charge_order_price=charge_order_price,
@@ -419,7 +528,13 @@ class Optimizer:
             tail_start=n,
             tail_ev_kwh=tail.ev_grid_kwh if (tail is not None and billing) else 0.0,
             tail_ev_cap_kw=tail.ev_charger_kw if (tail is not None and billing) else 0.0,
+            apartment=apartment if switch is not None else None,
+            switch=switch,
+            ppe2_periods=ppe2_periods if switch is not None else None,
         )
+        on_meter_2 = solution.supply if switch is not None else [fixed_s] * total
+        ppe2_import = [apartment[t] * on_meter_2[t] for t in range(total)]
+        victron_demand = [demand[t] + apartment[t] - ppe2_import[t] for t in range(total)]
 
         plan = self._build_plan(
             forecast=forecast,
@@ -430,7 +545,7 @@ class Optimizer:
             energy_price=energy_price[:n],
             distribution=distribution[:n],
             total_price=total_price[:n],
-            demand=demand[:n],
+            demand=victron_demand[:n],
             ev_kwh=ev_kwh[:n],
             ev_alloc=ev_alloc,
             charge_order_price=charge_order_price[:n],
@@ -446,19 +561,94 @@ class Optimizer:
                 if cap_price is not None
                 else None
             ),
+            supply=(
+                [
+                    SUPPLY_METER_2 if on_meter_2[t] > 0.5 else SUPPLY_VICTRON
+                    for t in range(n)
+                ]
+                if supply is not None
+                else None
+            ),
+            apartment=apartment[:n],
         )
-        plan.billing = self._billing_outcomes(periods, solution, n)
+        plan.billing = self._billing_outcomes(
+            periods, solution.periods, solution.grid, n
+        )
+        if ppe2_periods:
+            settled2 = (
+                solution.ppe2_periods
+                if switch is not None
+                else self._fixed_settlements(ppe2_periods, ppe2_import, cap_price)
+            )
+            plan.billing += self._billing_outcomes(
+                ppe2_periods, settled2, ppe2_import, n
+            )
+        plan.supply_switching = switching
+        plan.supply_reason = supply.switching_reason if supply is not None else None
         return plan
 
     @staticmethod
+    def _switch_model(
+        slots: list, supply: SupplyPlanning, horizon: int
+    ) -> _SwitchModel:
+        """Which hour boundaries may move the apartment, as shared ``s`` columns.
+
+        Boundary ``t`` (between hours ``t−1`` and ``t``) is a switch hour only
+        before the switch horizon, outside the quiet window (by the local
+        start hour of slot ``t``), while the user is available, and once the
+        actual last transition is at least the minimum stay old.
+        """
+        t_sw = min(SUPPLY_SWITCH_HOURS, horizon)
+        stay = timedelta(hours=supply.min_stay_hours)
+        earliest = (
+            supply.last_transition_at + stay
+            if supply.last_transition_at is not None
+            else None
+        )
+        segment: list[int] = []
+        starts = [0]
+        for t, slot in enumerate(slots):
+            if (
+                0 < t < t_sw
+                and not supply.in_quiet_window(dt_util.as_local(slot.start).hour)
+                and supply.user_available(slot.start)
+                and (earliest is None or slot.start >= earliest)
+            ):
+                starts.append(t)
+            segment.append(len(starts) - 1)
+        return _SwitchModel(
+            segment=segment,
+            starts=starts,
+            actual=1.0 if supply.actual == SUPPLY_METER_2 else 0.0,
+            threshold=supply.cycle_threshold_pln,
+            min_stay=supply.min_stay_hours,
+        )
+
+    @staticmethod
+    def _fixed_settlements(
+        periods: list[_CapPeriod], imports: list[float], cap_price: list[float] | None
+    ) -> list[tuple[float, float, bool]]:
+        """``(energy, cost, cap binds)`` of months whose import is fixed."""
+        settled = cap_price or [0.0] * len(imports)
+        out: list[tuple[float, float, bool]] = []
+        for cp in periods:
+            energy = cp.period.energy_kwh + sum(imports[t] for t in cp.hours)
+            cost = cp.period.cost_pln + sum(settled[t] * imports[t] for t in cp.hours)
+            out.append((energy, cost, cp.period.limit_kwh * energy < cost))
+        return out
+
+    @staticmethod
     def _billing_outcomes(
-        periods: list[_CapPeriod], solution: _LPSolution, horizon: int
+        periods: list[_CapPeriod],
+        settled: list[tuple[float, float, bool]],
+        imports: list[float],
+        horizon: int,
     ) -> list[BillingOutcome]:
-        """Month forecasts per billing period from the settled LP flows."""
+        """Month forecasts per billing period from the settled flows of one PPE."""
         outcomes: list[BillingOutcome] = []
-        for cp, (energy, cost, binds) in zip(periods, solution.periods):
-            planned = sum(solution.grid[t] for t in cp.hours if t < horizon)
-            tail_energy = sum(solution.grid[t] for t in cp.hours if t >= horizon)
+        for cp, (energy, cost, binds) in zip(periods, settled):
+            planned = sum(imports[t] for t in cp.hours if t < horizon)
+            tail_energy = sum(imports[t] for t in cp.hours if t >= horizon)
             outcomes.append(
                 BillingOutcome(
                     period=cp.period,
@@ -541,6 +731,9 @@ class Optimizer:
         tail_start: int | None = None,
         tail_ev_kwh: float = 0.0,
         tail_ev_cap_kw: float = 0.0,
+        apartment: list[float] | None = None,
+        switch: _SwitchModel | None = None,
+        ppe2_periods: list[_CapPeriod] | None = None,
     ) -> _LPSolution:
         """Solve the MILP over ``len(total_price)`` hours.
 
@@ -550,9 +743,18 @@ class Optimizer:
         ``tail_start`` on are the accounting-only month tail: they carry no
         planned EV load, but ``tail_ev_kwh`` of expected EV import is placed
         among them by the solver (≤ ``tail_ev_cap_kw`` per hour).
+
+        With ``switch`` the apartment's ``apartment`` kWh are placed per hour
+        on the Victron or on meter 2 (``demand`` is then the Victron's own
+        demand without it) and PPE 2's ``ppe2_periods`` are settled like
+        PPE 1's; without it ``demand`` already holds the apartment's share.
         """
         cfg = self.config
         n = len(total_price)
+        if switch is not None and (apartment is None or not periods or not ppe2_periods):
+            raise ValueError("switching needs the apartment and both meters' periods")
+        apartment = apartment if switch is not None else [0.0] * n
+        ppe2_periods = ppe2_periods if switch is not None else []
         tail_start = n if tail_start is None else tail_start
         # Calendar instructions for the house battery (``#ess`` tags). Both
         # degrade gracefully: see the floor clamp and the objective bonus below.
@@ -684,8 +886,16 @@ class Optimizer:
         # (z=0). This makes every hour exactly one inverter mode and forbids
         # rationing a *partial* discharge across hours — a deliberate
         # simplification chosen over a marginally cheaper fractional plan.
+        # With switching, ``cap`` is D0 (the apartment on the Victron) and the
+        # apartment's share ``D0 − D1`` comes off it while it is on meter 2:
+        # delivered = D0·z − (D0 − D1)·w with w = z·s (see the module doc).
         discharge_cap = [
-            min(demand[t], cfg.inverter_max_discharge_kw * fracs[t])
+            min(demand[t] + apartment[t], cfg.inverter_max_discharge_kw * fracs[t])
+            for t in range(n)
+        ]
+        apartment_share = [
+            discharge_cap[t]
+            - min(demand[t], cfg.inverter_max_discharge_kw * fracs[t])
             for t in range(n)
         ]
         # Tail hours are accounting-only: their switches stay continuous, so
@@ -745,7 +955,9 @@ class Optimizer:
             limit = cp.period.limit_kwh
             m_val = abs(cp.period.cost_pln - limit * cp.period.energy_kwh) + 1.0
             for t in cp.hours:
-                g_max = demand[t] + ev_kwh[t] + charge_caps[t] + tail_ev_cap[t]
+                g_max = (
+                    demand[t] + apartment[t] + ev_kwh[t] + charge_caps[t] + tail_ev_cap[t]
+                )
                 m_val += abs(settled[t] - limit) * g_max
             big_m.append(m_val)
             k_col, c_col, e_col, b_col = period_cols(i)
@@ -761,7 +973,54 @@ class Optimizer:
             for t in range(n):
                 h.addVar(0.0, e_recover)
 
-        n_cols = r0 + (n if recovering else 0)
+        # Apartment switching: one supply column per segment (s, 1 = meter 2;
+        # segment 0 = the running hour, fixed to the actual supply), an open
+        # indicator per later segment (o ≥ s_k − s_{k−1}, priced at the cycle
+        # threshold), the product w[t] = z[t]·s[t] for hours whose discharge
+        # cap the apartment changes, then PPE 2's billing blocks (K, C, E, b).
+        sw0 = r0 + (n if recovering else 0)
+        seg_k = len(switch.starts) if switch is not None else 0
+
+        def s_col(k: int) -> int:
+            return sw0 + k
+
+        def o_col(k: int) -> int:  # k ≥ 1
+            return sw0 + seg_k + (k - 1)
+
+        w0 = sw0 + seg_k + max(seg_k - 1, 0)
+        w_cols: dict[int, int] = {}
+        if switch is not None:
+            for k in range(seg_k):
+                fixed = k == 0
+                h.addVar(switch.actual if fixed else 0.0, switch.actual if fixed else 1.0)
+                if not fixed:
+                    h.changeColIntegrality(s_col(k), highspy.HighsVarType.kInteger)
+            for _k in range(1, seg_k):
+                h.addVar(0.0, 1.0)
+            for t in range(n):
+                if apartment_share[t] > _EPS and discharge_cap[t] > _EPS:
+                    w_cols[t] = w0 + len(w_cols)
+                    h.addVar(0.0, 1.0)
+        q0 = w0 + len(w_cols)
+
+        def ppe2_cols(i: int) -> tuple[int, int, int, int]:
+            base = q0 + 4 * i
+            return base, base + 1, base + 2, base + 3  # K, C, E, b
+
+        big_m2: list[float] = []
+        for i, cp in enumerate(ppe2_periods):
+            limit = cp.period.limit_kwh
+            m_val = abs(cp.period.cost_pln - limit * cp.period.energy_kwh) + 1.0
+            for t in cp.hours:
+                m_val += abs(settled[t] - limit) * apartment[t]
+            big_m2.append(m_val)
+            h.addVar(-inf, inf)  # K
+            h.addVar(-inf, inf)  # C
+            h.addVar(0.0, inf)  # E
+            h.addVar(0.0, 1.0)  # b
+            h.changeColIntegrality(ppe2_cols(i)[3], highspy.HighsVarType.kInteger)
+
+        n_cols = q0 + 4 * len(ppe2_periods)
         cost = np.zeros(n_cols, dtype=np.float64)
         for t in range(n):
             # Earliness tie-break: among equally priced hours prefer charging
@@ -772,14 +1031,20 @@ class Optimizer:
                 cost[seg_col(t, k)] = (
                     charge_price[t] - settled[t] + (wear - tv) * seg_eff[k] + tie
                 )
-            # d-column is a 0/1 switch worth discharge_cap[t] kWh delivered.
-            cost[d0 + t] = (
-                -(total_price[t] - settled[t]) + wear + tv / deff
-            ) * discharge_cap[t]
+            # d-column is a 0/1 switch worth discharge_cap[t] kWh delivered;
+            # w takes the apartment's share back off while it is on meter 2.
+            per_kwh = -(total_price[t] - settled[t]) + wear + tv / deff
+            cost[d0 + t] = per_kwh * discharge_cap[t]
+            if t in w_cols:
+                cost[w_cols[t]] = -per_kwh * apartment_share[t]
         for t in range(tail_start, n):
             cost[tail_ev_col(t)] = total_price[t] - settled[t]
         for i in range(len(periods)):
             cost[period_cols(i)[0]] = 1.0
+        for k in range(1, seg_k):
+            cost[o_col(k)] = switch.threshold
+        for i in range(len(ppe2_periods)):
+            cost[ppe2_cols(i)[0]] = 1.0
         if recovering:
             # Dwarfs any price, wear or terminal value: no economic gain can
             # justify leaving the reserve short for another hour.
@@ -840,6 +1105,9 @@ class Optimizer:
                 discharge_cap[t] / deff,
                 1.0,
             ]
+            if t in w_cols:
+                idx.append(w_cols[t])
+                val.append(-apartment_share[t] / deff)
             rhs = e0
             if t > 0:
                 idx.append(state_col(t - 1))
@@ -853,14 +1121,21 @@ class Optimizer:
                 np.array(val, dtype=np.float64),
             )
 
-        # Grid balance: g[t] − Σ_k c[t,k] + cap[t]·z[t] − v[t] = demand + EV.
+        # Grid balance (PPE 1): g[t] − Σ_k c[t,k] + cap[t]·z[t] − v[t] = demand + EV,
+        # with switching g[t] − Σc + D0·z − (D0 − D1)·w + A·s − v = F + A + EV.
         for t in range(n):
             idx = [grid_col(t)] + [seg_col(t, k) for k in range(seg_n)] + [d0 + t]
             val = [1.0] + [-1.0] * seg_n + [discharge_cap[t]]
             if t >= tail_start:
                 idx.append(tail_ev_col(t))
                 val.append(-1.0)
-            rhs = demand[t] + ev_kwh[t]
+            if t in w_cols:
+                idx.append(w_cols[t])
+                val.append(-apartment_share[t])
+            if switch is not None and apartment[t] > 0.0:
+                idx.append(s_col(switch.segment[t]))
+                val.append(apartment[t])
+            rhs = demand[t] + apartment[t] + ev_kwh[t]
             h.addRow(
                 rhs,
                 rhs,
@@ -983,6 +1258,48 @@ class Optimizer:
                 np.array([1.0, -limit, -big_m[i]], dtype=np.float64),
             )
 
+        if switch is not None:
+            self._add_switch_rows(h, switch, w_cols, d0, s_col, o_col)
+        # PPE 2's monthly settlement, its import being A[t]·s[t]:
+        #   C2 = C2_mtd + Σ cap_price[t]·A[t]·s[t]     E2 = E2_mtd + Σ A[t]·s[t]
+        #   K2 ≥ C2 − M·b2                            K2 ≥ L·E2 − M·(1 − b2)
+        for i, cp in enumerate(ppe2_periods):
+            k_col, c_col, e_col, b_col = ppe2_cols(i)
+            limit = cp.period.limit_kwh
+            cost_coef: dict[int, float] = {}
+            energy_coef: dict[int, float] = {}
+            for t in cp.hours:
+                if apartment[t] <= 0.0:
+                    continue
+                col = s_col(switch.segment[t])
+                cost_coef[col] = cost_coef.get(col, 0.0) - settled[t] * apartment[t]
+                energy_coef[col] = energy_coef.get(col, 0.0) - apartment[t]
+            for col0, coef, rhs in (
+                (c_col, cost_coef, cp.period.cost_pln),
+                (e_col, energy_coef, cp.period.energy_kwh),
+            ):
+                h.addRow(
+                    rhs,
+                    rhs,
+                    1 + len(coef),
+                    np.array([col0, *coef.keys()], dtype=np.int32),
+                    np.array([1.0, *coef.values()], dtype=np.float64),
+                )
+            h.addRow(
+                0.0,
+                inf,
+                3,
+                np.array([k_col, c_col, b_col], dtype=np.int32),
+                np.array([1.0, -1.0, big_m2[i]], dtype=np.float64),
+            )
+            h.addRow(
+                -big_m2[i],
+                inf,
+                3,
+                np.array([k_col, e_col, b_col], dtype=np.int32),
+                np.array([1.0, -limit, -big_m2[i]], dtype=np.float64),
+            )
+
         h.run()
         status = h.getModelStatus()
         if status != highspy.HighsModelStatus.kOptimal:
@@ -990,16 +1307,27 @@ class Optimizer:
         sol = list(h.getSolution().col_value)
 
         regimes: list[bool] = []
+        regimes2: list[bool] = []
         if periods:
             # Polish: the big-M rows leave the settled cost slack of up to
             # M × integrality tolerance, enough to scramble the micro-PLN
             # tie-breaks. Pin every regime switch to the value it settled on
             # and re-solve — with b fixed by bounds the settlement is exact.
-            for i in range(len(periods)):
-                b_col = period_cols(i)[3]
-                binds = sol[b_col] > 0.5
-                regimes.append(binds)
-                h.changeColBounds(b_col, 1.0 if binds else 0.0, 1.0 if binds else 0.0)
+            # The supply columns and their open indicators are pinned too: s
+            # inside the integrality tolerance would let PPE 2's import (A·s)
+            # and the discharge product drift. w is then exact by McCormick
+            # (w = z·s for a 0/1 s), so it is left to the re-solve with z.
+            def pin(col: int) -> bool:
+                on = sol[col] > 0.5
+                h.changeColBounds(col, 1.0 if on else 0.0, 1.0 if on else 0.0)
+                return on
+
+            regimes = [pin(period_cols(i)[3]) for i in range(len(periods))]
+            regimes2 = [pin(ppe2_cols(i)[3]) for i in range(len(ppe2_periods))]
+            for k in range(seg_k):
+                pin(s_col(k))
+            for k in range(1, seg_k):
+                pin(o_col(k))
             h.run()
             status = h.getModelStatus()
             if status != highspy.HighsModelStatus.kOptimal:
@@ -1017,8 +1345,13 @@ class Optimizer:
             sum(seg_eff[k] * sol[seg_col(t, k)] for k in range(seg_n))
             for t in range(n)
         ]
-        # d-columns are 0/1 switches; expand back to delivered energy.
-        discharge = [discharge_cap[t] * sol[d0 + t] for t in range(n)]
+        # d-columns are 0/1 switches; expand back to delivered energy (less
+        # the apartment's share in hours it spends on meter 2).
+        discharge = [
+            discharge_cap[t] * sol[d0 + t]
+            - (apartment_share[t] * sol[w_cols[t]] if t in w_cols else 0.0)
+            for t in range(n)
+        ]
         grid = [max(0.0, sol[grid_col(t)]) for t in range(n)]
         tail_ev = [0.0] * n
         for t in range(tail_start, n):
@@ -1027,6 +1360,15 @@ class Optimizer:
         for i in range(len(periods)):
             _k_col, c_col, e_col, _b_col = period_cols(i)
             settled_periods.append((sol[e_col], sol[c_col], regimes[i]))
+        supply = (
+            [1.0 if sol[s_col(switch.segment[t])] > 0.5 else 0.0 for t in range(n)]
+            if switch is not None
+            else []
+        )
+        ppe2_settled = [
+            (sol[ppe2_cols(i)[2]], sol[ppe2_cols(i)[1]], regimes2[i])
+            for i in range(len(ppe2_periods))
+        ]
         return _LPSolution(
             charge=charge,
             discharge=discharge,
@@ -1034,7 +1376,44 @@ class Optimizer:
             grid=grid,
             tail_ev=tail_ev,
             periods=settled_periods,
+            supply=supply,
+            ppe2_periods=ppe2_settled,
         )
+
+    @staticmethod
+    def _add_switch_rows(h, switch: _SwitchModel, w_cols, d0, s_col, o_col) -> None:
+        """Open indicators, minimum stay and the product w = z·s."""
+        inf = highspy.kHighsInf
+
+        def row(lo: float, hi: float, cols: list[int], vals: list[float]) -> None:
+            h.addRow(
+                lo,
+                hi,
+                len(cols),
+                np.array(cols, dtype=np.int32),
+                np.array(vals, dtype=np.float64),
+            )
+
+        starts = switch.starts
+        for k in range(1, len(starts)):
+            # o_k ≥ s_k − s_{k−1}: opening a cycle (to meter 2) costs the
+            # threshold; returning is free.
+            row(0.0, inf, [o_col(k), s_col(k), s_col(k - 1)], [1.0, -1.0, 1.0])
+            # Minimum stay: a switch at boundary t keeps the new source for
+            # every hour τ ∈ [t, t + H) — rows only against the segments that
+            # begin inside that window (the rest share s_k anyway):
+            #   s_k − s_{k−1} ≤ s_j        s_{k−1} − s_k ≤ 1 − s_j
+            for j in range(k + 1, len(starts)):
+                if starts[j] >= starts[k] + switch.min_stay:
+                    break
+                row(-inf, 0.0, [s_col(k), s_col(k - 1), s_col(j)], [1.0, -1.0, -1.0])
+                row(-inf, 1.0, [s_col(k - 1), s_col(k), s_col(j)], [1.0, -1.0, 1.0])
+        # McCormick for w = z·s (exact: s is binary): w ≤ z, w ≤ s, w ≥ z + s − 1.
+        for t, w in w_cols.items():
+            s = s_col(switch.segment[t])
+            row(-inf, 0.0, [w, d0 + t], [1.0, -1.0])
+            row(-inf, 0.0, [w, s], [1.0, -1.0])
+            row(-1.0, inf, [w, d0 + t, s], [1.0, -1.0, -1.0])
 
     # ------------------------------------------------------------------
     # Replay the LP solution into Decisions + cost reporting
@@ -1057,7 +1436,15 @@ class Optimizer:
         stored: list[float] | None = None,
         fracs: list[float] | None = None,
         cap_price: list[float | None] | None = None,
+        supply: list[str] | None = None,
+        apartment: list[float] | None = None,
     ) -> Plan:
+        """Replay the solved flows into decisions.
+
+        ``demand`` is the Victron's demand under each hour's planned
+        ``supply`` (``None`` without supply detection); ``apartment`` the
+        apartment's own forecast, for the trace.
+        """
         cfg = self.config
         ceff = max(battery.charge_efficiency, _EPS)
         deff = max(battery.discharge_efficiency, _EPS)
@@ -1159,6 +1546,8 @@ class Optimizer:
             decision.ev_charge_kwh = ev_added
             decision.ev_grid_kwh = ev
             decision.ev_charge_minutes = ev_minutes
+            if supply is not None:
+                decision.supply = supply[t]
             if ev_soc_kwh is not None:
                 drain = ev_drain.get(slot.start, 0.0)
                 after_drain = max(0.0, ev_soc_kwh - drain)
@@ -1233,6 +1622,11 @@ class Optimizer:
                 decision.trace["hour_fraction"] = round(fracs[t], 4)
             if cap_price is not None and cap_price[t] is not None:
                 decision.trace["cap_price"] = round(cap_price[t], 4)
+            if supply is not None:
+                decision.trace["supply"] = supply[t]
+                decision.trace["apartment_kwh"] = round(
+                    apartment[t] if apartment is not None else 0.0, 3
+                )
 
             if t == 0 and reminders:
                 decision.reminders = list(reminders)

@@ -191,8 +191,8 @@ PowerPilot models it end to end:
   containing a switch is split at the switch by the 5-minute statistics (each
   completed split is archived in `.storage/powerpilot_<entry>_billing_ppe2`,
   since the recorder purges 5-minute statistics after about ten days), and an
-  hour whose supply is unknown is a gap. PPE 2 is observed only so far — the
-  plan does not settle it yet;
+  hour whose supply is unknown is a gap. The plan settles PPE 2's months next
+  to PPE 1's (its outcome is in `plan.billing` with `ppe = ppe2`);
 - the optimizer settles each capped month it touches as `min(C, limit × E)` and
   plans the battery under that regime, pricing the rest of the month from the
   weekly consumption profile, the archive's price estimate and the learned EV
@@ -238,6 +238,8 @@ hours older than that are classified from hourly means.
 **Configuration.** Options → *Zasilanie mieszkania*: the apartment power
 sensor, the Victron output power sensor, the other sub-meters behind the
 Victron, the metered device that is the apartment, and the three thresholds (minimum power 300 W, Victron share 0.5, N = 10).
+The same form holds the plan's switching rules: the cycle threshold (2 zł),
+the minimum stay on one source (2 h) and the quiet window (00:00–09:00).
 Leave the three sensors empty to turn detection off. The log is evidence read
 through the rule, so changing any threshold sets the old log aside (renamed,
 not deleted) and rebuilds it from the recorder's history. The apartment meter must
@@ -256,10 +258,17 @@ liczników*); the form refuses anything else.
   the raw values average to the truth, while dropping or clamping them biases it.
   The profiles relearn once after the upgrade and again after you enable
   detection or change the apartment meter.
-- Forecast and chart: while the apartment is on meter 2 its subtree (including
-  climate sensors inside it) is left out of the Victron demand the optimizer
-  plans, and out of the chart's per-device forecast. The confirmed state is
-  assumed to hold for the whole horizon.
+- Forecast and chart: the apartment's subtree (including climate sensors
+  inside it) is forecast apart from the Victron demand, and the optimizer adds
+  it to the Victron or to PPE 2 per each hour's planned supply (every plan
+  hour carries `supply`). The plan may move the apartment to meter 2 when
+  that pays more than the cycle threshold under both meters' price caps —
+  never in the quiet window, during calendar trips or when a calendar cannot
+  be read, and not sooner than the minimum stay after the last switch. It does
+  so only with the supply known and both meters' months complete; otherwise
+  it keeps the confirmed state for the whole horizon and says why
+  (`supply_reason`). The chart's per-device forecast follows the confirmed
+  state. Recommendation entities come later.
 - Unknown: the apartment is planned on the Victron, and the plan carries a
   reminder that its supply is not known yet.
 

@@ -27,10 +27,11 @@ Hours older than the log are classified from hourly means
 undecided hours (:func:`carry_hour_states`); :meth:`SupplyModule.async_past_hour_states`
 joins them with the log into one state per past hour for the meter tree
 (``hierarchy.exclusive_series``). The module adds nothing to the forecast
-itself: while the apartment is on meter 2 the consumption and climate modules
-leave its subtree out of the Victron demand
-(:meth:`SupplyModule.victron_detached_devices`), and while the state is unknown
-the plan carries a reminder.
+itself: while it is active the consumption and climate modules forecast the
+apartment's subtree (:meth:`SupplyModule.apartment_devices`) apart from the
+Victron demand, in every state, and the optimizer places it on the Victron or
+on meter 2 per the hour's supply. While the state is unknown the plan carries
+a reminder.
 """
 
 from __future__ import annotations
@@ -610,14 +611,14 @@ class SupplyModule(PowerPilotModule):
         """
         return not self.active or self.detector is not None or self.store_error is not None
 
-    def victron_detached_devices(self) -> set[str]:
-        """Metered devices the Victron does not feed now: the apartment's subtree on meter 2.
+    def apartment_devices(self) -> set[str]:
+        """The apartment's meter subtree while the supply shapes the meter tree.
 
-        The forecast keeps the confirmed state for the whole horizon (plan,
-        design 6); empty on the Victron and while the state is unknown (the
-        apartment is planned on the Victron then, answer 1).
+        Its forecast goes to ``HourSlot.apartment_kwh`` whatever the state;
+        the optimizer adds it back per the hour's supply. Empty while the
+        detection is not active (the apartment is then plain Victron demand).
         """
-        if not self.active or self.state != SUPPLY_METER_2:
+        if not self.active:
             return set()
         return subtree(
             str(self.config.get(CONF_CONSUMPTION_SENSOR) or ""),
@@ -625,6 +626,16 @@ class SupplyModule(PowerPilotModule):
             self.config.get(CONF_SENSOR_PARENTS) or {},
             self.apartment_meter,
         )
+
+    def victron_detached_devices(self) -> set[str]:
+        """Metered devices the Victron does not feed now: the apartment's subtree on meter 2.
+
+        Only the chart's per-device forecast reads this (it follows the
+        confirmed state); empty on the Victron and while the state is unknown.
+        """
+        if self.state != SUPPLY_METER_2:
+            return set()
+        return self.apartment_devices()
 
     def collect_reminders(self) -> list[str]:
         if self.active and self.state is None:

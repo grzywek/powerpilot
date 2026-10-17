@@ -31,8 +31,9 @@ to the main reading. Because the breakdown is stored per device, a smarter
 forward model (climate by temperature, calendar-driven appliances) can later
 *replace* a device profile without double counting.
 
-While the apartment is on meter 2 its subtree's profiles are left out of the
-(Victron-side) demand.
+While supply detection is active the apartment subtree's profiles go to
+``HourSlot.apartment_kwh`` instead of the demand, in every state: the
+optimizer places them on the Victron or on meter 2 per the hour's supply.
 
 A sensible default daily shape is used as a fallback until enough history has been
 learned.
@@ -637,26 +638,32 @@ class ConsumptionModule(PowerPilotModule):
         # not part of the household background load. Likewise the climate sensor
         # once its temperature model is ready: the climate module forecasts that
         # device from the outside temperature instead of the weekly average.
-        # While the apartment is on meter 2 its subtree is not Victron demand.
-        return self._device_value(
-            weekday, hour, self.coordinator.supply.victron_detached_devices()
-        )
+        # The apartment's subtree, while supply detection is active, is
+        # forecast apart (``HourSlot.apartment_kwh``, see ``contribute``).
+        apartment = self.coordinator.supply.apartment_devices()
+        return self._device_value(weekday, hour, lambda eid: eid not in apartment)
 
-    def _device_value(self, weekday: int, hour: int, detached: set[str]) -> float:
+    def _device_value(self, weekday: int, hour: int, keep) -> float:
         ev_meter = self.config.get(CONF_EV_CHARGE_METER_SENSOR)
         climate = self.coordinator.climate
         return sum(
             acc.value(weekday, hour) or 0.0
             for eid, acc in self.devices.items()
-            if eid != ev_meter and not climate.handles(eid) and eid not in detached
+            if eid != ev_meter and not climate.handles(eid) and keep(eid)
         )
 
     def contribute(self, forecast: Forecast) -> None:
         learned = self.base.observed_days > 0
-        detached = self.coordinator.supply.victron_detached_devices()
+        apartment = self.coordinator.supply.apartment_devices()
         for slot in forecast.slots:
             weekday, hour = slot.start.weekday(), slot.start.hour
             slot.base_consumption_kwh += self.base_value(weekday, hour)
             if learned:
-                # Add back separately-metered devices with no smarter model yet.
-                slot.extra_load_kwh += self._device_value(weekday, hour, detached)
+                # Add back separately-metered devices with no smarter model
+                # yet; the apartment's subtree goes to its own field.
+                slot.extra_load_kwh += self._device_value(
+                    weekday, hour, lambda eid: eid not in apartment
+                )
+                slot.apartment_kwh += self._device_value(
+                    weekday, hour, lambda eid: eid in apartment
+                )

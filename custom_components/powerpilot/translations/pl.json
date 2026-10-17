@@ -280,7 +280,7 @@
       },
       "supply": {
         "title": "PowerPilot – zasilanie mieszkania",
-        "description": "Rozpoznaje z samej mocy, czy mieszkanie jest zasilane z Victrona (PPE 1), czy z drugiego licznika (PPE 2). Gdy mieszkanie pobiera co najmniej minimalną moc, jest na Victronie, chyba że wyjście Victrona minus pozostałe podliczniki za nim pokrywa mniej niż ustalony udział mocy mieszkania. Zmiana liczy się dopiero po tylu zgodnych próbkach z rzędu (jedna co 30 s). Wykrywanie działa tylko, gdy ustawione są wszystkie trzy: czujnik mieszkania, wyjście Victrona i pozostałe podliczniki; zostaw wszystkie trzy puste, aby je wyłączyć.",
+        "description": "Rozpoznaje z samej mocy, czy mieszkanie jest zasilane z Victrona (PPE 1), czy z drugiego licznika (PPE 2). Gdy mieszkanie pobiera co najmniej minimalną moc, jest na Victronie, chyba że wyjście Victrona minus pozostałe podliczniki za nim pokrywa mniej niż ustalony udział mocy mieszkania. Zmiana liczy się dopiero po tylu zgodnych próbkach z rzędu (jedna co 30 s). Wykrywanie działa tylko, gdy ustawione są wszystkie trzy: czujnik mieszkania, wyjście Victrona i pozostałe podliczniki; zostaw wszystkie trzy puste, aby je wyłączyć. Reguły przełączania w planie: otwarcie cyklu (przełączenie mieszkania na licznik 2) kosztuje próg w zł, więc cykl musi oszczędzić więcej; każde źródło trzyma się co najmniej minimalny czas; w oknie ciszy (godziny lokalne od–do, przez północ; równe godziny = bez okna) ani podczas wyjazdów z kalendarza plan nie przełącza.",
         "data": {
           "apartment_power_sensor": "Moc mieszkania (W lub kW)",
           "apartment_meter": "Urządzenie z licznikiem, które jest mieszkaniem (jego podliczniki przechodzą razem z nim)",
@@ -288,7 +288,11 @@
           "victron_other_power_sensors": "Moc pozostałych podliczników za Victronem (poza mieszkaniem)",
           "supply_min_apartment_w": "Minimalna moc mieszkania do rozstrzygnięcia",
           "supply_victron_share": "Udział mocy mieszkania, który Victron musi pokrywać (0,5 = połowa)",
-          "supply_confirm_samples": "Zgodne próbki z rzędu potwierdzające zmianę"
+          "supply_confirm_samples": "Zgodne próbki z rzędu potwierdzające zmianę",
+          "supply_cycle_threshold_pln": "Próg opłacalności cyklu (zł)",
+          "supply_min_stay_hours": "Minimalny czas na jednym źródle (h)",
+          "supply_quiet_start_hour": "Okno ciszy — od godziny",
+          "supply_quiet_end_hour": "Okno ciszy — do godziny"
         }
       }
     },

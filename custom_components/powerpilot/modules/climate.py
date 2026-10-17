@@ -597,29 +597,37 @@ class ClimateModule(PowerPilotModule):
                 )
                 + " — te urządzenia na razie planowane z profilu tygodniowego."
             )
-        # On meter 2 the apartment's climate loads are not Victron demand.
-        detached = self.coordinator.supply.victron_detached_devices()
-        off_victron = [eid for eid in active if eid in detached]
-        if off_victron:
+        # The apartment's climate loads (while supply detection is active) are
+        # forecast apart from the demand: the optimizer places them on the
+        # Victron or on meter 2 per the hour's supply.
+        apartment = self.coordinator.supply.apartment_devices()
+        in_apartment = [eid for eid in active if eid in apartment]
+        if in_apartment:
             self.log_info(
-                "Mieszkanie zasilane z licznika 2 — poza zapotrzebowaniem Victrona: "
-                + ", ".join(e.split(".")[-1] for e in off_victron)
+                "Klimat w mieszkaniu planowany osobno (Victron albo licznik 2 "
+                "według zasilania w danej godzinie): "
+                + ", ".join(e.split(".")[-1] for e in in_apartment)
                 + ".",
-                extra={"detached": off_victron},
+                extra={"apartment": in_apartment},
             )
-            active = [eid for eid in active if eid not in detached]
         if not active:
             return
         total = 0.0
         hits = 0
         for slot in forecast.slots:
-            slot_energy = 0.0
+            victron_energy = 0.0
+            apartment_energy = 0.0
             for eid in active:
                 energy = self.forecast_kwh(eid, slot.start)
                 if energy and energy > 0:
-                    slot_energy += energy
+                    if eid in apartment:
+                        apartment_energy += energy
+                    else:
+                        victron_energy += energy
+            slot_energy = victron_energy + apartment_energy
             if slot_energy > 0:
-                slot.extra_load_kwh += slot_energy
+                slot.extra_load_kwh += victron_energy
+                slot.apartment_kwh += apartment_energy
                 slot.tags.append("climate")
                 total += slot_energy
                 hits += 1

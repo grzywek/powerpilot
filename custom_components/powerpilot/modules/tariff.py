@@ -32,6 +32,7 @@ timestamp, pruned to the last 90 days on every load.
 from __future__ import annotations
 
 import calendar
+import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -48,6 +49,8 @@ from ..const import (
 )
 from ..models import Forecast, Tariff, tariff_for_day
 from .base import PowerPilotModule
+
+_LOGGER = logging.getLogger(__name__)
 
 # How many days of past snapshots to keep (matches the price archive's year).
 _SNAPSHOT_RETENTION_DAYS = 365

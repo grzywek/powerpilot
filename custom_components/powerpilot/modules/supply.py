@@ -5,8 +5,13 @@ point of delivery. Nothing reports its position, so it is told from power
 (parent spec ``docs/apartment-supply-planning.plan.md``, 2026-09-14):
 
 * ``a`` = apartment power, ``r`` = Victron output − Σ the other sub-meters
-  behind the Victron. Only ``a ≥ P_min`` decides anything: ``victron`` when
-  ``r ≥ a − margin``, else ``meter_2``.
+  behind the Victron. Only ``a ≥ P_min`` decides anything: ``meter_2`` when
+  ``r < share · a``, else ``victron``. The rule is proportional because the
+  apartment meter and the Victron disagree by a few percent at sustained ~2 kW
+  loads and report non-simultaneously: an absolute margin (``r ≥ a − 100 W``)
+  gave 6-14 false meter-2 episodes in 14 days of real 30 s samples, depending on
+  the sampling phase, a share of 0.5 none, while a simulated meter-2 supply was
+  still detected.
 * N decisive samples of the other state in a row confirm a change; otherwise
   the last confirmed state holds. Before the first confirmation it is unknown.
 
@@ -62,7 +67,7 @@ from ..const import (
     CONF_CONSUMPTION_SENSOR,
     CONF_SENSOR_PARENTS,
     CONF_SUPPLY_CONFIRM_SAMPLES,
-    CONF_SUPPLY_MARGIN_W,
+    CONF_SUPPLY_VICTRON_SHARE,
     CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_VICTRON_OTHER_POWER_SENSORS,
     CONF_VICTRON_OUTPUT_POWER_SENSOR,
@@ -130,12 +135,22 @@ def victron_net(victron_w: float | None, others_w: Sequence[float | None]) -> fl
 
 
 def classify_sample(
-    apartment_w: float, victron_net_w: float, min_apartment_w: float, margin_w: float
+    apartment_w: float,
+    victron_net_w: float,
+    min_apartment_w: float,
+    victron_share: float,
 ) -> str | None:
-    """The supply one sample points to; ``None`` = undecided (apartment below the minimum)."""
+    """The supply one sample points to; ``None`` = undecided (apartment below the minimum).
+
+    Proportional: ``meter_2`` when the Victron covers less than ``victron_share``
+    of the apartment's power, else ``victron``. The only implementation of the
+    rule; the live tick, the replay and the hourly classification all call it.
+    """
     if apartment_w < min_apartment_w:
         return None
-    return SUPPLY_VICTRON if victron_net_w >= apartment_w - margin_w else SUPPLY_METER_2
+    if victron_net_w < victron_share * apartment_w:
+        return SUPPLY_METER_2
+    return SUPPLY_VICTRON
 
 
 class SupplyDetector:
@@ -155,7 +170,7 @@ class SupplyDetector:
     def __init__(
         self,
         min_apartment_w: float,
-        margin_w: float,
+        victron_share: float,
         confirm_samples: int,
         state: str | None = None,
         *,
@@ -165,7 +180,7 @@ class SupplyDetector:
         if confirm_samples < 1:
             raise ValueError("confirm_samples must be at least 1")
         self.min_apartment_w = min_apartment_w
-        self.margin_w = margin_w
+        self.victron_share = victron_share
         self.confirm_samples = confirm_samples
         self.state = state
         # Where the transitions it confirms come from ("live" / "replay").
@@ -199,7 +214,7 @@ class SupplyDetector:
             self._reset_streak()
             return None
         decided = classify_sample(
-            apartment_w, victron_net_w, self.min_apartment_w, self.margin_w
+            apartment_w, victron_net_w, self.min_apartment_w, self.victron_share
         )
         if decided is None:
             return None
@@ -286,7 +301,7 @@ def hour_supply(
 def classify_hours(
     means: Mapping[datetime, tuple[float | None, float | None]],
     min_apartment_w: float,
-    margin_w: float,
+    victron_share: float,
 ) -> dict[datetime, str]:
     """The decided hours among past hours, from their means: (apartment W, Victron net W).
 
@@ -299,7 +314,7 @@ def classify_hours(
     for hour, (apartment_w, victron_net_w) in means.items():
         if apartment_w is None or victron_net_w is None:
             continue
-        state = classify_sample(apartment_w, victron_net_w, min_apartment_w, margin_w)
+        state = classify_sample(apartment_w, victron_net_w, min_apartment_w, victron_share)
         if state is not None:
             decided[hour.astimezone(timezone.utc)] = state
     return decided
@@ -553,8 +568,8 @@ class SupplyModule(PowerPilotModule):
         return float(self.config[CONF_SUPPLY_MIN_APARTMENT_W])
 
     @property
-    def margin_w(self) -> float:
-        return float(self.config[CONF_SUPPLY_MARGIN_W])
+    def victron_share(self) -> float:
+        return float(self.config[CONF_SUPPLY_VICTRON_SHARE])
 
     @property
     def confirm_samples(self) -> int:
@@ -634,7 +649,7 @@ class SupplyModule(PowerPilotModule):
             "replay_error": self.replay_error,
             "save_error": self.save_error,
             "min_apartment_w": self.min_apartment_w,
-            "margin_w": self.margin_w,
+            "victron_share": self.victron_share,
             "confirm_samples": self.confirm_samples,
             "apartment_sensor": self.apartment_sensor or None,
             "victron_sensor": self.victron_sensor or None,
@@ -688,7 +703,7 @@ class SupplyModule(PowerPilotModule):
             last_decisive = last.at
         return SupplyDetector(
             self.min_apartment_w,
-            self.margin_w,
+            self.victron_share,
             self.confirm_samples,
             state=last.state if last is not None else None,
             last_decisive=last_decisive,
@@ -860,7 +875,7 @@ class SupplyModule(PowerPilotModule):
         self.save_error = None
         if self.detector is not None:
             self.detector = SupplyDetector(
-                self.min_apartment_w, self.margin_w, self.confirm_samples
+                self.min_apartment_w, self.victron_share, self.confirm_samples
             )
 
     # ------------------------------------------------------------------
@@ -1139,7 +1154,7 @@ class SupplyModule(PowerPilotModule):
             )
             for hour in hours
         }
-        classified = classify_hours(means, self.min_apartment_w, self.margin_w)
+        classified = classify_hours(means, self.min_apartment_w, self.victron_share)
         covered_from = self.covered_from
         return {
             hour: state

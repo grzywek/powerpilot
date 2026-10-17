@@ -215,16 +215,19 @@ Its attributes carry the last evidence, the thresholds and any storage errors.
 **The rule.** Every 30 s PowerPilot compares the apartment power `a` with
 `r` = Victron output power minus the other sub-meters behind the Victron.
 Below the minimum apartment power (default 300 W) the sample decides nothing.
-Otherwise it points to the Victron when `r ≥ a − margin` (default 100 W) and to
-meter 2 when not. A change is confirmed after N such samples in a row
-(default 3); until then the last confirmed state holds. Undecided samples
+Otherwise it points to meter 2 when `r < share · a` (the Victron covers less
+than the share of the apartment, default 0.5) and to the Victron when not. The
+rule is proportional because the apartment meter and the Victron disagree by a
+few percent at sustained loads and do not report at the same instant; an
+absolute margin gave false meter-2 episodes on live data. A change is confirmed
+after N such samples in a row (default 10); until then the last confirmed state holds. Undecided samples
 neither count nor reset a streak. The confirmed changes are kept in a log of
 their own and, after a restart, rebuilt from the recorder's state history;
 hours older than that are classified from hourly means.
 
 **Configuration.** Options → *Zasilanie mieszkania*: the apartment power
 sensor, the Victron output power sensor, the other sub-meters behind the
-Victron, the metered device that is the apartment, and the three thresholds.
+Victron, the metered device that is the apartment, and the three thresholds (minimum power 300 W, Victron share 0.5, N = 10).
 Leave the three sensors empty to turn detection off. The apartment meter must
 sit directly under the main consumption meter (options → *Hierarchia
 liczników*); the form refuses anything else.
@@ -235,7 +238,10 @@ liczników*); the form refuses anything else.
   the Victron's reading), while the apartment and the meters under it keep
   learning in every hour, whatever fed them. Hours with a mixed or unknown
   supply give no base sample rather than a guess, and a missing sub-meter
-  reading or a negative remainder drops the hour instead of counting as zero.
+  reading drops the hour instead of counting as zero. A negative remainder
+  (sub-meters above the node's own reading) is kept as is and counted: the
+  unmetered base is small, so its hourly value is meter noise around zero and
+  the raw values average to the truth, while dropping or clamping them biases it.
   The profiles relearn once after the upgrade and again after you enable
   detection or change the apartment meter.
 - Forecast and chart: while the apartment is on meter 2 its subtree (including
@@ -248,7 +254,8 @@ liczników*); the form refuses anything else.
 **Diagnostics.** The panel status and the debug export have a `supply` section:
 state, since, history coverage, checkpoint, the last 50 transitions (with the
 total), storage/replay/save errors, thresholds, configured sensors, and how many
-hours the last consumption learning run dropped (`learning_dropped`).
+hours the last consumption learning run dropped or kept negative
+(`learning_dropped`).
 `scripts/backtest_supply_detector.py` checks the rule against the PPE 2 import
 statistic on exported hourly data; its docstring explains how to export it.
 

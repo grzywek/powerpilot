@@ -278,8 +278,10 @@ PPE_1: Final = "ppe1"
 # A manual switch moves the apartment between the Victron output (PPE 1) and
 # the second meter (PPE 2). ``modules/supply.py`` tells which from power alone:
 # with the apartment drawing at least ``supply_min_apartment_w``, it is on the
-# Victron when the Victron output minus the other sub-meters behind it covers
-# the apartment within ``supply_margin_w``; ``supply_confirm_samples`` agreeing
+# Victron unless the Victron output minus the other sub-meters behind it covers
+# less than ``supply_victron_share`` of the apartment's power (a proportional
+# rule: the meters disagree by a few percent, so an absolute margin gave false
+# meter-2 episodes); ``supply_confirm_samples`` agreeing
 # samples in a row confirm a change. Detection is on only when the apartment
 # sensor, the Victron output sensor and the other sub-meters are all set.
 CONF_APARTMENT_POWER_SENSOR: Final = "apartment_power_sensor"  # W or kW
@@ -290,7 +292,7 @@ CONF_VICTRON_OUTPUT_POWER_SENSOR: Final = "victron_output_power_sensor"  # W or 
 # Power sensors of the other loads behind the Victron (outside the apartment).
 CONF_VICTRON_OTHER_POWER_SENSORS: Final = "victron_other_power_sensors"
 CONF_SUPPLY_MIN_APARTMENT_W: Final = "supply_min_apartment_w"
-CONF_SUPPLY_MARGIN_W: Final = "supply_margin_w"
+CONF_SUPPLY_VICTRON_SHARE: Final = "supply_victron_share"
 CONF_SUPPLY_CONFIRM_SAMPLES: Final = "supply_confirm_samples"
 
 SUPPLY_VICTRON: Final = "victron"  # apartment fed from the Victron (PPE 1)
@@ -366,8 +368,8 @@ DEFAULTS: Final = {
     CONF_TRAVEL_MARGIN_BEFORE_MIN: 30,
     CONF_TRAVEL_MARGIN_AFTER_MIN: 30,
     CONF_SUPPLY_MIN_APARTMENT_W: 300.0,
-    CONF_SUPPLY_MARGIN_W: 100.0,
-    CONF_SUPPLY_CONFIRM_SAMPLES: 3,
+    CONF_SUPPLY_VICTRON_SHARE: 0.5,
+    CONF_SUPPLY_CONFIRM_SAMPLES: 10,
 }
 
 # ---------------------------------------------------------------------------

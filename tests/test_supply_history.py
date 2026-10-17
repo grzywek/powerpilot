@@ -28,6 +28,7 @@ from custom_components.powerpilot.const import (
     CONF_APARTMENT_METER,
     CONF_APARTMENT_POWER_SENSOR,
     CONF_VICTRON_OTHER_POWER_SENSORS,
+    CONF_SUPPLY_CONFIRM_SAMPLES,
     CONF_VICTRON_OUTPUT_POWER_SENSOR,
     DEFAULTS,
     DOMAIN,
@@ -57,6 +58,8 @@ SUPPLY_CONFIG = {
     CONF_APARTMENT_POWER_SENSOR: APARTMENT,
     CONF_VICTRON_OUTPUT_POWER_SENSOR: VICTRON,
     CONF_VICTRON_OTHER_POWER_SENSORS: [GARAGE],
+    # The tests below confirm in three ticks; the shipped default is 10.
+    CONF_SUPPLY_CONFIRM_SAMPLES: 3,
 }
 ENTRY_ID = "supply_history_entry"
 STORE_KEY = f"{DOMAIN}_{ENTRY_ID}_supply"
@@ -555,7 +558,7 @@ def test_hourly_classification_keeps_decided_hours_only() -> None:
         ...,  # 10 no row at all
         ON_VICTRON,  # 11
     )
-    assert classify_hours(means, 300.0, 100.0) == {
+    assert classify_hours(means, 300.0, 0.5) == {
         H: SUPPLY_VICTRON,
         H + HOUR: SUPPLY_VICTRON,
         H + 2 * HOUR: SUPPLY_VICTRON,
@@ -569,9 +572,9 @@ def test_hourly_classification_keeps_decided_hours_only() -> None:
 
 def test_hourly_classification_uses_the_thresholds_given() -> None:
     means = _hours((500.0, 350.0))
-    assert classify_hours(means, 300.0, 100.0) == {H: SUPPLY_METER_2}
-    assert classify_hours(means, 300.0, 200.0) == {H: SUPPLY_VICTRON}
-    assert classify_hours(means, 600.0, 100.0) == {}
+    assert classify_hours(means, 300.0, 0.5) == {H: SUPPLY_VICTRON}
+    assert classify_hours(means, 300.0, 0.8) == {H: SUPPLY_METER_2}
+    assert classify_hours(means, 600.0, 0.5) == {}
 
 
 async def test_hourly_states_come_from_mean_statistics_before_the_log(

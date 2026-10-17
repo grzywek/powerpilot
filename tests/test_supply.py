@@ -1,8 +1,9 @@
 """Apartment supply: which point of delivery feeds the apartment (stage 2, slice 1).
 
 The rule (parent spec, 2026-09-14): with the apartment drawing at least
-``P_min``, it is on the Victron when the Victron output minus the other
-sub-meters behind it covers the apartment within ``margin``; N agreeing samples
+``P_min``, when the Victron output minus the other
+sub-meters behind it covers less than ``share`` of the apartment, it is on
+meter 2, else on the Victron; N agreeing samples
 in a row confirm a change, otherwise the last confirmed state holds.
 """
 
@@ -27,7 +28,7 @@ from custom_components.powerpilot.const import (
     CONF_APARTMENT_POWER_SENSOR,
     CONF_SOC_SENSOR,
     CONF_SUPPLY_CONFIRM_SAMPLES,
-    CONF_SUPPLY_MARGIN_W,
+    CONF_SUPPLY_VICTRON_SHARE,
     CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_VICTRON_OTHER_POWER_SENSORS,
     CONF_VICTRON_OUTPUT_POWER_SENSOR,
@@ -56,6 +57,8 @@ SUPPLY_CONFIG = {
     CONF_APARTMENT_POWER_SENSOR: APARTMENT,
     CONF_VICTRON_OUTPUT_POWER_SENSOR: VICTRON,
     CONF_VICTRON_OTHER_POWER_SENSORS: [GARAGE],
+    # The tests below confirm in three ticks; the shipped default is 10.
+    CONF_SUPPLY_CONFIRM_SAMPLES: 3,
 }
 ENTRY_ID = "supply_entry"
 STORE_KEY = f"{DOMAIN}_{ENTRY_ID}_supply"
@@ -66,7 +69,7 @@ def _t(i: int) -> datetime:
 
 
 def _detector(n: int = 3, **kwargs) -> SupplyDetector:
-    return SupplyDetector(300.0, 100.0, n, **kwargs)
+    return SupplyDetector(300.0, 0.5, n, **kwargs)
 
 
 # Samples as (apartment W, Victron net W): on the Victron the net output covers
@@ -81,18 +84,30 @@ IDLE = (150.0, 0.0)
 # ---------------------------------------------------------------------------
 
 
-def test_rule_decides_only_above_the_minimum_and_within_the_margin() -> None:
-    assert classify_sample(299.9, 0.0, 300.0, 100.0) is None
-    assert classify_sample(300.0, 200.0, 300.0, 100.0) == SUPPLY_VICTRON  # r == a - margin
-    assert classify_sample(300.0, 199.9, 300.0, 100.0) == SUPPLY_METER_2
-    assert classify_sample(2000.0, 2500.0, 300.0, 100.0) == SUPPLY_VICTRON
+def test_rule_decides_only_above_the_minimum_and_below_the_share() -> None:
+    assert classify_sample(299.9, 0.0, 300.0, 0.5) is None
+    assert classify_sample(300.0, 150.0, 300.0, 0.5) == SUPPLY_VICTRON  # r == share * a
+    assert classify_sample(300.0, 149.9, 300.0, 0.5) == SUPPLY_METER_2
+    assert classify_sample(2000.0, 2500.0, 300.0, 0.5) == SUPPLY_VICTRON
+
+
+def test_rule_is_proportional_not_an_absolute_margin() -> None:
+    """Live 2026-10: ``r >= a - 100 W`` gave 6-14 false meter-2 episodes in 14 days.
+
+    The apartment meter and the Victron disagree by a few percent at ~2 kW and
+    do not report simultaneously; 1850 W against 2000 W is the Victron.
+    """
+    assert classify_sample(2000.0, 1850.0, 300.0, 0.5) == SUPPLY_VICTRON
+    assert classify_sample(2000.0, 900.0, 300.0, 0.5) == SUPPLY_METER_2
+    # The same 150 W gap at 500 W is a real difference of 30 %, still the Victron.
+    assert classify_sample(500.0, 350.0, 300.0, 0.5) == SUPPLY_VICTRON
 
 
 def test_thresholds_are_parameters_not_constants() -> None:
-    # 500 W apartment, 350 W net: meter_2 with a 100 W margin, victron with 200 W.
-    assert classify_sample(500.0, 350.0, 300.0, 100.0) == SUPPLY_METER_2
-    assert classify_sample(500.0, 350.0, 300.0, 200.0) == SUPPLY_VICTRON
-    assert classify_sample(500.0, 350.0, 600.0, 100.0) is None
+    # 500 W apartment, 350 W net: victron with a share of 0.5, meter_2 with 0.8.
+    assert classify_sample(500.0, 350.0, 300.0, 0.5) == SUPPLY_VICTRON
+    assert classify_sample(500.0, 350.0, 300.0, 0.8) == SUPPLY_METER_2
+    assert classify_sample(500.0, 350.0, 600.0, 0.5) is None
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +501,7 @@ async def test_thresholds_come_from_the_options(hass: HomeAssistant) -> None:
         {
             **SUPPLY_CONFIG,
             CONF_SUPPLY_MIN_APARTMENT_W: 1500.0,
-            CONF_SUPPLY_MARGIN_W: 50.0,
+            CONF_SUPPLY_VICTRON_SHARE: 0.9,
             CONF_SUPPLY_CONFIRM_SAMPLES: 1,
         },
     )
@@ -547,7 +562,7 @@ async def test_entity_is_unknown_until_confirmed_then_shows_state_and_evidence(
     assert attributes["source"] == SUPPLY_SOURCE_LIVE
     assert attributes["streak"] == 0
     assert attributes["min_apartment_w"] == 300.0
-    assert attributes["margin_w"] == 100.0
+    assert attributes["victron_share"] == 0.5
     assert attributes["confirm_samples"] == 3
 
     assert await hass.config_entries.async_unload(entry.entry_id)

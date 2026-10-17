@@ -280,14 +280,14 @@
       },
       "supply": {
         "title": "PowerPilot – apartment supply",
-        "description": "Tells whether the apartment is fed from the Victron (PPE 1) or from the second meter (PPE 2), from power alone. When the apartment draws at least the minimum power, it is on the Victron if the Victron output minus the other sub-meters behind it covers the apartment within the margin. A change counts after that many agreeing samples in a row (one every 30 s). Detection is on only when the apartment sensor, the Victron output sensor and the other sub-meters are all set; leave all three empty to turn it off.",
+        "description": "Tells whether the apartment is fed from the Victron (PPE 1) or from the second meter (PPE 2), from power alone. When the apartment draws at least the minimum power, it is on the Victron unless the Victron output minus the other sub-meters behind it covers less than the set share of the apartment's power. A change counts after that many agreeing samples in a row (one every 30 s). Detection is on only when the apartment sensor, the Victron output sensor and the other sub-meters are all set; leave all three empty to turn it off.",
         "data": {
           "apartment_power_sensor": "Apartment power (W or kW)",
           "apartment_meter": "Metered device that is the apartment (its sub-meters move with it)",
           "victron_output_power_sensor": "Victron output power (W or kW)",
           "victron_other_power_sensors": "Power of the other sub-meters behind the Victron (outside the apartment)",
           "supply_min_apartment_w": "Minimum apartment power to decide",
-          "supply_margin_w": "Margin",
+          "supply_victron_share": "Share of the apartment's power the Victron must cover (0.5 = half)",
           "supply_confirm_samples": "Agreeing samples in a row to confirm a change"
         }
       }

@@ -14,7 +14,7 @@ from custom_components.powerpilot.const import (
     CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
     CONF_SUPPLY_CONFIRM_SAMPLES,
-    CONF_SUPPLY_MARGIN_W,
+    CONF_SUPPLY_VICTRON_SHARE,
     CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_VICTRON_OTHER_POWER_SENSORS,
     CONF_VICTRON_OUTPUT_POWER_SENSOR,
@@ -74,10 +74,10 @@ async def test_supply_section_saves_sensors_meter_and_thresholds(
     hass: HomeAssistant,
 ) -> None:
     entry, result = await _open_supply(hass)
-    # Defaults come from the plan: 300 W, 100 W, 3 samples.
+    # Defaults: 300 W, a share of 0.5, 10 samples.
     assert _field(result, CONF_SUPPLY_MIN_APARTMENT_W)[0].default() == 300.0
-    assert _field(result, CONF_SUPPLY_MARGIN_W)[0].default() == 100.0
-    assert _field(result, CONF_SUPPLY_CONFIRM_SAMPLES)[0].default() == 3
+    assert _field(result, CONF_SUPPLY_VICTRON_SHARE)[0].default() == 0.5
+    assert _field(result, CONF_SUPPLY_CONFIRM_SAMPLES)[0].default() == 10
     # The apartment is picked among the metered devices.
     _, meter = _field(result, CONF_APARTMENT_METER)
     assert [o["value"] for o in meter.config["options"]] == [
@@ -92,7 +92,7 @@ async def test_supply_section_saves_sensors_meter_and_thresholds(
             **SENSORS,
             CONF_APARTMENT_METER: "sensor.apartment_energy",
             CONF_SUPPLY_MIN_APARTMENT_W: 400,
-            CONF_SUPPLY_MARGIN_W: 150,
+            CONF_SUPPLY_VICTRON_SHARE: 0.6,
             CONF_SUPPLY_CONFIRM_SAMPLES: 4,
         },
     )
@@ -104,7 +104,7 @@ async def test_supply_section_saves_sensors_meter_and_thresholds(
     assert options[CONF_VICTRON_OTHER_POWER_SENSORS] == ["sensor.garage_socket_power"]
     assert options[CONF_APARTMENT_METER] == "sensor.apartment_energy"
     assert options[CONF_SUPPLY_MIN_APARTMENT_W] == 400.0
-    assert options[CONF_SUPPLY_MARGIN_W] == 150.0
+    assert options[CONF_SUPPLY_VICTRON_SHARE] == 0.6
     assert options[CONF_SUPPLY_CONFIRM_SAMPLES] == 4
     assert isinstance(options[CONF_SUPPLY_CONFIRM_SAMPLES], int)
 
@@ -161,9 +161,31 @@ async def test_an_apartment_meter_below_another_meter_is_refused(hass: HomeAssis
             **SENSORS,
             CONF_APARTMENT_METER: "sensor.apartment_energy",
             CONF_SUPPLY_MIN_APARTMENT_W: 300,
-            CONF_SUPPLY_MARGIN_W: 100,
+            CONF_SUPPLY_VICTRON_SHARE: 0.5,
             CONF_SUPPLY_CONFIRM_SAMPLES: 3,
         },
     )
     assert result["step_id"] == "supply"
     assert result["errors"] == {"base": "supply_apartment_not_top_level"}
+
+
+async def test_saving_the_step_drops_the_obsolete_margin_and_stores_the_share(
+    hass: HomeAssistant,
+) -> None:
+    """The proportional rule replaced ``supply_margin_w``; stored options carry it."""
+    entry, result = await _open_supply(hass, {"supply_margin_w": 100.0})
+    result = await _configure(
+        hass,
+        result,
+        {
+            **SENSORS,
+            CONF_APARTMENT_METER: "sensor.apartment_energy",
+            CONF_SUPPLY_MIN_APARTMENT_W: 300,
+            CONF_SUPPLY_VICTRON_SHARE: 0.4,
+            CONF_SUPPLY_CONFIRM_SAMPLES: 10,
+        },
+    )
+    await _finish(hass, result)
+
+    assert "supply_margin_w" not in entry.options
+    assert entry.options[CONF_SUPPLY_VICTRON_SHARE] == 0.4

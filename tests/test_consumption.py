@@ -408,7 +408,7 @@ def test_supply_status_lists_the_log_tail_and_the_configuration() -> None:
     assert status["checkpoint"] is None
     assert status["apartment_meter"] == APARTMENT
     assert status["other_sensors"] == ["sensor.garage_power"]
-    assert (status["min_apartment_w"], status["margin_w"]) == (300.0, 100.0)
+    assert (status["min_apartment_w"], status["victron_share"]) == (300.0, 0.5)
     # Many transitions: only the last 50 are listed, the total is exact.
     first = supply.transitions[0]
     supply.transitions = [first] * 60

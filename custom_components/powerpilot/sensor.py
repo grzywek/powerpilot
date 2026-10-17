@@ -520,7 +520,7 @@ class ApartmentSupplySensor(PowerPilotEntity, SensorEntity):
             # ``None`` while nothing is sampled (not configured, or log unusable).
             "streak": detector.streak if detector is not None else None,
             "min_apartment_w": supply.min_apartment_w,
-            "margin_w": supply.margin_w,
+            "victron_share": supply.victron_share,
             "confirm_samples": supply.confirm_samples,
             "error": supply.store_error,
             "replay_error": supply.replay_error,

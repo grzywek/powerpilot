@@ -17,7 +17,7 @@ Victron, and once with ``types: ["change"]`` for the long-term statistic of the
 second point of delivery's hourly import (kWh). Align the answers by hour
 start and write::
 
-    {"min_apartment_w": 300, "margin_w": 100,
+    {"min_apartment_w": 300, "victron_share": 0.5,
      "hours": [{"start": "2026-06-01T10:00:00+02:00",
                 "apartment_w": 850.0,      # hourly mean, W (null = no data)
                 "victron_w": 1020.0,       # hourly mean of the Victron output, W
@@ -42,17 +42,17 @@ VICTRON = "victron"
 METER_2 = "meter_2"
 
 
-def classify_sample(apartment_w, victron_net_w, min_apartment_w, margin_w):
+def classify_sample(apartment_w, victron_net_w, min_apartment_w, victron_share):
     """Same rule as ``classify_sample`` in ``modules/supply.py`` (keep in sync)."""
     if apartment_w < min_apartment_w:
         return None
-    return VICTRON if victron_net_w >= apartment_w - margin_w else METER_2
+    return METER_2 if victron_net_w < victron_share * apartment_w else VICTRON
 
 
 def backtest(data: dict) -> dict[str, int]:
     """Count the rule's verdicts against the PPE 2 truth for every hour."""
     min_w = float(data["min_apartment_w"])
-    margin_w = float(data["margin_w"])
+    victron_share = float(data["victron_share"])
     counts = {
         "true_meter_2": 0,  # truth meter_2, decided meter_2
         "false_victron": 0,  # truth meter_2, decided victron
@@ -77,7 +77,7 @@ def backtest(data: dict) -> dict[str, int]:
             counts["missing_data"] += 1
             continue
         truth = METER_2 if ppe2 > PPE2_TRUTH_KWH else VICTRON
-        decided = classify_sample(apartment, victron - sum(others), min_w, margin_w)
+        decided = classify_sample(apartment, victron - sum(others), min_w, victron_share)
         if decided is None:
             counts[f"undecided_truth_{truth}"] += 1
         elif truth == METER_2:

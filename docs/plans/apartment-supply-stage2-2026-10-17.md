@@ -237,3 +237,22 @@ persisted through `Store` (`{DOMAIN}_{entry_id}_supply`, `{"transitions":
    the apartment is on PPE 2, which has not happened since August. Its value
    is as the base for stage 3, whose upper bound measured on Jul–Oct 2026 data
    is ~26–28 zł/month.
+
+## Change 2026-10-17 after the live run
+
+- **Rule is proportional.** The absolute rule `victron when r >= a - 100 W`
+  produced 6-14 false "meter 2" episodes (15-23 h) in 14 days of real 30 s
+  samples, depending on the sampling phase: the apartment meter and the Victron
+  disagree by a few percent at sustained ~2 kW loads and report non-
+  simultaneously. The new rule: `meter_2` when `r < share * a`, else `victron`
+  (`supply_victron_share`, default 0.5; the key `supply_margin_w` is gone and
+  the options step removes it from stored options). It gave zero false episodes
+  at every phase and still detected a simulated meter-2 supply.
+- **N = 10** (was 3): with it there was also no false return to the Victron.
+- **Negative exclusive values are kept.** The unmetered base behind the Victron
+  is ~20 W on average (10 kWh over 21 days against 268 kWh), so its hourly value
+  scatters around zero with meter noise: 126 of 504 hours came out negative,
+  summing to -6 kWh. Dropping them discarded half the learning days and biased
+  the base upward; clamping biased it too. `exclusive_series` now keeps them
+  as they are and only counts them in `negative`; a missing child reading still
+  drops the hour.

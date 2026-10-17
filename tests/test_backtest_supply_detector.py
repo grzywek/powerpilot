@@ -29,9 +29,9 @@ def _hour(apartment, victron, others, ppe2):
 def test_main_prints_the_confusion_matrix(tmp_path, capsys) -> None:
     export = {
         "min_apartment_w": 300,
-        "margin_w": 100,
+        "victron_share": 0.5,
         "hours": [
-            _hour(800, 900, [50], 0.0),  # net 850 >= 700: victron, truth victron
+            _hour(800, 900, [50], 0.0),  # net 850 >= 400: victron, truth victron
             _hour(800, 900, [50], 0.0),
             _hour(800, 100, [50], 0.0),  # net 50: meter_2, truth victron (false)
             _hour(800, 100, [50], 0.6),  # meter_2, truth meter_2

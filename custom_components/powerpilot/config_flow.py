@@ -71,7 +71,7 @@ from .const import (
     CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
     CONF_SUPPLY_CONFIRM_SAMPLES,
-    CONF_SUPPLY_MARGIN_W,
+    CONF_SUPPLY_VICTRON_SHARE,
     CONF_SUPPLY_MIN_APARTMENT_W,
     CONF_TARCZA_TERMS,
     CONF_TARIFFS,
@@ -96,6 +96,9 @@ from .models import (
     TariffPeriod,
     ValidityRange,
 )
+
+# Stored by versions before the proportional rule; dropped when the step saves.
+_OBSOLETE_SUPPLY_MARGIN_KEY = "supply_margin_w"
 
 _NUMBER = selector.NumberSelector
 _NUM = selector.NumberSelectorConfig
@@ -289,9 +292,9 @@ def _supply_schema(
             vol.Required(
                 CONF_SUPPLY_MIN_APARTMENT_W, default=d(CONF_SUPPLY_MIN_APARTMENT_W)
             ): _NUMBER(_NUM(min=0, max=20000, step=10, unit_of_measurement="W", mode="box")),
-            vol.Required(CONF_SUPPLY_MARGIN_W, default=d(CONF_SUPPLY_MARGIN_W)): _NUMBER(
-                _NUM(min=0, max=5000, step=10, unit_of_measurement="W", mode="box")
-            ),
+            vol.Required(
+                CONF_SUPPLY_VICTRON_SHARE, default=d(CONF_SUPPLY_VICTRON_SHARE)
+            ): _NUMBER(_NUM(min=0.05, max=0.95, step=0.05, mode="box")),
             vol.Required(
                 CONF_SUPPLY_CONFIRM_SAMPLES, default=d(CONF_SUPPLY_CONFIRM_SAMPLES)
             ): _NUMBER(_NUM(min=1, max=20, step=1, mode="box")),
@@ -964,7 +967,11 @@ class PowerPilotOptionsFlow(OptionsFlow):
                 self._data[CONF_SUPPLY_MIN_APARTMENT_W] = float(
                     user_input[CONF_SUPPLY_MIN_APARTMENT_W]
                 )
-                self._data[CONF_SUPPLY_MARGIN_W] = float(user_input[CONF_SUPPLY_MARGIN_W])
+                self._data[CONF_SUPPLY_VICTRON_SHARE] = float(
+                    user_input[CONF_SUPPLY_VICTRON_SHARE]
+                )
+                # Replaced by the share (a change of meaning gets a new key).
+                self._data.pop(_OBSOLETE_SUPPLY_MARGIN_KEY, None)
                 self._data[CONF_SUPPLY_CONFIRM_SAMPLES] = int(
                     user_input[CONF_SUPPLY_CONFIRM_SAMPLES]
                 )

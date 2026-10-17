@@ -291,7 +291,9 @@ liczników*); the form refuses anything else.
   and while it is on a persistent notification is shown once per cycle and
   direction — "Przełącz mieszkanie na licznik 2 do HH:00, powrót ok. HH:00,
   oszczędność ~X zł", or the switch back to the Victron at the cycle's end —
-  and dismissed once the switch is detected or re-planned away.
+  and dismissed once the switch is detected or re-planned away. A confirmed
+  switch (or a log rebuilt with another transition time) re-plans at once,
+  not at the next hour.
   `sensor.…_apartment_supply_plan` (number of cycles; cycles with start,
   return, hours, kWh and saving, and the hourly planned supply as
   attributes), `…_apartment_next_switch` (target, planned return, cycle id),

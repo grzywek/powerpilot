@@ -133,6 +133,7 @@ _TRIGGER_LABELS: Final[dict[str, str]] = {
     "presence": "obecność",
     "calendar": "kalendarz",
     "reserve": "rezerwa ESS",
+    "supply": "zasilanie mieszkania",
 }
 # Role → (states that read as "yes", word for yes, word for no). Mirrors the EV
 # module's own dialect sets, so the label matches what the planner concluded.
@@ -380,7 +381,26 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
     @callback
     def _async_on_supply_changed(self) -> None:
+        """Follow a confirmed supply at once: the notification and the plan.
+
+        A plan made under another confirmed supply (state or transition time)
+        misplaces the apartment from now on — the running hour, the cycles and
+        the recommendation all follow it — so it is re-planned now rather than
+        at the next hour. A streak tick changes neither and re-plans nothing.
+        """
         self._sync_switch_notification(self.data)
+        planning = self.supply_planning
+        if planning is None:
+            return
+        if (planning.actual, planning.last_transition_at) == (
+            self.supply.state,
+            self.supply.since,
+        ):
+            return
+        label = _TRIGGER_LABELS["supply"]
+        if label not in self._pending_triggers:
+            self._pending_triggers.append(label)
+        self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_setup_snapshots(self) -> None:
         self._snapshot_store = Store(

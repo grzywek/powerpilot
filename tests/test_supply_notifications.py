@@ -9,6 +9,7 @@ options of the supply step.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -140,6 +141,63 @@ def test_the_notification_follows_switch_required_and_survives_a_restart(
     )
     sync(restarted, plan)
     assert len(notifications) == 2
+
+
+def _supply_listener(planning, state: str | None, since):
+    """The coordinator's supply-signal handler around a fake, and what it did."""
+    did: dict[str, list] = {"synced": [], "refreshes": []}
+
+    async def _refresh() -> None:
+        did["refreshes"].append(True)
+
+    def _create_task(coro) -> None:
+        coro.close()
+        did["refreshes"].append(True)
+
+    fake = SimpleNamespace(
+        data=None,
+        supply_planning=planning,
+        supply=SimpleNamespace(state=state, since=since),
+        _pending_triggers=[],
+        _sync_switch_notification=lambda plan: did["synced"].append(plan),
+        async_request_refresh=_refresh,
+        hass=SimpleNamespace(async_create_task=_create_task),
+    )
+    PowerPilotCoordinator._async_on_supply_changed(fake)
+    return fake, did
+
+
+def test_a_plan_made_under_another_supply_is_replanned_at_once() -> None:
+    """Live 2026-10-18 01:04: a reload planned while the replay still ran.
+
+    The plan saw the supply as unknown and modelled no switching; the replay
+    then confirmed meter 2, and the recommendation stayed unknown until the
+    next hour. Likewise the confirmation at 18:52 of the switch at 17:58 was
+    planned only at 19:00.
+    """
+    since = NOW - timedelta(hours=7)
+    made_unknown = _planning(actual=None)
+    fake, did = _supply_listener(made_unknown, SUPPLY_METER_2, since)
+    assert did["synced"] == [None]
+    assert did["refreshes"] == [True]
+    assert fake._pending_triggers == ["zasilanie mieszkania"]
+
+    # A rule rebuild re-dates the same state: the plan's cycle starts move.
+    made_meter_2 = _planning(actual=SUPPLY_METER_2, last_transition_at=since)
+    _, did = _supply_listener(made_meter_2, SUPPLY_METER_2, since - timedelta(minutes=3))
+    assert did["refreshes"] == [True]
+
+
+def test_a_streak_tick_or_no_plan_yet_replans_nothing() -> None:
+    since = NOW - timedelta(hours=7)
+    made = _planning(actual=SUPPLY_METER_2, last_transition_at=since)
+    fake, did = _supply_listener(made, SUPPLY_METER_2, since)
+    assert did["synced"] == [None]  # the notification still follows
+    assert did["refreshes"] == []
+    assert fake._pending_triggers == []
+
+    _, did = _supply_listener(None, SUPPLY_METER_2, since)
+    assert did["refreshes"] == []
 
 
 # ------------------------------------------------------------------ numbers

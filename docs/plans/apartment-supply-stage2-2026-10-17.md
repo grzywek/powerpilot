@@ -1,7 +1,7 @@
 # Stage 2: apartment supply state and switch-aware load model
 
-Status: accepted 2026-10-17 (open questions answered at the end). Binds the
-executing agent.
+Status: Done 2026-10-17 (slices 1–4); accepted 2026-10-17 (open questions
+answered at the end). Binds the executing agent.
 
 Parent spec: `docs/apartment-supply-planning.plan.md` (stage 2 of 4; its
 "Ustalenia z 2026-09-14" are settled and are not re-asked). Stage 1 (price cap

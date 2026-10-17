@@ -88,7 +88,7 @@ from .const import (
     PRICE_SOURCE_SENSOR,
     charge_curve_band_key,
 )
-from .hierarchy import PARENT_ROOT, metered_sensors
+from .hierarchy import PARENT_ROOT, build_children, metered_sensors
 from .models import (
     CAP_TERMS_OVERLAP,
     PriceCapTerms,
@@ -300,8 +300,12 @@ def _supply_schema(
     return vol.Schema(fields)
 
 
-def _supply_errors(user_input: dict[str, Any]) -> dict[str, str]:
-    """Detection needs all three inputs, each sensor in one role only."""
+def _supply_errors(user_input: dict[str, Any], data: dict[str, Any]) -> dict[str, str]:
+    """Detection needs all three inputs, each sensor in one role only.
+
+    The apartment meter must sit directly under the main consumption meter in
+    the configured meter tree.
+    """
     apartment = user_input.get(CONF_APARTMENT_POWER_SENSOR)
     victron = user_input.get(CONF_VICTRON_OUTPUT_POWER_SENSOR)
     others = list(user_input.get(CONF_VICTRON_OTHER_POWER_SENSORS) or [])
@@ -311,6 +315,14 @@ def _supply_errors(user_input: dict[str, Any]) -> dict[str, str]:
     roles = [e for e in (apartment, victron, *others) if e]
     if len(roles) != len(set(roles)):
         return {"base": "supply_sensor_reused"}
+    meter = user_input.get(CONF_APARTMENT_METER)
+    if meter:
+        root = data.get(CONF_CONSUMPTION_SENSOR) or ""
+        children = build_children(
+            root, metered_sensors(data), data.get(CONF_SENSOR_PARENTS)
+        )
+        if meter not in children.get(root, []):
+            return {"base": "supply_apartment_not_top_level"}
     return {}
 
 
@@ -937,7 +949,7 @@ class PowerPilotOptionsFlow(OptionsFlow):
         ]
         errors: dict[str, str] = {}
         if user_input is not None:
-            errors = _supply_errors(user_input)
+            errors = _supply_errors(user_input, self._data)
             if not errors:
                 for key in (*_SUPPLY_SENSOR_KEYS, CONF_APARTMENT_METER):
                     if user_input.get(key):

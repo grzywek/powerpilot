@@ -1946,7 +1946,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         The climate-owned devices read their temperature models (matching what
         the optimizer plans); every other device uses the learned weekly average.
+        A device the Victron does not feed (the apartment's subtree on meter 2)
+        has none, matching the Victron demand the optimizer plans.
         """
+        if eid in self.supply.victron_detached_devices():
+            return None
         if self.climate.handles(eid):
             value = self.climate.forecast_kwh(eid, hour)
             if value is not None:
@@ -3502,4 +3506,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "calendars": self.calendar.calendars_payload(),
             "modules": modules,
             "checks": checks,
+            "supply": {
+                **self.supply.status(),
+                "learning_dropped": self.consumption.learning_dropped,
+            },
         }

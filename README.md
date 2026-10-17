@@ -204,6 +204,54 @@ PowerPilot models it end to end:
 All five carry the full settlement record (hours covered, gaps, reasons) as
 attributes.
 
+## Apartment supply (second meter)
+
+A manual switch moves the apartment between the Victron output (PPE 1) and the
+second point of delivery (PPE 2). Nothing reports its position, so PowerPilot
+tells it from power and keeps the answer in `sensor.…_apartment_supply`:
+`Victron (PPE 1)`, `Meter 2 (PPE 2)`, or unknown until the first confirmation.
+Its attributes carry the last evidence, the thresholds and any storage errors.
+
+**The rule.** Every 30 s PowerPilot compares the apartment power `a` with
+`r` = Victron output power minus the other sub-meters behind the Victron.
+Below the minimum apartment power (default 300 W) the sample decides nothing.
+Otherwise it points to the Victron when `r ≥ a − margin` (default 100 W) and to
+meter 2 when not. A change is confirmed after N such samples in a row
+(default 3); until then the last confirmed state holds. Undecided samples
+neither count nor reset a streak. The confirmed changes are kept in a log of
+their own and, after a restart, rebuilt from the recorder's state history;
+hours older than that are classified from hourly means.
+
+**Configuration.** Options → *Zasilanie mieszkania*: the apartment power
+sensor, the Victron output power sensor, the other sub-meters behind the
+Victron, the metered device that is the apartment, and the three thresholds.
+Leave the three sensors empty to turn detection off. The apartment meter must
+sit directly under the main consumption meter (options → *Hierarchia
+liczników*); the form refuses anything else.
+
+**What changes.**
+- Learning: in hours the apartment spent on meter 2 the Victron's base
+  profile is no longer reduced by the apartment's consumption (it was not in
+  the Victron's reading), while the apartment and the meters under it keep
+  learning in every hour, whatever fed them. Hours with a mixed or unknown
+  supply give no base sample rather than a guess, and a missing sub-meter
+  reading or a negative remainder drops the hour instead of counting as zero.
+  The profiles relearn once after the upgrade and again after you enable
+  detection or change the apartment meter.
+- Forecast and chart: while the apartment is on meter 2 its subtree (including
+  climate sensors inside it) is left out of the Victron demand the optimizer
+  plans, and out of the chart's per-device forecast. The confirmed state is
+  assumed to hold for the whole horizon.
+- Unknown: the apartment is planned on the Victron, and the plan carries a
+  reminder that its supply is not known yet.
+
+**Diagnostics.** The panel status and the debug export have a `supply` section:
+state, since, history coverage, checkpoint, the last 50 transitions (with the
+total), storage/replay/save errors, thresholds, configured sensors, and how many
+hours the last consumption learning run dropped (`learning_dropped`).
+`scripts/backtest_supply_detector.py` checks the rule against the PPE 2 import
+statistic on exported hourly data; its docstring explains how to export it.
+
 ## Status
 
 Implemented: **Stage 0** (foundation — models, battery cost-after-losses, module

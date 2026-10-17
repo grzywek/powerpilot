@@ -104,6 +104,8 @@ class ConsumptionModule(PowerPilotModule):
         # kWh still sit inside the apartment profile — so the profile is reset
         # and relearned from history instead of mixing two attributions forever.
         self._topology: list | None = None
+        # Hours the last learning run could not attribute (``None`` before it).
+        self.learning_dropped: dict | None = None
         self._default_profile = self._build_default_profile()
 
     # ------------------------------------------------------------------
@@ -489,6 +491,12 @@ class ConsumptionModule(PowerPilotModule):
 
     def _log_dropped_hours(self, exclusive: ExclusiveSeries, days: int) -> None:
         """Say which hours of the learning window the meter tree could not attribute."""
+        self.learning_dropped = {
+            "window_days": days,
+            "supply_dropped": exclusive.supply_dropped,
+            "missing_child": dict(exclusive.missing_child),
+            "negative": dict(exclusive.negative),
+        }
         parts: list[str] = []
         if exclusive.supply_dropped:
             parts.append(

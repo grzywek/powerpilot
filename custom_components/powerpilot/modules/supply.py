@@ -95,6 +95,9 @@ SUPPLY_CHECKPOINT_INTERVAL = timedelta(minutes=15)
 # The replay reads the recorder's state history in windows of at most this
 # length: a first run covers weeks of sensors reporting every few seconds
 # (≈600 states per hour each), which is not loaded at once.
+# Most recent transitions listed in the diagnostics (the total is reported too).
+SUPPLY_STATUS_TRANSITIONS = 50
+
 SUPPLY_REPLAY_CHUNK = timedelta(hours=6)
 
 # Lower bound for "the oldest state the recorder holds" of an input.
@@ -615,6 +618,29 @@ class SupplyModule(PowerPilotModule):
                 "jego zużycie po stronie Victrona."
             ]
         return []
+
+    def status(self) -> dict[str, Any]:
+        """Diagnostics for the panel status and the debug export."""
+        return {
+            "enabled": self.enabled,
+            "active": self.active,
+            "state": self.state,
+            "since": self.since.isoformat() if self.since else None,
+            "covered_from": self.covered_from.isoformat() if self.covered_from else None,
+            "checkpoint": self.checkpoint.to_dict() if self.checkpoint else None,
+            "transitions_total": len(self.transitions),
+            "transitions": [t.to_dict() for t in self.transitions[-SUPPLY_STATUS_TRANSITIONS:]],
+            "store_error": self.store_error,
+            "replay_error": self.replay_error,
+            "save_error": self.save_error,
+            "min_apartment_w": self.min_apartment_w,
+            "margin_w": self.margin_w,
+            "confirm_samples": self.confirm_samples,
+            "apartment_sensor": self.apartment_sensor or None,
+            "victron_sensor": self.victron_sensor or None,
+            "other_sensors": self.other_sensors,
+            "apartment_meter": self.apartment_meter or None,
+        }
 
     def supply_for_hour(self, hour: datetime) -> str:
         """``victron`` / ``meter_2`` / ``mixed`` / ``unknown`` for the hour from ``hour``."""

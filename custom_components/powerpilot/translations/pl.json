@@ -299,7 +299,8 @@
       "cap_terms_limit": "Limit musi być większy od zera.",
       "cap_terms_overlap": "Ten okres nachodzi na inną Tarczę.",
       "supply_incomplete": "Ustaw wszystkie trzy: czujnik mieszkania, wyjście Victrona i co najmniej jeden pozostały podlicznik za Victronem — albo zostaw wszystkie trzy puste.",
-      "supply_sensor_reused": "Każdy czujnik może pełnić tylko jedną rolę: mieszkanie, wyjście Victrona i pozostałe podliczniki muszą być różnymi czujnikami."
+      "supply_sensor_reused": "Każdy czujnik może pełnić tylko jedną rolę: mieszkanie, wyjście Victrona i pozostałe podliczniki muszą być różnymi czujnikami.",
+      "supply_apartment_not_top_level": "Licznik mieszkania musi być bezpośrednio pod głównym licznikiem zużycia (sekcja Hierarchia liczników)."
     }
   },
   "selector": {

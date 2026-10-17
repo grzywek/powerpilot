@@ -299,7 +299,8 @@
       "cap_terms_limit": "The limit must be greater than zero.",
       "cap_terms_overlap": "This period overlaps another price cap edition.",
       "supply_incomplete": "Set all three: the apartment sensor, the Victron output sensor and at least one other sub-meter behind the Victron — or leave all three empty.",
-      "supply_sensor_reused": "Each sensor can play one role only: the apartment, the Victron output and the other sub-meters must be different sensors."
+      "supply_sensor_reused": "Each sensor can play one role only: the apartment, the Victron output and the other sub-meters must be different sensors.",
+      "supply_apartment_not_top_level": "The apartment meter must sit directly under the main consumption meter (the Meter hierarchy section)."
     }
   },
   "selector": {

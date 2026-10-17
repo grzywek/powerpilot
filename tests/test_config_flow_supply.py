@@ -9,7 +9,9 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.powerpilot.const import (
     CONF_APARTMENT_METER,
     CONF_APARTMENT_POWER_SENSOR,
+    CONF_CONSUMPTION_SENSOR,
     CONF_DEVICE_SENSORS,
+    CONF_SENSOR_PARENTS,
     CONF_SOC_SENSOR,
     CONF_SUPPLY_CONFIRM_SAMPLES,
     CONF_SUPPLY_MARGIN_W,
@@ -33,6 +35,7 @@ async def _open_supply(hass: HomeAssistant, options: dict | None = None):
         data={
             **DEFAULTS,
             CONF_SOC_SENSOR: "sensor.soc",
+            CONF_CONSUMPTION_SENSOR: "sensor.main_energy",
             CONF_DEVICE_SENSORS: ["sensor.apartment_energy", "sensor.boiler_energy"],
         },
         options=options or {},
@@ -138,3 +141,29 @@ async def test_clearing_the_sensors_turns_detection_off(hass: HomeAssistant) -> 
     await _finish(hass, result)
     for key in (*SENSORS, CONF_APARTMENT_METER):
         assert key not in entry.options, key
+
+
+async def test_an_apartment_meter_below_another_meter_is_refused(hass: HomeAssistant) -> None:
+    entry, result = await _open_supply(hass)
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            CONF_SENSOR_PARENTS: {"sensor.apartment_energy": "sensor.boiler_energy"},
+        },
+    )
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _configure(hass, result, {"next_step_id": "supply"})
+    result = await _configure(
+        hass,
+        result,
+        {
+            **SENSORS,
+            CONF_APARTMENT_METER: "sensor.apartment_energy",
+            CONF_SUPPLY_MIN_APARTMENT_W: 300,
+            CONF_SUPPLY_MARGIN_W: 100,
+            CONF_SUPPLY_CONFIRM_SAMPLES: 3,
+        },
+    )
+    assert result["step_id"] == "supply"
+    assert result["errors"] == {"base": "supply_apartment_not_top_level"}

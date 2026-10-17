@@ -371,3 +371,67 @@ async def test_turning_supply_detection_on_relearns_the_profiles() -> None:
     assert module._topology != learned_under
     assert any("od nowa" in msg for _, msg in logs)
     assert module.base.observed_days == 1  # relearned at once, not tomorrow
+
+
+def _forecast(module: ConsumptionModule, entity_id: str) -> float | None:
+    """The chart's per-device forecast, as the coordinator computes it."""
+    from custom_components.powerpilot.coordinator import PowerPilotCoordinator
+
+    stub = SimpleNamespace(
+        climate=module.coordinator.climate,
+        consumption=module,
+        supply=module.coordinator.supply,
+    )
+    return PowerPilotCoordinator._device_forecast_kwh(stub, entity_id, HOUR)
+
+
+def test_chart_forecast_leaves_out_the_subtree_on_meter_2() -> None:
+    module = _module(SUPPLY_CFG, {APARTMENT: 1.0, WASHER: 0.5, BOILER: 0.25})
+    _confirm(module, SUPPLY_VICTRON)
+    assert _forecast(module, APARTMENT) == 1.0
+    assert _forecast(module, WASHER) == 0.5
+    _confirm(module, SUPPLY_METER_2)
+    # The apartment and the washer inside it are not on the Victron; the boiler is.
+    assert _forecast(module, APARTMENT) is None
+    assert _forecast(module, WASHER) is None
+    assert _forecast(module, BOILER) == 0.25
+
+
+def test_supply_status_lists_the_log_tail_and_the_configuration() -> None:
+    module = _module({**DEFAULTS, **SUPPLY_CFG})
+    supply = _confirm(module, SUPPLY_METER_2)
+    status = supply.status()
+    assert status["enabled"] and status["active"]
+    assert status["state"] == SUPPLY_METER_2
+    assert status["transitions_total"] == 1
+    assert status["transitions"] == [supply.transitions[0].to_dict()]
+    assert status["checkpoint"] is None
+    assert status["apartment_meter"] == APARTMENT
+    assert status["other_sensors"] == ["sensor.garage_power"]
+    assert (status["min_apartment_w"], status["margin_w"]) == (300.0, 100.0)
+    # Many transitions: only the last 50 are listed, the total is exact.
+    first = supply.transitions[0]
+    supply.transitions = [first] * 60
+    status = supply.status()
+    assert status["transitions_total"] == 60 and len(status["transitions"]) == 50
+
+
+def test_learning_run_records_its_dropped_hour_counts() -> None:
+    from custom_components.powerpilot.hierarchy import ExclusiveSeries
+
+    module = _module(SUPPLY_CFG)
+    module.log_info = lambda message, extra=None: None
+    module.log_warning = lambda message, extra=None: None
+    module.learning_dropped = None  # what __init__ sets before the first run
+    module._log_dropped_hours(ExclusiveSeries(series={}), 30)
+    assert module.learning_dropped == {
+        "window_days": 30,
+        "supply_dropped": 0,
+        "missing_child": {},
+        "negative": {},
+    }
+    module._log_dropped_hours(
+        ExclusiveSeries(series={}, missing_child={WASHER: 2}, supply_dropped=5), 30
+    )
+    assert module.learning_dropped["supply_dropped"] == 5
+    assert module.learning_dropped["missing_child"] == {WASHER: 2}

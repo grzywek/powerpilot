@@ -286,6 +286,7 @@ Odpowiedzi użytkownika i regulamin zamykają otwarte punkty powyżej.
    SoC na zmienne stanu. **Wdrożone 2026-09-14** — patrz „Stan wdrożenia".
 2. Stan przełącznika i topologia: detekcja z mocy, trwała historia stanu,
    profile stałe i przełączane, `hierarchy.py` zależne od stanu.
+   Implemented: see `docs/plans/apartment-supply-stage2-2026-10-17.md`.
 3. Optymalizacja przełączeń: zmienne źródła, cykle, próg, kalendarz,
    encje, panel, eksport z przyczynami.
 4. CSV dostawcy: import, uzgodnienie, zamknięte miesiące.

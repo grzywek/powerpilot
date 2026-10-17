@@ -557,15 +557,16 @@ async def _supply_series_coordinator(hass: HomeAssistant, monkeypatch):
     return coordinator
 
 
-async def test_series_device_forecast_follows_the_planned_supply(
+async def test_series_draws_the_apartment_on_meter_2_as_ppe_2_import(
     hass: HomeAssistant, monkeypatch
 ) -> None:
-    """Planned meter-2 hours leave the apartment out of the device bars.
+    """2026-10-18: a week planned on meter 2 drew no apartment at all.
 
-    Stage 3, slice 4: the per-device forecast followed the ACTUAL supply, so a
-    planned meter-2 hour drew the apartment's bar while the Victron line
-    (``consumption_forecast``) left it out. Now both follow the plan's supply
-    of the hour, and the base plus the device bars add up to the line.
+    The device bars left the apartment out of meter-2 hours, so the chart lost
+    it while the grid import stayed PPE 1's alone. Every device is drawn
+    whatever feeds it; the hour carries meter 2's import (``ppe2_import_kwh``,
+    ``grid_ppe2`` on its sides), and the Victron's line is the base plus the
+    devices it fed — the bars minus PPE 2's import.
     """
     from datetime import timedelta
 
@@ -591,7 +592,13 @@ async def test_series_device_forecast_follows_the_planned_supply(
     coordinator.supply.async_past_hour_states = logged
     for hour in (before, prev_hour):
         coordinator.snapshots.add(
-            {"run_at": hour.isoformat(), "start": hour.isoformat(), "n": 1, "soc": [50.0]}
+            {
+                "run_at": hour.isoformat(),
+                "start": hour.isoformat(),
+                "n": 1,
+                "soc": [50.0],
+                "ppe2": [0.4 if hour == before else 0.0],
+            }
         )
 
     plan = coordinator.data
@@ -602,33 +609,40 @@ async def test_series_device_forecast_follows_the_planned_supply(
         slot.base_consumption_kwh, slot.extra_load_kwh, slot.apartment_kwh = 0.3, 0.25, 0.4
 
     result = await coordinator.get_series(past_hours=2)
+    assert result["supply_active"] is True
     rows = {h["start"]: h for h in result["hours"]}
 
     on_meter_2 = rows[plan.decisions[1].start.isoformat()]
     on_victron = rows[plan.decisions[2].start.isoformat()]
     assert on_meter_2["supply_planned"] == SUPPLY_METER_2
-    assert on_meter_2["devices_forecast"] == {APT: None, BOILER: 0.25}
     assert on_victron["supply_planned"] == SUPPLY_VICTRON
-    assert on_victron["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
     for row in (on_meter_2, on_victron):
-        bars = row["base_consumption_forecast"] + sum(
-            v for v in row["devices_forecast"].values() if v is not None
-        )
-        assert abs(bars - row["consumption_forecast"]) < 1e-9
+        assert row["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
+    assert (on_meter_2["ppe2_import_kwh"], on_meter_2["forecast"]["grid_ppe2"]) == (0.4, 0.4)
+    assert (on_victron["ppe2_import_kwh"], on_victron["forecast"]["grid_ppe2"]) == (0.0, 0.0)
+    for row in (on_meter_2, on_victron):
+        bars = row["base_consumption_forecast"] + sum(row["devices_forecast"].values())
+        assert abs(bars - row["ppe2_import_kwh"] - row["consumption_forecast"]) < 1e-9
 
-    # Past hours: the logged supply, for the shading and the forecast alike.
+    # Past hours: the logged supply. Without readings meter 2's import of the
+    # meter-2 hour is unknown; a mixed hour's always is.
     past_meter_2 = rows[before.isoformat()]
     assert past_meter_2["supply_actual"] == SUPPLY_METER_2
-    assert past_meter_2["devices_forecast"] == {APT: None, BOILER: 0.25}
+    assert past_meter_2["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
+    assert past_meter_2["ppe2_import_kwh"] is None
+    assert past_meter_2["forecast"]["grid_ppe2"] == 0.4
     past_mixed = rows[prev_hour.isoformat()]
     assert past_mixed["supply_actual"] == SUPPLY_HOUR_MIXED
     assert past_mixed["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
+    assert past_mixed["ppe2_import_kwh"] is None
     assert "supply_planned" not in past_mixed
 
     current = next(h for h in result["hours"] if h.get("partial"))
     assert current["supply_actual"] == SUPPLY_VICTRON
     assert current["supply_planned"] == SUPPLY_VICTRON
     assert current["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
+    assert current["ppe2_import_kwh"] == 0.0
+    assert current["forecast"]["grid_ppe2"] == 0.0
 
 
 async def test_series_without_detection_carries_no_supply(hass: HomeAssistant) -> None:
@@ -640,6 +654,8 @@ async def test_series_without_detection_carries_no_supply(hass: HomeAssistant) -
     assert past and future
     assert all(h["supply_actual"] is None for h in past)
     assert all(h["supply_planned"] is None for h in future)
+    assert result["supply_active"] is False
+    assert all(h["ppe2_import_kwh"] is None for h in past + future)
 
 
 async def test_ws_status_carries_the_recommendation_rules_and_both_meters(

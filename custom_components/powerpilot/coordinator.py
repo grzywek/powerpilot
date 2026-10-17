@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from functools import partial
 from typing import Final
@@ -71,6 +72,7 @@ from .const import (
     PTYPE_CODE_INV,
     STORAGE_VERSION_SNAPSHOTS,
     SUPPLY_METER_2,
+    SUPPLY_VICTRON,
     InverterMode,
 )
 from . import pricing
@@ -1121,6 +1123,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # vintages predate this field and leave the line blank.
             "ev_soc": [_r(d.ev_soc, 1) for d in decisions],
             "grid": [_r(d.grid_buy_kwh, 3) for d in decisions],
+            # Meter 2's planned import (the apartment on PPE 2), so past and
+            # pinned views draw both meters. Captured from now on.
+            "ppe2": [_r(plan.ppe2_import_kwh(i), 3) for i in range(len(decisions))],
             # Planned battery flows + EV, so the chart's forecast tooltip column
             # can be reconstructed for past hours. Captured from now on.
             "charge": [_r(d.battery_charge_kwh, 3) for d in decisions],
@@ -2154,21 +2159,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             boundary += timedelta(hours=1)
         return out
 
-    def _device_forecast_kwh(
-        self, eid: str, hour: datetime, supply: str | None
-    ) -> float | None:
-        """Per-device forecast for the chart series, with the apartment on ``supply``.
+    def _device_forecast_kwh(self, eid: str, hour: datetime) -> float | None:
+        """Per-device forecast for the chart series: the device's own energy.
 
         The climate-owned devices read their temperature models (matching what
         the optimizer plans); every other device uses the learned weekly average.
-        ``supply`` is the hour's supply the forecast is drawn under — the
-        plan's decision for a planned hour, the logged state for a past one —
-        with the same rule as ``HourSlot.victron_consumption_kwh``: on
-        ``meter_2`` the apartment's subtree is not Victron demand and has no
-        forecast here; in any other state it does.
+        A device is drawn whatever feeds it: the apartment's subtree on meter 2
+        is still consumed, imported by PPE 2 instead of the Victron
+        (:meth:`_off_victron_devices`).
         """
-        if supply == SUPPLY_METER_2 and eid in self.supply.apartment_devices():
-            return None
         if self.climate.handles(eid):
             value = self.climate.forecast_kwh(eid, hour)
             if value is not None:
@@ -2179,6 +2178,35 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 3,
             )
         return None
+
+    def _off_victron_devices(self, supply: str | None) -> set[str]:
+        """Chart devices the Victron does not feed with the apartment on ``supply``.
+
+        The apartment's subtree on meter 2, none in any other state — the rule
+        of ``HourSlot.victron_consumption_kwh``.
+        """
+        if supply == SUPPLY_METER_2:
+            return set(self.supply.apartment_devices())
+        return set()
+
+    def _ppe2_measured_kwh(
+        self, supply: str | None, devices: Mapping[str, float | None]
+    ) -> float | None:
+        """Meter 2's import in a measured hour, from the devices' own energy.
+
+        On the Victron nothing; on meter 2 the apartment subtree's own energy
+        (together the apartment meter's reading); ``None`` when a subtree
+        reading is missing or the hour was mixed or unknown — its split is
+        not drawn from whole-hour readings.
+        """
+        if supply == SUPPLY_VICTRON:
+            return 0.0
+        if supply != SUPPLY_METER_2:
+            return None
+        values = [devices.get(eid) for eid in self._off_victron_devices(supply)]
+        if not values or any(v is None for v in values):
+            return None
+        return round(sum(v for v in values if v is not None), 3)
 
     async def get_series(
         self,
@@ -2348,6 +2376,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         def _side(
             grid: float | None = None,
+            grid_ppe2: float | None = None,
             discharge: float | None = None,
             base: float | None = None,
             ev: float | None = None,
@@ -2361,14 +2390,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             """One side (realized or forecast) of the tooltip's split breakdown.
 
             Per-component values keyed so the panel can render the colored
-            position breakdown for each side: ``grid``/``discharge`` are the
-            up-stack (sources); ``base``/``devices``/``ev``/``charge`` the
-            down-stack (consumption). ``None`` when nothing is known for the side.
+            position breakdown for each side: ``grid`` (PPE 1), ``grid_ppe2``
+            (the apartment on meter 2) and ``discharge`` are the up-stack
+            (sources); ``base``/``devices``/``ev``/``charge`` the down-stack
+            (consumption). ``None`` when nothing is known for the side.
             """
             dev = {
                 k: round(v, 3) for k, v in (devices or {}).items() if v is not None
             }
-            scalars = [grid, discharge, base, ev, charge, soc_start, soc_end]
+            scalars = [grid, grid_ppe2, discharge, base, ev, charge, soc_start, soc_end]
             if all(v is None for v in scalars) and not dev:
                 return None
 
@@ -2377,6 +2407,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
             return {
                 "grid": _r(grid),
+                "grid_ppe2": _r(grid_ppe2),
                 "discharge": _r(discharge),
                 "base": _r(base),
                 "ev": _r(ev),
@@ -2592,20 +2623,29 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # A past hour's forecast is compared with what happened, so it is
             # drawn under the supply the hour actually had.
             h_supply = past_supply.get(h)
-            dev_forecast = {
-                eid: self._device_forecast_kwh(eid, h, h_supply) for eid in device_ids
-            }
+            dev_forecast = {eid: self._device_forecast_kwh(eid, h) for eid in device_ids}
+            off_victron = self._off_victron_devices(h_supply)
             dev_real_h = {
                 eid: round(device_real[eid][h], 3) if h in device_real.get(eid, {}) else None
                 for eid in device_ids
             }
+            # The Victron's line: the devices it fed this hour.
             forecast_c = (
                 round(
                     (base_fc or 0.0)
-                    + sum(v for v in dev_forecast.values() if v is not None),
+                    + sum(
+                        v
+                        for eid, v in dev_forecast.items()
+                        if v is not None and eid not in off_victron
+                    ),
                     3,
                 )
                 if learned
+                else None
+            )
+            ppe2_real = (
+                self._ppe2_measured_kwh(h_supply, dev_real_h)
+                if self.supply.active
                 else None
             )
             buy_price = self.prices.price_at(h)
@@ -2649,6 +2689,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             base_real = base_real_series.get(h)
             realized_side = _side(
                 grid=g_real,
+                grid_ppe2=ppe2_real,
                 discharge=d_real,
                 base=base_real,
                 ev=ev_charge_real.get(h),
@@ -2676,6 +2717,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 fc_ev_soc_end = _fc(h, "ev_soc")
                 forecast_side = _side(
                     grid=_fc(h, "grid"),
+                    grid_ppe2=_fc(h, "ppe2"),
                     discharge=_fc(h, "dischg"),
                     base=base_fc,
                     ev=_fc(h, "ev"),
@@ -2743,6 +2785,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     # snapshot capture of this field.
                     "battery_energy_cost": bcost,
                     "grid_buy_kwh": round(grid_import_real[h], 3) if h in grid_import_real else None,
+                    # Meter 2's import for the apartment (``None`` without
+                    # detection, or in a mixed or unknown hour).
+                    "ppe2_import_kwh": ppe2_real,
                     # Realized EV charge from the energy-added meter; when that
                     # sensor isn't configured, fall back to the planned EV charge
                     # recorded for this hour so charging stays visible.
@@ -2836,14 +2881,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 now, now + timedelta(hours=1)
             )
             cur_supply = cur_supply_states.get(now)
-            # The whole-hour forecast is the plan's, so its devices follow the
-            # plan's supply; without a plan decision for the hour, the logged one.
-            dev_forecast = {
-                eid: self._device_forecast_kwh(
-                    eid, now, cur_dec.supply if cur_dec is not None else cur_supply
-                )
-                for eid in device_ids
-            }
+            dev_forecast = {eid: self._device_forecast_kwh(eid, now) for eid in device_ids}
             buy_price = self.prices.price_at(now)
             dist_price = self.tariff.distribution_for(now)
             # Per-kWh price excludes the fixed monthly charge (kept separately).
@@ -2880,8 +2918,14 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             cur_ev_soc = ev_soc_real.get(now)
             if cur_ev_soc is None:
                 cur_ev_soc = self.ev.soc
+            cur_ppe2 = (
+                self._ppe2_measured_kwh(cur_supply, cur_devices)
+                if self.supply.active
+                else None
+            )
             realized_side = _side(
                 grid=cur_grid,
+                grid_ppe2=cur_ppe2,
                 discharge=cur_discharge,
                 base=cur_base,
                 ev=cur_ev,
@@ -2905,6 +2949,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     fc_ev_soc_end = _pin_val(now, "ev_soc")
                     forecast_side = _side(
                         grid=_pin_val(now, "grid"),
+                        grid_ppe2=_pin_val(now, "ppe2"),
                         discharge=_pin_val(now, "dischg"),
                         base=self.consumption.base_value(wd, hr) if learned else None,
                         ev=_pin_val(now, "ev"),
@@ -2919,6 +2964,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             elif cur_dec is not None:
                 forecast_side = _side(
                     grid=cur_dec.grid_buy_kwh,
+                    grid_ppe2=(
+                        cur_slot.ppe2_import_kwh(cur_dec.supply)
+                        if self.supply.active and cur_slot is not None
+                        else None
+                    ),
                     discharge=cur_dec.battery_discharge_kwh,
                     base=cur_slot.base_consumption_kwh,
                     ev=cur_dec.ev_charge_kwh,
@@ -3005,6 +3055,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     ),
                     "battery_energy_cost": round(self._battery_energy_cost, 4),
                     "grid_buy_kwh": round(cur_grid, 3) if cur_grid is not None else None,
+                    "ppe2_import_kwh": cur_ppe2,
                     # Realized so far, else the plan's EV charge for this hour.
                     "ev_charge_kwh": (
                         round(cur_ev, 3)
@@ -3098,18 +3149,22 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 if slot.start < forecast_cutoff:
                     # Plan slot already covered by past / current-partial → skip.
                     continue
-                # Planned hours draw the apartment where the plan puts it, so
-                # the device bars agree with ``consumption_forecast`` below.
                 dev_forecast = {
-                    eid: self._device_forecast_kwh(eid, slot.start, decision.supply)
-                    for eid in device_ids
+                    eid: self._device_forecast_kwh(eid, slot.start) for eid in device_ids
                 }
+                # Meter 2's planned import: the apartment where the plan puts it.
+                planned_ppe2 = (
+                    round(slot.ppe2_import_kwh(decision.supply), 3)
+                    if self.supply.active
+                    else None
+                )
                 if pin_requested:
                     # Dashed forecast continues the pinned plan's trajectory.
                     fc_soc_end = _pin_val(slot.start, "soc")
                     fc_ev_soc_end = _pin_val(slot.start, "ev_soc")
                     forecast_side = _side(
                         grid=_pin_val(slot.start, "grid"),
+                        grid_ppe2=_pin_val(slot.start, "ppe2"),
                         discharge=_pin_val(slot.start, "dischg"),
                         base=slot.base_consumption_kwh,
                         ev=_pin_val(slot.start, "ev"),
@@ -3128,6 +3183,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 else:
                     forecast_side = _side(
                         grid=decision.grid_buy_kwh,
+                        grid_ppe2=planned_ppe2,
                         discharge=decision.battery_discharge_kwh,
                         base=slot.base_consumption_kwh,
                         ev=decision.ev_charge_kwh,
@@ -3176,6 +3232,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "charge_power_kw": round(decision.charge_power_kw, 3),
                         "battery_energy_cost": round(decision.battery_energy_cost, 4),
                         "grid_buy_kwh": round(decision.grid_buy_kwh, 3),
+                        "ppe2_import_kwh": planned_ppe2,
                         "ev_charge_kwh": round(decision.ev_charge_kwh, 3),
                         "ev_charge_minutes": (
                             _pin_val(slot.start, "ev_min")
@@ -3228,6 +3285,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "price_confirmed": p("ptype") == "c",
                         "price_type": PTYPE_CODE_INV.get(p("ptype")),
                         "grid_buy_kwh": grid,
+                        "ppe2_import_kwh": p("ppe2"),
                         "battery_discharge_kwh": dischg,
                         "battery_charge_kwh": p("charge"),
                         "charge_power_kw": p("charge_pw"),
@@ -3278,6 +3336,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "start": past_start.isoformat(),
             "end": series_end.isoformat(),
             "device_ids": device_ids,
+            # Detection on: the chart splits the grid import into PPE 1 and
+            # PPE 2 (``ppe2_import_kwh`` per hour).
+            "supply_active": self.supply.active,
             "hours": hours,
             "trips": trips,
             "forecast_pin": forecast_pin,

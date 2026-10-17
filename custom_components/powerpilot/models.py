@@ -86,6 +86,14 @@ class HourSlot:
             return self.total_consumption_kwh
         return self.total_consumption_kwh + self.apartment_kwh
 
+    def ppe2_import_kwh(self, supply: str | None) -> float:
+        """What meter 2 imports for the apartment with it on ``supply``.
+
+        The counterpart of :meth:`victron_consumption_kwh`: the apartment's
+        forecast on meter 2, nothing in any other state.
+        """
+        return self.apartment_kwh if supply == SUPPLY_METER_2 else 0.0
+
     @property
     def total_price_kwh(self) -> float | None:
         """Full gross price per kWh the user sees: energy + distribution, or
@@ -495,6 +503,12 @@ class Plan:
         slot = self.forecast.slots[index]
         decision = self.decisions[index] if index < len(self.decisions) else None
         return slot.victron_consumption_kwh(decision.supply if decision else None)
+
+    def ppe2_import_kwh(self, index: int) -> float:
+        """Meter 2's import for forecast slot ``index`` under the planned supply."""
+        slot = self.forecast.slots[index]
+        decision = self.decisions[index] if index < len(self.decisions) else None
+        return slot.ppe2_import_kwh(decision.supply if decision else None)
 
     @property
     def total_cost(self) -> float:

@@ -516,6 +516,26 @@ def test_the_plan_shows_victron_consumption_under_the_planned_supply() -> None:
     ]
 
 
+def test_the_chart_ppe_2_import_is_what_the_plan_settles_on_meter_2() -> None:
+    """The chart's PPE 2 import per hour adds up to PPE 2's planned energy.
+
+    ``Plan.ppe2_import_kwh`` is the counterpart of ``victron_consumption_kwh``;
+    together they are the hour's whole consumption, apartment included.
+    """
+    forecast, battery, billing, planning = _weak()
+    plan = _optimizer().optimize(forecast, battery, billing=billing, supply=planning)
+    assert _on_meter_2(plan) == [0, 1, 1]
+    n = len(plan.decisions)
+    assert [plan.ppe2_import_kwh(i) for i in range(n)] == [0.0, 2.0, 2.0]
+    assert abs(
+        sum(plan.ppe2_import_kwh(i) for i in range(n))
+        - _outcome(plan, PPE_2).planned_energy_kwh
+    ) < 1e-9
+    for i, slot in enumerate(plan.forecast.slots[:n]):
+        whole = slot.total_consumption_kwh + slot.apartment_kwh
+        assert abs(plan.victron_consumption_kwh(i) + plan.ppe2_import_kwh(i) - whole) < 1e-9
+
+
 def test_four_periods_across_a_month_boundary_match_a_brute_force() -> None:
     """Both meters over two months (4 periods, 16 cap-regime combinations).
 

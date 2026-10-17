@@ -254,7 +254,8 @@ def test_meter_2_without_an_apartment_meter_detaches_nothing() -> None:
     module = _module(config, {APARTMENT: 1.0, BOILER: 0.25})
     _confirm(module, SUPPLY_METER_2)
     assert module.coordinator.supply.apartment_devices() == set()
-    assert _forecast(module, APARTMENT, SUPPLY_METER_2) == 1.0
+    assert _chart(module).forecast(APARTMENT) == 1.0
+    assert _chart(module).off_victron(SUPPLY_METER_2) == set()
     assert module.device_value(HOUR.weekday(), HOUR.hour) == 1.25
     module.base = _acc(1.1, observed=True)
     forecast = Forecast(slots=[HourSlot(start=HOUR)])
@@ -378,8 +379,8 @@ async def test_turning_supply_detection_on_relearns_the_profiles() -> None:
     assert module.base.observed_days == 1  # relearned at once, not tomorrow
 
 
-def _forecast(module: ConsumptionModule, entity_id: str, supply: str | None) -> float | None:
-    """The chart's per-device forecast, as the coordinator computes it."""
+def _chart(module: ConsumptionModule) -> SimpleNamespace:
+    """The coordinator's chart helpers on a stub around ``module``."""
     from custom_components.powerpilot.coordinator import PowerPilotCoordinator
 
     stub = SimpleNamespace(
@@ -387,27 +388,45 @@ def _forecast(module: ConsumptionModule, entity_id: str, supply: str | None) -> 
         consumption=module,
         supply=module.coordinator.supply,
     )
-    return PowerPilotCoordinator._device_forecast_kwh(stub, entity_id, HOUR, supply)
+    stub._off_victron_devices = lambda supply: PowerPilotCoordinator._off_victron_devices(
+        stub, supply
+    )
+    return SimpleNamespace(
+        forecast=lambda eid: PowerPilotCoordinator._device_forecast_kwh(stub, eid, HOUR),
+        off_victron=stub._off_victron_devices,
+        ppe2=lambda supply, devices: PowerPilotCoordinator._ppe2_measured_kwh(
+            stub, supply, devices
+        ),
+    )
 
 
-def test_chart_forecast_leaves_out_the_subtree_in_a_meter_2_hour() -> None:
-    """The hour's supply decides, not the actual state (stage 3, slice 4).
+def test_chart_draws_every_device_and_moves_the_subtree_to_ppe_2() -> None:
+    """2026-10-18: on meter 2 the apartment vanished from the chart.
 
-    A planned meter-2 hour while the apartment is still on the Victron leaves
-    the subtree out, a planned Victron hour while it is on meter 2 keeps it —
-    the device bars then match the Victron demand the plan carries. Mixed and
-    unknown hours keep it, as ``HourSlot.victron_consumption_kwh`` does.
+    The device forecast left the subtree out of meter-2 hours, so a week
+    planned on meter 2 drew no apartment at all. Every device is drawn
+    whatever feeds it; on meter 2 the subtree is off the Victron (the rule of
+    ``HourSlot.victron_consumption_kwh``) and its own energy is PPE 2's
+    import. Mixed and unknown hours keep it on the Victron's side and leave
+    PPE 2's import unknown.
     """
     module = _module(SUPPLY_CFG, {APARTMENT: 1.0, WASHER: 0.5, BOILER: 0.25})
-    for actual in (SUPPLY_VICTRON, SUPPLY_METER_2):
-        _confirm(module, actual)
-        # The apartment and the washer inside it are not on the Victron; the boiler is.
-        assert _forecast(module, APARTMENT, SUPPLY_METER_2) is None, actual
-        assert _forecast(module, WASHER, SUPPLY_METER_2) is None, actual
-        assert _forecast(module, BOILER, SUPPLY_METER_2) == 0.25, actual
-        for supply in (SUPPLY_VICTRON, SUPPLY_HOUR_MIXED, SUPPLY_HOUR_UNKNOWN, None):
-            assert _forecast(module, APARTMENT, supply) == 1.0, (actual, supply)
-            assert _forecast(module, WASHER, supply) == 0.5, (actual, supply)
+    chart = _chart(module)
+    _confirm(module, SUPPLY_VICTRON)
+    assert (chart.forecast(APARTMENT), chart.forecast(WASHER)) == (1.0, 0.5)
+    assert chart.forecast(BOILER) == 0.25
+
+    # The apartment and the washer inside it are not on the Victron; the boiler is.
+    assert chart.off_victron(SUPPLY_METER_2) == {APARTMENT, WASHER}
+    for supply in (SUPPLY_VICTRON, SUPPLY_HOUR_MIXED, SUPPLY_HOUR_UNKNOWN, None):
+        assert chart.off_victron(supply) == set(), supply
+
+    measured = {APARTMENT: 0.4, WASHER: 0.3, BOILER: 0.25}
+    assert chart.ppe2(SUPPLY_METER_2, measured) == 0.7
+    assert chart.ppe2(SUPPLY_VICTRON, measured) == 0.0
+    for supply in (SUPPLY_HOUR_MIXED, SUPPLY_HOUR_UNKNOWN, None):
+        assert chart.ppe2(supply, measured) is None, supply
+    assert chart.ppe2(SUPPLY_METER_2, {**measured, WASHER: None}) is None
 
 
 def test_supply_status_lists_the_log_tail_and_the_configuration() -> None:

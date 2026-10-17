@@ -1,0 +1,28 @@
+gdzieś zaczynałem tutaj projekt obsługi taryfy z ceną gwarantowaną, ale nie był dokończony. czy on się znajduje jeszcze gdzieś w repo?
+
+---
+
+<task-notification>
+<task-id>bfmywtmqq</task-id>
+<tool-use-id>toolu_01ReaPm9S9PU77zyt5qqfCoa</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/8459943e-b9a3-457a-8cb6-cc77f47f6d73/tasks/bfmywtmqq.output</output-file>
+<status>completed</status>
+<summary>Background command "Run full test suite on the tarcza branch" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+The app was quit while you were working. Please continue from where you left off.
+
+---
+
+Jak w praktyce działa Tarcza Pstryk - czy jeśli zużywam prąd w godzinie, gdy cena rynkowa wynosi 1 zł/kWh to Pstryk w rozliczeniu uwzględni 0,61 zł/kWh?
+Nie, Tarcza Pstryk nie obniża pojedynczych godzinnych cen. Rozliczenie odbywa się na podstawie średniej ceny ważonej z całego miesiąca. Oznacza to, że sumujemy miesięczne koszty energii i opłaty za obsługę, a następnie dzielimy je przez całkowite zużycie energii w kWh. Jeżeli ta średnia cena przekroczy ustalony limit, na koniec miesiąca stosujemy wyrównanie, które obniża koszt do poziomu 0,61 zł/kWh brutt (z VAT). W takiej sytuacji na fakturze pojawi się osobna pozycja - rabat z tytułu Tarczy Pstryk.
+
+---
+
+https://pstryk.pl/regulaminy?doc=regulamin-tarcza-pstryk-2027
+
+---
+
+nie da się zalogować. wpisuję username password i wychodzi "Zacznij od nowa" https://ha.ds2.pl/auth/authorize?response_type=code&redirect_uri=https%3A%2F%2Fha.ds2.pl%2F%3Fauth_callback%3D1&client_id=https%3A%2F%2Fha.ds2.pl%2F&REDACTED

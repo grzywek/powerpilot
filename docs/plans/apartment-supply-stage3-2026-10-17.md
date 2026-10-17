@@ -58,7 +58,9 @@ approaches it.
    objective sees by itself. Distribution is the same tariff on both meters and
    cancels out.
 2. **Cycles a person can do.** Opening a cycle costs the threshold (number
-   entity, 5 zł); at least 2 h on a source (number entity); no switch in the
+   entity, default 2 zł — lowered from the parent spec's working value of 5 zł
+   by the user on 2026-10-17, see "Backtest" below); at least 2 h on a source
+   (number entity); no switch in the
    quiet window (00:00–09:00, configurable) or while the user is unavailable
    (calendar trips, calendar read error); switches on hour boundaries. No daily
    cycle limit (settled). A cycle may last days if that pays.
@@ -101,6 +103,26 @@ approaches it.
 4. **Panel and docs:** supply timeline next to the Victron's work, the
    with/without-cycles comparison and the reason when nothing is recommended;
    README; parent spec status.
+
+## Backtest on October 1–17, 2026 (live data)
+
+Hourly apartment energy, the Victron's grid-to-loads energy split between the
+apartment and the garage by their consumption, cap prices from the archive;
+battery-covered kWh cost ~0.43 zł (average charging price 0.37 zł / round-trip
+0.89 + wear); PPE 2 capped at 0.61 zł per kWh. Optimal cycles with perfect
+foresight, switching on hour boundaries outside 00:00–09:00, at least 2 h,
+user always present:
+
+| Cycle threshold | Recommended cycles | Saving |
+| --- | --- | --- |
+| 5 zł | none | 0 zł |
+| 2 zł | 10.10 16:00 → 12.10 22:00 (54 h, 18 kWh) | 4.85 zł |
+| 0.5 zł | 5 short cycles within 10–12.10 | 5.30 zł |
+| no rules (hourly, ideal) | — | 7.50 zł |
+
+PPE 1 stayed under the limit all month (average 0.43), so only the weak
+mechanism was available; the strong one (PPE 1 pushed under the limit) has
+no data yet.
 
 ## Question for the user
 

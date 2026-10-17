@@ -297,12 +297,24 @@ def test_one_unusable_part_makes_the_whole_log_undecodable(stored) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_history(supply_recorder):
+    """The recorder holds no history of the inputs unless a test says otherwise."""
+    supply_recorder()
+
+
 def _coordinator(config: dict) -> SimpleNamespace:
     unloads: list = []
     warnings: list[str] = []
     return SimpleNamespace(
         config={**DEFAULTS, **config},
-        entry=SimpleNamespace(entry_id=ENTRY_ID, async_on_unload=unloads.append),
+        entry=SimpleNamespace(
+            entry_id=ENTRY_ID,
+            async_on_unload=unloads.append,
+            async_create_background_task=lambda hass, target, name: (
+                hass.async_create_background_task(target, name)
+            ),
+        ),
         unloads=unloads,
         warnings=warnings,
         log_info=lambda module, message, extra=None: None,
@@ -314,6 +326,8 @@ async def _module(hass: HomeAssistant, config: dict | None = None) -> SupplyModu
     coordinator = _coordinator(SUPPLY_CONFIG if config is None else config)
     module = SupplyModule(hass, coordinator)
     await module.async_setup()
+    if module._replay_task is not None:
+        await module._replay_task  # live sampling starts once the replay is done
     return module
 
 
@@ -457,7 +471,7 @@ async def test_module_is_inert_until_all_three_sensor_keys_are_set(
 
 async def test_tick_subscription_is_released_on_unload(hass: HomeAssistant) -> None:
     module = await _module(hass)
-    (unsub,) = module.coordinator.unloads
+    unsub = module.coordinator.unloads[0]  # the tick, registered first
     unsub()
     _set_power(hass, 1000, 600, 500)
     for i in range(1, 4):
@@ -501,7 +515,7 @@ async def test_entity_is_unknown_until_confirmed_then_shows_state_and_evidence(
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     entity_id = er.async_get(hass).async_get_entity_id(
         "sensor", DOMAIN, f"{entry.entry_id}_{SENSOR_APARTMENT_SUPPLY_ACTUAL}"

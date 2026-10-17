@@ -523,4 +523,6 @@ class ApartmentSupplySensor(PowerPilotEntity, SensorEntity):
             "margin_w": supply.margin_w,
             "confirm_samples": supply.confirm_samples,
             "error": supply.store_error,
+            "replay_error": supply.replay_error,
+            "save_error": supply.save_error,
         }

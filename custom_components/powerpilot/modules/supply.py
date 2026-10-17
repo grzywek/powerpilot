@@ -10,28 +10,40 @@ point of delivery. Nothing reports its position, so it is told from power
 * N decisive samples of the other state in a row confirm a change; otherwise
   the last confirmed state holds. Before the first confirmation it is unknown.
 
-The pure part (:func:`classify_sample`, :class:`SupplyDetector`) has no Home
-Assistant dependency. :class:`SupplyModule` samples the configured sensors on a
-fixed tick and keeps the confirmed transitions in an append-only log in its own
-store. It contributes nothing to the forecast yet.
+The pure part (:func:`classify_sample`, :class:`SupplyDetector`,
+:func:`hour_supply`, :func:`classify_hours`) has no Home Assistant dependency.
+:class:`SupplyModule` samples the configured sensors on a fixed tick and keeps
+the confirmed transitions in an append-only log in its own store. At setup the
+same detector first replays the recorder's state history of the inputs, on the
+same grid, from the last stored transition (or from the oldest history) to now.
+Hours older than the log are classified from hourly means
+(:meth:`SupplyModule.async_hourly_states`). It contributes nothing to the
+forecast yet.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
-from collections.abc import Mapping
-from datetime import datetime, timedelta
+from collections.abc import Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.history import state_changes_during_period
+from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STOP,
     ATTR_UNIT_OF_MEASUREMENT,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
     UnitOfPower,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
@@ -46,8 +58,11 @@ from ..const import (
     CONF_VICTRON_OUTPUT_POWER_SENSOR,
     DOMAIN,
     STORAGE_VERSION_SUPPLY,
+    SUPPLY_HOUR_MIXED,
+    SUPPLY_HOUR_UNKNOWN,
     SUPPLY_METER_2,
     SUPPLY_SOURCE_LIVE,
+    SUPPLY_SOURCE_REPLAY,
     SUPPLY_VICTRON,
 )
 from ..models import SupplyTransition
@@ -62,8 +77,42 @@ _LOGGER = logging.getLogger(__name__)
 # seconds, and N must mean a duration (≈1–1.5 min at N = 3).
 SUPPLY_SAMPLE_INTERVAL = timedelta(seconds=30)
 
+# Live sampling saves a replay checkpoint at most this often, so a restart
+# replays only the downtime instead of everything since the last switch.
+SUPPLY_CHECKPOINT_INTERVAL = timedelta(minutes=15)
+
+# The replay reads the recorder's state history in windows of at most this
+# length: a first run covers weeks of sensors reporting every few seconds
+# (≈600 states per hour each), which is not loaded at once.
+SUPPLY_REPLAY_CHUNK = timedelta(hours=6)
+
+# Lower bound for "the oldest state the recorder holds" of an input.
+_BEFORE_ANY_HISTORY = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+_HOUR = timedelta(hours=1)
+
 # Power units the inputs may report, as a factor to watts.
 _WATTS_PER_UNIT = {UnitOfPower.WATT: 1.0, UnitOfPower.KILO_WATT: 1000.0}
+
+
+def watts(raw: str, factor: float) -> float | None:
+    """A recorded or current power state in W; ``None`` when it is not a reading."""
+    if raw in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(value):
+        return None
+    return value * factor
+
+
+def victron_net(victron_w: float | None, others_w: Sequence[float | None]) -> float | None:
+    """Victron output − the other sub-meters behind it; ``None`` when any is missing."""
+    if victron_w is None or any(o is None for o in others_w):
+        return None
+    return victron_w - sum(o for o in others_w if o is not None)
 
 
 def classify_sample(
@@ -118,6 +167,11 @@ class SupplyDetector:
         """Decisive samples of the other state seen in a row so far."""
         return self._streak
 
+    @property
+    def last_decisive(self) -> datetime | None:
+        """Last decisive sample of the confirmed state: the next switch's lower bound."""
+        return self._last_decisive
+
     def _reset_streak(self) -> None:
         self._streak_state = None
         self._streak_start = None
@@ -162,8 +216,138 @@ class SupplyDetector:
         return transition
 
 
-def decode_log(stored: Any) -> list[SupplyTransition]:
-    """The stored transition log; ``ValueError`` when any part is unusable."""
+def values_at(
+    changes: Sequence[tuple[datetime, float | None]], instants: Sequence[datetime]
+) -> list[float | None]:
+    """The last known value at or before each instant, as the live tick reads it.
+
+    ``changes`` and ``instants`` are in time order; before the first change the
+    value is unknown (``None``), as is a change that is not a reading.
+    """
+    out: list[float | None] = []
+    index = 0
+    current: float | None = None
+    for instant in instants:
+        while index < len(changes) and changes[index][0] <= instant:
+            current = changes[index][1]
+            index += 1
+        out.append(current)
+    return out
+
+
+def hour_supply(
+    transitions: Sequence[SupplyTransition], covered_from: datetime | None, hour: datetime
+) -> str:
+    """The supply of the hour starting at ``hour`` according to the log.
+
+    * ``unknown`` before the log was watching (``covered_from``), up to and
+      including the hour of the first transition (the state before it is not
+      known).
+    * ``mixed`` when the hour ``[hour, hour + 1 h)`` overlaps any switch window
+      ``[not_before, at]``; the switch happened somewhere inside it.
+    * otherwise the state of the last transition at or before the hour.
+    """
+    if covered_from is None or not transitions:
+        return SUPPLY_HOUR_UNKNOWN
+    hour = hour.astimezone(timezone.utc)  # clock hours, whatever the zone
+    first = transitions[0]
+    if hour < covered_from or hour <= first.at:
+        return SUPPLY_HOUR_UNKNOWN
+    hour_end = hour + _HOUR
+    for previous, transition in zip(transitions, transitions[1:]):
+        # A window with no lower bound of its own reaches back to the previous
+        # confirmation, the last moment the log knows the old state held.
+        lower = transition.not_before if transition.not_before is not None else previous.at
+        lower = min(lower, transition.at)
+        if lower < hour_end and transition.at >= hour:
+            return SUPPLY_HOUR_MIXED
+    state = first.state
+    for transition in transitions:
+        if transition.at > hour:
+            break
+        state = transition.state
+    return state
+
+
+def classify_hours(
+    means: Mapping[datetime, tuple[float | None, float | None]],
+    min_apartment_w: float,
+    margin_w: float,
+) -> dict[datetime, str]:
+    """The supply of past hours from their means: (apartment W, Victron net W).
+
+    The sample rule applied to hourly means (plan answer 2). Hours with a
+    missing mean and undecided hours are dropped; so is every decided hour whose
+    previous or next hour by clock was decided the other way — an hour next to
+    a change may hold part of it and is not trusted.
+    """
+    decided: dict[datetime, str] = {}
+    for hour, (apartment_w, victron_net_w) in means.items():
+        if apartment_w is None or victron_net_w is None:
+            continue
+        state = classify_sample(apartment_w, victron_net_w, min_apartment_w, margin_w)
+        if state is not None:
+            decided[hour.astimezone(timezone.utc)] = state
+    return {
+        hour: state
+        for hour, state in decided.items()
+        if decided.get(hour - _HOUR, state) == state
+        and decided.get(hour + _HOUR, state) == state
+    }
+
+
+def _parse_moment(value: Any, name: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"supply log needs {name!r} as an ISO timestamp")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError(f"supply log {name!r} has no time zone: {value!r}")
+    return parsed.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class SupplyCheckpoint:
+    """How far the detector got: every grid instant up to ``at`` is processed.
+
+    Written only with no streak in progress, so resuming from it loses no
+    partial streak; ``last_decisive`` is the detector's lower bound for the
+    next switch at that moment.
+    """
+
+    at: datetime
+    last_decisive: datetime | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "at": self.at.isoformat(),
+            "last_decisive": (
+                self.last_decisive.isoformat() if self.last_decisive is not None else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "SupplyCheckpoint":
+        """Decode a stored checkpoint; ``ValueError`` when it is unusable."""
+        if not isinstance(data, Mapping):
+            raise ValueError("supply checkpoint must be a mapping")
+        at = _parse_moment(data.get("at"), "checkpoint.at")
+        raw = data.get("last_decisive")
+        last_decisive = None if raw is None else _parse_moment(raw, "checkpoint.last_decisive")
+        if last_decisive is not None and last_decisive > at:
+            raise ValueError("supply checkpoint's last decisive sample is after it")
+        return cls(at=at, last_decisive=last_decisive)
+
+
+def decode_log(
+    stored: Any,
+) -> tuple[list[SupplyTransition], datetime | None, SupplyCheckpoint | None]:
+    """The stored transition log, the instant it covers from and its checkpoint.
+
+    ``ValueError`` when any part is unusable. A log written before
+    ``covered_from`` existed covers from its first transition (``None`` when
+    empty): the state before that one is unknown anyway. A log written before
+    checkpoints existed has none.
+    """
     if not isinstance(stored, Mapping):
         raise ValueError("supply log must be a mapping")
     raw = stored.get("transitions")
@@ -173,7 +357,28 @@ def decode_log(stored: Any) -> list[SupplyTransition]:
     for earlier, later in zip(transitions, transitions[1:]):
         if later.at < earlier.at:
             raise ValueError(f"supply log is out of order at {later.at.isoformat()}")
-    return transitions
+    covered_from: datetime | None
+    if "covered_from" not in stored:
+        covered_from = transitions[0].at if transitions else None
+    elif stored["covered_from"] is None:
+        if transitions:
+            raise ValueError("supply log has transitions but no covered_from")
+        covered_from = None
+    else:
+        covered_from = _parse_moment(stored["covered_from"], "covered_from")
+        if transitions and covered_from > transitions[0].at:
+            raise ValueError("supply log covers from after its first transition")
+    raw_checkpoint = stored.get("checkpoint")
+    if raw_checkpoint is None:
+        return transitions, covered_from, None
+    checkpoint = SupplyCheckpoint.from_dict(raw_checkpoint)
+    if covered_from is None or checkpoint.at < covered_from:
+        raise ValueError("supply checkpoint is earlier than what the log covers")
+    return transitions, covered_from, checkpoint
+
+
+class SupplyReplayError(Exception):
+    """The recorder's history of the inputs cannot be replayed."""
 
 
 class SupplyModule(PowerPilotModule):
@@ -184,12 +389,23 @@ class SupplyModule(PowerPilotModule):
     def __init__(self, hass: HomeAssistant, coordinator: "PowerPilotCoordinator") -> None:
         super().__init__(hass, coordinator)
         self.transitions: list[SupplyTransition] = []
+        # First instant the log has been watching; hours before it are not in it.
+        self.covered_from: datetime | None = None
         self.detector: SupplyDetector | None = None
         # Why the stored log could not be used (the module is then inert).
         # Kept apart from ``last_error``, which every update clears.
         self.store_error: str | None = None
+        # Why the history replay at setup failed (live sampling runs anyway).
+        self.replay_error: str | None = None
+        # Why the last save of the log failed (cleared by the next good one).
+        self.save_error: str | None = None
+        # How far the detector got, as last saved: a restart replays from here.
+        self.checkpoint: SupplyCheckpoint | None = None
+        self._last_tick_at: datetime | None = None
         self._store: Store | None = None
+        self._replay_task: asyncio.Task | None = None
         self._unit_warned: set[tuple[str, str | None]] = set()
+        self._missing_warned: set[str] = set()
 
     # ------------------------------------------------------------------
     # Configuration
@@ -205,6 +421,11 @@ class SupplyModule(PowerPilotModule):
     @property
     def other_sensors(self) -> list[str]:
         return [str(e) for e in (self.config.get(CONF_VICTRON_OTHER_POWER_SENSORS) or [])]
+
+    @property
+    def inputs(self) -> list[str]:
+        """Apartment, Victron output, then the other sub-meters behind it."""
+        return [self.apartment_sensor, self.victron_sensor, *self.other_sensors]
 
     @property
     def enabled(self) -> bool:
@@ -246,6 +467,10 @@ class SupplyModule(PowerPilotModule):
         last = self.last_transition
         return last.at if last is not None else None
 
+    def supply_for_hour(self, hour: datetime) -> str:
+        """``victron`` / ``meter_2`` / ``mixed`` / ``unknown`` for the hour from ``hour``."""
+        return hour_supply(self.transitions, self.covered_from, hour)
+
     # ------------------------------------------------------------------
     # Setup / persistence
     # ------------------------------------------------------------------
@@ -261,24 +486,99 @@ class SupplyModule(PowerPilotModule):
         stored = await self._store.async_load()
         if stored is not None:
             try:
-                self.transitions = decode_log(stored)
+                self.transitions, self.covered_from, self.checkpoint = decode_log(stored)
             except ValueError as err:
                 await self._async_move_store_aside(err)
                 return
+        # Weeks of history are read off the setup path; live sampling starts
+        # once the replay has brought the detector up to now.
+        self._replay_task = self.coordinator.entry.async_create_background_task(
+            self.hass, self._async_replay_then_sample(), "powerpilot_supply_replay"
+        )
+
+    def _stored_detector(self, source: str) -> SupplyDetector:
+        """A detector holding the stored log's last confirmed state.
+
+        Its lower bound for the next switch is the checkpoint's when that is not
+        older than the last transition; otherwise the confirmation itself, the
+        last moment the log knows the state held.
+        """
         last = self.last_transition
-        self.detector = SupplyDetector(
+        checkpoint = self.checkpoint
+        if last is None:
+            last_decisive = None
+        elif checkpoint is not None and checkpoint.at >= last.at:
+            last_decisive = checkpoint.last_decisive
+        else:
+            last_decisive = last.at
+        return SupplyDetector(
             self.min_apartment_w,
             self.margin_w,
             self.confirm_samples,
             state=last.state if last is not None else None,
-            # The confirmation is the last moment the log knows the state held.
-            last_decisive=last.at if last is not None else None,
+            last_decisive=last_decisive,
+            source=source,
         )
-        self.coordinator.entry.async_on_unload(
+
+    async def _async_replay_then_sample(self) -> None:
+        """Replay the recorder's history into the log, then sample live.
+
+        A failed replay is logged and shown on the entity; the log stays as
+        stored and live sampling starts from it all the same.
+        """
+        assert self._store is not None
+        detector = self._stored_detector(SUPPLY_SOURCE_REPLAY)
+        try:
+            start, appended, samples, missing, last_instant = await self._async_replay(
+                detector
+            )
+            transitions = [*self.transitions, *appended]
+            covered_from = self.covered_from if self.covered_from is not None else start
+            checkpoint = self.checkpoint
+            if last_instant is not None and detector.streak == 0:
+                checkpoint = SupplyCheckpoint(last_instant, detector.last_decisive)
+            await self._store.async_save(self._payload(transitions, covered_from, checkpoint))
+        except Exception as err:  # any recorder or store failure; surfaced below
+            _LOGGER.exception(
+                "Replaying the supply inputs' history failed; live sampling "
+                "starts from the stored log"
+            )
+            self.replay_error = (
+                f"Nie udało się odtworzyć historii zasilania mieszkania z recordera "
+                f"({err}). Wykrywanie działa od teraz; wcześniejsze godziny "
+                f"zostaną odtworzone przy następnym uruchomieniu, o ile recorder "
+                f"jeszcze je przechowuje."
+            )
+            self.log_warning(self.replay_error)
+            detector = self._stored_detector(SUPPLY_SOURCE_LIVE)
+        else:
+            self.transitions = transitions
+            self.covered_from = covered_from
+            self.checkpoint = checkpoint
+            self.log_info(
+                f"Odtworzono historię zasilania mieszkania: {len(appended)} "
+                f"przejść, {samples} próbek, w tym {missing} bez kompletu odczytów.",
+                extra={
+                    "from": start.isoformat() if start is not None else None,
+                    "transitions": len(appended),
+                    "samples": samples,
+                    "missing_samples": missing,
+                },
+            )
+            detector.source = SUPPLY_SOURCE_LIVE
+        self.detector = detector
+        entry = self.coordinator.entry
+        entry.async_on_unload(
             async_track_time_interval(
                 self.hass, self._async_tick, SUPPLY_SAMPLE_INTERVAL
             )
         )
+        # Home Assistant does not unload entries when it stops: both save.
+        entry.async_on_unload(self._async_save_checkpoint_now)
+        entry.async_on_unload(
+            self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._async_on_stop)
+        )
+        async_dispatcher_send(self.hass, self.signal)
 
     async def _async_move_store_aside(self, err: ValueError) -> None:
         """Keep an undecodable log for inspection and refuse to save over it.
@@ -321,18 +621,116 @@ class SupplyModule(PowerPilotModule):
             )
         self.log_warning(self.store_error)
 
-    def _payload(self) -> dict[str, Any]:
-        return {"transitions": [t.to_dict() for t in self.transitions]}
+    @staticmethod
+    def _payload(
+        transitions: Sequence[SupplyTransition],
+        covered_from: datetime | None,
+        checkpoint: SupplyCheckpoint | None,
+    ) -> dict[str, Any]:
+        return {
+            "transitions": [t.to_dict() for t in transitions],
+            "covered_from": covered_from.isoformat() if covered_from is not None else None,
+            "checkpoint": checkpoint.to_dict() if checkpoint is not None else None,
+        }
+
+    async def _async_save(self) -> None:
+        """Save the log from live sampling; a failure is reported, sampling goes on.
+
+        What failed to save stays in memory and goes out with the next save.
+        """
+        assert self._store is not None
+        try:
+            await self._store.async_save(
+                self._payload(self.transitions, self.covered_from, self.checkpoint)
+            )
+        except Exception as err:  # any store failure; surfaced below
+            _LOGGER.exception("Saving the supply log failed; sampling goes on")
+            self.save_error = (
+                f"Nie udało się zapisać dziennika zasilania mieszkania ({err}). "
+                "Wykrywanie działa dalej; zapis zostanie ponowiony przy następnej "
+                "zmianie lub punkcie kontrolnym."
+            )
+            self.log_warning(self.save_error)
+        else:
+            self.save_error = None
+
+    async def _async_save_checkpoint_now(self) -> None:
+        """Checkpoint the last live sample on unload or stop, unless mid-streak."""
+        detector = self.detector
+        at = self._last_tick_at
+        if self._store is None or detector is None or at is None or detector.streak:
+            return
+        if self.checkpoint is not None and self.checkpoint.at >= at:
+            return
+        self.checkpoint = SupplyCheckpoint(at, detector.last_decisive)
+        await self._async_save()
+
+    async def _async_on_stop(self, _event: Event) -> None:
+        await self._async_save_checkpoint_now()
 
     async def async_clear_data(self) -> None:
+        # A replay still running would save the old log back after the wipe.
+        if self._replay_task is not None and not self._replay_task.done():
+            self._replay_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._replay_task
         if self._store is not None:
             await self._store.async_remove()
         self.transitions = []
+        self.covered_from = None
+        self.checkpoint = None
+        self._last_tick_at = None
         self.store_error = None
+        self.replay_error = None
+        self.save_error = None
         if self.detector is not None:
             self.detector = SupplyDetector(
                 self.min_apartment_w, self.margin_w, self.confirm_samples
             )
+
+    # ------------------------------------------------------------------
+    # Units
+    # ------------------------------------------------------------------
+    def _unit_factor(self, entity_id: str, unit: str | None) -> float | None:
+        """Watts per unit of ``unit``; ``None`` (warned once) when it is not power."""
+        factor = _WATTS_PER_UNIT.get(unit)
+        if factor is None and (entity_id, unit) not in self._unit_warned:
+            self._unit_warned.add((entity_id, unit))
+            self.log_warning(
+                f"{entity_id}: jednostka {unit!r} nie jest mocą (W/kW) — "
+                "próbka pominięta. Wskaż czujnik mocy w ustawieniach "
+                "zasilania mieszkania.",
+                extra={"entity_id": entity_id, "unit": unit},
+            )
+            _LOGGER.warning(
+                "Supply input %s reports unit %r, not W/kW; its samples are skipped",
+                entity_id,
+                unit,
+            )
+        return factor
+
+    def _history_factor(self, entity_id: str) -> float | None:
+        """Watts per unit of the recorded history of ``entity_id``.
+
+        History is read without attributes; the unit is the current state's
+        (an unavailable state keeps its unit). ``None`` when there is no
+        current state or its unit is not power.
+        """
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            if entity_id not in self._missing_warned:
+                self._missing_warned.add(entity_id)
+                self.log_warning(
+                    f"{entity_id}: brak encji — nie wiadomo, w jakiej jednostce "
+                    "jest jej historia. Wskaż istniejący czujnik mocy w "
+                    "ustawieniach zasilania mieszkania.",
+                    extra={"entity_id": entity_id},
+                )
+                _LOGGER.warning(
+                    "Supply input %s has no state; its history cannot be read", entity_id
+                )
+            return None
+        return self._unit_factor(entity_id, state.attributes.get(ATTR_UNIT_OF_MEASUREMENT))
 
     # ------------------------------------------------------------------
     # Sampling
@@ -340,53 +738,223 @@ class SupplyModule(PowerPilotModule):
     def _read_watts(self, entity_id: str) -> float | None:
         """Current power of ``entity_id`` in W; ``None`` when not usable now."""
         state = self.hass.states.get(entity_id)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        if state is None:
             return None
-        try:
-            value = float(state.state)
-        except ValueError:
+        value = watts(state.state, 1.0)
+        if value is None:
             return None
-        if not math.isfinite(value):
-            return None
-        unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-        factor = _WATTS_PER_UNIT.get(unit)
-        if factor is None:
-            if (entity_id, unit) not in self._unit_warned:
-                self._unit_warned.add((entity_id, unit))
-                self.log_warning(
-                    f"{entity_id}: jednostka {unit!r} nie jest mocą (W/kW) — "
-                    "próbka pominięta. Wskaż czujnik mocy w ustawieniach "
-                    "zasilania mieszkania.",
-                    extra={"entity_id": entity_id, "unit": unit},
-                )
-                _LOGGER.warning(
-                    "Supply input %s reports unit %r, not W/kW; its samples are skipped",
-                    entity_id,
-                    unit,
-                )
-            return None
-        return value * factor
+        factor = self._unit_factor(entity_id, state.attributes.get(ATTR_UNIT_OF_MEASUREMENT))
+        return None if factor is None else value * factor
 
     def _sample(self) -> tuple[float | None, float | None]:
         apartment_w = self._read_watts(self.apartment_sensor)
         victron_w = self._read_watts(self.victron_sensor)
         others = [self._read_watts(e) for e in self.other_sensors]
-        if victron_w is None or any(o is None for o in others):
-            return apartment_w, None
-        return apartment_w, victron_w - sum(o for o in others if o is not None)
+        return apartment_w, victron_net(victron_w, others)
 
     async def _async_tick(self, now: datetime) -> None:
         if self.detector is None or self._store is None:
             return
+        at = dt_util.as_utc(now)
+        if self.covered_from is None:
+            # Nothing was replayed: the log watches from its first live sample.
+            self.covered_from = at
         streak_before = self.detector.streak
         apartment_w, victron_net_w = self._sample()
-        transition = self.detector.observe(dt_util.as_utc(now), apartment_w, victron_net_w)
+        transition = self.detector.observe(at, apartment_w, victron_net_w)
+        self._last_tick_at = at
         if transition is not None:
             self.transitions.append(transition)
-            await self._store.async_save(self._payload())
+        # Never mid-streak: resuming from the checkpoint must lose no partial streak.
+        checkpoint_due = self.detector.streak == 0 and (
+            transition is not None
+            or self.checkpoint is None
+            or at - self.checkpoint.at >= SUPPLY_CHECKPOINT_INTERVAL
+        )
+        if checkpoint_due:
+            self.checkpoint = SupplyCheckpoint(at, self.detector.last_decisive)
+        if transition is not None or checkpoint_due:
+            await self._async_save()
+        if transition is not None:
             self.log_info(
                 f"Zasilanie mieszkania: {transition.state} od {transition.at.isoformat()}",
                 extra=transition.to_dict(),
             )
         if transition is not None or self.detector.streak != streak_before:
             async_dispatcher_send(self.hass, self.signal)
+
+    # ------------------------------------------------------------------
+    # History
+    # ------------------------------------------------------------------
+    async def _async_replay(
+        self, detector: SupplyDetector
+    ) -> tuple[datetime | None, list[SupplyTransition], int, int, datetime | None]:
+        """Feed the recorder's history of the inputs through ``detector``.
+
+        The live tick's grid (30 s), sampled as the tick samples: at each
+        instant the last known state of every input. From the later of the
+        checkpoint and the last stored transition — every transition found is
+        new by construction, and with a checkpoint only the downtime is read —
+        or, with neither, from the oldest instant the recorder holds all
+        inputs, to now. Returns the first replayed instant (``None`` when there
+        was no history), the confirmed transitions, the sample counts (all, and
+        those with an input missing) and the last replayed instant.
+        """
+        inputs = self.inputs
+        factors = {entity_id: self._history_factor(entity_id) for entity_id in inputs}
+        unusable = [entity_id for entity_id, factor in factors.items() if factor is None]
+        if unusable:
+            raise SupplyReplayError(
+                f"unit of {', '.join(unusable)} unknown or not W/kW"
+            )
+        resume = [
+            moment
+            for moment in (
+                self.last_transition.at if self.last_transition is not None else None,
+                self.checkpoint.at if self.checkpoint is not None else None,
+            )
+            if moment is not None
+        ]
+        if resume:
+            start: datetime | None = max(resume)
+        else:
+            oldest = [await self._async_oldest_state(entity_id) for entity_id in inputs]
+            start = None if any(o is None for o in oldest) else max(
+                o for o in oldest if o is not None
+            )
+        appended: list[SupplyTransition] = []
+        samples = missing = 0
+        last_instant: datetime | None = None
+        if start is None:
+            return None, appended, samples, missing, last_instant
+        instant = start
+        while True:
+            # Re-read the clock each window: the replay itself takes time, and
+            # it catches up to the moment live sampling takes over.
+            now = dt_util.utcnow()
+            if instant >= now:
+                break
+            window_end = min(instant + SUPPLY_REPLAY_CHUNK, now)
+            instants: list[datetime] = []
+            while instant < window_end:
+                instants.append(instant)
+                instant += SUPPLY_SAMPLE_INTERVAL
+            values = []
+            for entity_id in inputs:
+                # From one step before the window: the API leaves out a state
+                # written exactly at its start, and the first instant needs the
+                # state in force at it.
+                changes = await self._async_state_history(
+                    entity_id,
+                    instants[0] - SUPPLY_SAMPLE_INTERVAL,
+                    window_end,
+                    factors[entity_id],
+                )
+                values.append(values_at(changes, instants))
+            for index, at in enumerate(instants):
+                apartment_w = values[0][index]
+                net_w = victron_net(values[1][index], [v[index] for v in values[2:]])
+                samples += 1
+                if apartment_w is None or net_w is None:
+                    missing += 1
+                transition = detector.observe(at, apartment_w, net_w)
+                if transition is not None:
+                    appended.append(transition)
+                last_instant = at
+        return start, appended, samples, missing, last_instant
+
+    async def _async_oldest_state(self, entity_id: str) -> datetime | None:
+        """When the recorder's oldest state of ``entity_id`` was written."""
+        changes = await get_instance(self.hass).async_add_executor_job(
+            state_changes_during_period,
+            self.hass,
+            _BEFORE_ANY_HISTORY,
+            dt_util.utcnow(),
+            entity_id,
+            True,  # no_attributes
+            False,  # descending: the oldest first
+            1,  # limit
+            False,  # include_start_time_state
+        )
+        states = changes.get(entity_id) or []
+        return dt_util.as_utc(states[0].last_updated) if states else None
+
+    async def _async_state_history(
+        self, entity_id: str, start: datetime, end: datetime, factor: float | None
+    ) -> list[tuple[datetime, float | None]]:
+        """``(time, W)`` state changes of ``entity_id`` after ``start``, before ``end``.
+
+        Led by the state already in force at ``start``; a state that is not a
+        reading is ``None`` (a missing input from then on).
+        """
+        assert factor is not None
+        changes = await get_instance(self.hass).async_add_executor_job(
+            state_changes_during_period,
+            self.hass,
+            start,
+            end,
+            entity_id,
+            True,  # no_attributes: the unit is the current state's
+            False,  # descending
+            None,  # limit
+            True,  # include_start_time_state
+        )
+        return [
+            (dt_util.as_utc(state.last_updated), watts(state.state, factor))
+            for state in changes.get(entity_id) or []
+        ]
+
+    async def async_hourly_states(self, start: datetime, end: datetime) -> dict[datetime, str]:
+        """Supply of the hours in ``[start, end)`` older than the log, from hourly means.
+
+        Reads the inputs' hourly ``mean`` statistics; an input without a mean
+        for an hour makes that hour's mean missing. Classified by
+        :func:`classify_hours`; only hours before ``covered_from`` are returned
+        (all of them while the log covers nothing yet). Keys are UTC hour starts.
+        """
+        inputs = self.inputs
+        factors = {entity_id: self._history_factor(entity_id) for entity_id in inputs}
+        rows = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            end,
+            set(inputs),
+            "hour",
+            None,
+            {"mean"},
+        )
+        per_input: list[dict[datetime, float]] = []
+        for entity_id in inputs:
+            factor = factors[entity_id]
+            series: dict[datetime, float] = {}
+            if factor is not None:
+                for row in rows.get(entity_id) or []:
+                    mean = row.get("mean")
+                    if mean is None or not math.isfinite(mean):
+                        continue
+                    series[_row_start(row)] = float(mean) * factor
+            per_input.append(series)
+        hours = set().union(*per_input)
+        means = {
+            hour: (
+                per_input[0].get(hour),
+                victron_net(per_input[1].get(hour), [s.get(hour) for s in per_input[2:]]),
+            )
+            for hour in hours
+        }
+        classified = classify_hours(means, self.min_apartment_w, self.margin_w)
+        covered_from = self.covered_from
+        return {
+            hour: state
+            for hour, state in sorted(classified.items())
+            if covered_from is None or hour < covered_from
+        }
+
+
+def _row_start(row: Mapping[str, Any]) -> datetime:
+    """A statistics row's start as an aware UTC datetime."""
+    start = row["start"]
+    if isinstance(start, (int, float)):
+        return dt_util.utc_from_timestamp(start)
+    return dt_util.as_utc(start)

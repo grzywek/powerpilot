@@ -295,6 +295,10 @@ CONF_SUPPLY_CONFIRM_SAMPLES: Final = "supply_confirm_samples"
 
 SUPPLY_VICTRON: Final = "victron"  # apartment fed from the Victron (PPE 1)
 SUPPLY_METER_2: Final = "meter_2"  # apartment fed from the second meter (PPE 2)
+# Per-hour kinds besides the two supplies (``SupplyModule.supply_for_hour``):
+# the hour overlaps a switch window, or the log cannot tell.
+SUPPLY_HOUR_MIXED: Final = "mixed"
+SUPPLY_HOUR_UNKNOWN: Final = "unknown"
 # Where a stored transition was detected: live sampling or a history replay.
 SUPPLY_SOURCE_LIVE: Final = "live"
 SUPPLY_SOURCE_REPLAY: Final = "replay"

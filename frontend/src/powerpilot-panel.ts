@@ -5260,6 +5260,12 @@ export class PowerPilotPanel extends LitElement {
     .flow-stage {
       margin-bottom: 0;
     }
+    /* The flow's rows are sentences: as flex rows every text run became its
+       own column and a long row (the optimizer's, with both meters) wrapped
+       into a ragged grid and overflowed the card. */
+    .flow-stage .check {
+      display: block;
+    }
     .flow-arrow {
       display: flex;
       align-items: center;

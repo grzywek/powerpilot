@@ -208,26 +208,60 @@ export class PowerPilotFlowDiagram extends LitElement {
       const r = el.getBoundingClientRect();
       return { x: r.left - box.left, y: r.top - box.top, w: r.width, h: r.height };
     };
+    type Rect = { x: number; y: number; w: number; h: number };
+    const rects = new Map<string, Rect>();
+    const at = (id: string): Rect | null => {
+      if (!rects.has(id)) {
+        const r = rect(id);
+        if (!r) return null;
+        rects.set(id, r);
+      }
+      return rects.get(id) ?? null;
+    };
+    const edges = this._edgeList().filter((e) => at(e.from) && at(e.to));
+    // Several paths on one side of a card start (or end) at their own port,
+    // ordered by where their other end is, so they never overlap or cross
+    // right at the card.
+    const ports = new Map<Edge, { out: number; in: number }>();
+    const spread = (side: "out" | "in") => {
+      const groups = new Map<string, Edge[]>();
+      for (const e of edges) {
+        if (e.vertical) continue;
+        const key = side === "out" ? e.from : e.to;
+        groups.set(key, [...(groups.get(key) ?? []), e]);
+      }
+      for (const [key, group] of groups) {
+        const r = at(key)!;
+        const other = (e: Edge) => at(side === "out" ? e.to : e.from)!;
+        group.sort((p, q) => other(p).y + other(p).h / 2 - (other(q).y + other(q).h / 2));
+        group.forEach((e, i) => {
+          const y = r.y + Math.min(22 + i * 12, r.h - 10);
+          ports.set(e, { ...(ports.get(e) ?? { out: 0, in: 0 }), [side]: y });
+        });
+      }
+    };
+    spread("out");
+    spread("in");
     const drawn: DrawnEdge[] = [];
-    for (const e of this._edgeList()) {
-      const a = rect(e.from);
-      const b = rect(e.to);
-      if (!a || !b) continue;
+    for (const e of edges) {
+      const a = at(e.from)!;
+      const b = at(e.to)!;
       let d: string;
       if (e.vertical) {
         const x1 = a.x + a.w / 2;
         const y1 = a.y + a.h;
         const x2 = b.x + b.w / 2;
         const y2 = b.y;
-        const dy = Math.max(12, (y2 - y1) / 2);
+        const dy = Math.max(8, (y2 - y1) / 2);
         d = `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`;
       } else {
+        const p = ports.get(e)!;
         const x1 = a.x + a.w;
-        const y1 = a.y + Math.min(a.h / 2, 34);
         const x2 = b.x;
-        const y2 = b.y + Math.min(b.h / 2, 34);
-        const dx = Math.max(24, (x2 - x1) / 2);
-        d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+        // Control points inside the gap next to each card: a long jump
+        // (two columns) bends in the gaps, not over the column it crosses.
+        const dx = Math.min(Math.max(16, (x2 - x1) / 2), 40);
+        d = `M ${x1} ${p.out} C ${x1 + dx} ${p.out}, ${x2 - dx} ${p.in}, ${x2} ${p.in}`;
       }
       drawn.push({ ...e, d });
     }
@@ -281,7 +315,7 @@ export class PowerPilotFlowDiagram extends LitElement {
         edges.push({ from: "victron", to: "switch", color: NEUTRAL, active: !onMeter2 });
         edges.push({ from: "ppe2", to: "switch", color: PPE2_COLOR, active: onMeter2 });
         edges.push({ from: "switch", to: `dev:${apartment.entity_id}`, color: onMeter2 ? PPE2_COLOR : NEUTRAL, active: true });
-        edges.push({ from: "detection", to: "switch", color: SWITCH_COLOR, active: false, derived: true, vertical: true });
+        edges.push({ from: "switch", to: "detection", color: SWITCH_COLOR, active: false, derived: true, vertical: true });
       }
     }
     return edges;
@@ -358,11 +392,11 @@ export class PowerPilotFlowDiagram extends LitElement {
     </div>`;
   }
 
-  // ---------------------------------------------------------------- columns
+  // ------------------------------------------------------------ the cards
 
-  private _gridColumn(t: FlowTopology): TemplateResult {
+  private _ppe1Card(t: FlowTopology): TemplateResult {
     const evPrefix = t.ev?.energy_added?.entity_id.split(".").pop()?.split("_")[0];
-    const ppe1Terms = t.ppe1.terms.map((term, i) => ({
+    const terms = t.ppe1.terms.map((term, i) => ({
       note: term.entity_id,
       label:
         evPrefix && (term.entity_id.split(".").pop() ?? "").startsWith(`${evPrefix}_`)
@@ -371,140 +405,126 @@ export class PowerPilotFlowDiagram extends LitElement {
       value: kwh(term.kwh),
       op: (i > 0 ? "+" : undefined) as "+" | undefined,
     }));
-    return html`<div class="col">
-      <div class="col-head">Sieć</div>
-      ${this._card(
-        "ppe1",
-        PPE1_COLOR,
-        "⚡",
-        "PPE 1",
-        "przyłącze główne — za nim ładowarka i Victron",
-        html`
-          ${this._row("moc z sieci teraz", liveText(t.grid_power), t.grid_power?.entity_id, true)}
-          ${t.ppe1.terms.length
-            ? html`<div class="sub">Import PPE 1 w godzinie = suma jego liczników</div>
-                ${this._formula("import", ppe1Terms, kwh(t.ppe1.import_kwh))}`
-            : html`<div class="sub muted">brak liczników importu PPE 1 w opcjach Tarczy</div>`}
-          ${this._tarcza(t.ppe1.tarcza)}
-        `,
-      )}
-      <div class="spacer"></div>
-      ${t.ppe2
-        ? this._card(
-            "ppe2",
-            PPE2_COLOR,
-            "⚡",
-            "PPE 2",
-            "licznik 2 — zasila tylko mieszkanie, gdy przełączone",
-            html`
-              <div class="sub">Import PPE 2 w godzinie = licznik mieszkania, gdy mieszkanie było na liczniku 2</div>
-              ${this._formula(
-                "import",
-                [{ label: "licznik mieszkania", value: kwh(t.ppe2.import_kwh), note: t.ppe2.meter }],
-                kwh(t.ppe2.import_kwh),
-              )}
-              <div class="sub">mieszkanie w tej godzinie: <b>${SUPPLY_LABEL[t.supply.hour_state ?? "unknown"] ?? "nieznane"}</b></div>
-              ${t.supply.hour_state === "mixed"
-                ? html`<div class="sub muted">godzina z przełączeniem: część z 5-minutowych odczytów (Tarcza), tu bez podziału</div>`
-                : nothing}
-              ${this._tarcza(t.ppe2.tarcza)}
-            `,
-          )
-        : nothing}
-    </div>`;
+    return this._card(
+      "ppe1",
+      PPE1_COLOR,
+      "⚡",
+      "PPE 1",
+      "przyłącze główne — za nim ładowarka i Victron",
+      html`
+        ${this._row("moc z sieci teraz", liveText(t.grid_power), t.grid_power?.entity_id, true)}
+        ${t.ppe1.terms.length
+          ? html`<div class="sub">Import PPE 1 w godzinie = suma jego liczników</div>
+              ${this._formula("import", terms, kwh(t.ppe1.import_kwh))}`
+          : html`<div class="sub muted">brak liczników importu PPE 1 w opcjach Tarczy</div>`}
+        ${this._tarcza(t.ppe1.tarcza)}
+      `,
+    );
   }
 
-  private _connectionColumn(t: FlowTopology): TemplateResult {
+  private _ppe2Card(t: FlowTopology): TemplateResult | typeof nothing {
+    if (!t.ppe2) return nothing;
+    return this._card(
+      "ppe2",
+      PPE2_COLOR,
+      "⚡",
+      "PPE 2",
+      "licznik 2 — zasila tylko mieszkanie, gdy przełączone",
+      html`
+        <div class="sub">Import PPE 2 w godzinie = licznik mieszkania, gdy mieszkanie było na liczniku 2</div>
+        ${this._formula(
+          "import",
+          [{ label: "licznik mieszkania", value: kwh(t.ppe2.import_kwh), note: t.ppe2.meter }],
+          kwh(t.ppe2.import_kwh),
+        )}
+        <div class="sub">mieszkanie w tej godzinie: <b>${SUPPLY_LABEL[t.supply.hour_state ?? "unknown"] ?? "nieznane"}</b></div>
+        ${t.supply.hour_state === "mixed"
+          ? html`<div class="sub muted">godzina z przełączeniem: część z 5-minutowych odczytów (Tarcza), tu bez podziału</div>`
+          : nothing}
+        ${this._tarcza(t.ppe2.tarcza)}
+      `,
+    );
+  }
+
+  private _evCard(t: FlowTopology): TemplateResult | typeof nothing {
+    if (!t.ev) return nothing;
+    return this._card(
+      "ev",
+      EV_COLOR,
+      "🚗",
+      "Ładowarka EV",
+      t.ev.behind_meter ? "za licznikami domu" : "przed licznikami domu — liczona w imporcie PPE 1",
+      html`
+        ${this._row("ładowarka", liveText(t.ev.plug), t.ev.plug?.entity_id)}
+        ${this._row("energia sesji", liveText(t.ev.energy_added), t.ev.energy_added?.entity_id)}
+        ${this._row("w godzinie", `${kwh(t.ev.energy_added_kwh)} kWh`, null, true)}
+        ${this._row("SoC auta", t.ev.soc != null ? `${Math.round(t.ev.soc)} %` : "—")}
+      `,
+    );
+  }
+
+  private _victronCard(t: FlowTopology): TemplateResult {
+    return this._card(
+      "victron",
+      "#2563eb",
+      "🔌",
+      "Victron MultiPlus II",
+      "falownik: wejście AC z PPE 1, bateria, wyjście AC do domu",
+      html`
+        ${this._row("moc z sieci (AC-in)", liveText(t.grid_power), t.grid_power?.entity_id)}
+        <div class="section">wyjście AC — korzeń drzewa liczników</div>
+        ${t.tree
+          ? html`${this._row("zużycie teraz", liveText(t.tree.power), t.tree.entity_id, true)}
+              ${this._row("zużycie w godzinie", `${kwh(t.tree.kwh)} kWh`, null, true)}`
+          : html`<div class="sub muted">brak czujnika zużycia w opcjach</div>`}
+        ${t.detection
+          ? this._row("moc wyjścia AC", liveText(t.detection.victron_output), t.detection.victron_output?.entity_id)
+          : nothing}
+      `,
+    );
+  }
+
+  private _batteryCard(t: FlowTopology): TemplateResult {
     const b = t.battery;
     const chg = b.charge_kwh ?? 0;
     const dis = b.discharge_kwh ?? 0;
     const batState = Math.max(chg, dis) <= KWH_EPS ? "bez ruchu" : chg >= dis ? "ładowanie" : "rozładowanie";
-    return html`<div class="col">
-      <div class="col-head">Za PPE 1</div>
-      ${t.ev
-        ? this._card(
-            "ev",
-            EV_COLOR,
-            "🚗",
-            "Ładowarka EV",
-            t.ev.behind_meter
-              ? "za licznikami domu"
-              : "przed licznikami domu — liczona w imporcie PPE 1",
-            html`
-              ${this._row("ładowarka", liveText(t.ev.plug), t.ev.plug?.entity_id)}
-              ${this._row("energia sesji", liveText(t.ev.energy_added), t.ev.energy_added?.entity_id)}
-              ${this._row("w godzinie", `${kwh(t.ev.energy_added_kwh)} kWh`, null, true)}
-              ${this._row("SoC auta", t.ev.soc != null ? `${Math.round(t.ev.soc)} %` : "—")}
-            `,
-          )
-        : nothing}
-      ${this._card(
-        "victron",
-        "#2563eb",
-        "🔌",
-        "Victron MultiPlus II",
-        "falownik: wejście AC z PPE 1, bateria, wyjście AC do domu",
-        html`
-          ${this._row("moc z sieci (AC-in)", liveText(t.grid_power), t.grid_power?.entity_id)}
-          <div class="section">wyjście AC — korzeń drzewa liczników</div>
-          ${t.tree
-            ? html`${this._row("zużycie teraz", liveText(t.tree.power), t.tree.entity_id, true)}
-                ${this._row("zużycie w godzinie", `${kwh(t.tree.kwh)} kWh`, null, true)}`
-            : html`<div class="sub muted">brak czujnika zużycia w opcjach</div>`}
-          ${t.detection
-            ? this._row("moc wyjścia AC", liveText(t.detection.victron_output), t.detection.victron_output?.entity_id)
-            : nothing}
-        `,
-      )}
-      ${this._card(
-        "battery",
-        chg >= dis ? ESS_CHARGE_COLOR : ESS_DISCHARGE_COLOR,
-        "🔋",
-        "Bateria ESS",
-        `w godzinie: ${batState}`,
-        html`
-          ${this._row("SoC", liveText(b.soc), b.soc?.entity_id, true)}
-          ${this._row("ładowanie", `${kwh(b.charge_kwh)} kWh`, b.charge?.entity_id)}
-          ${this._row("rozładowanie", `${kwh(b.discharge_kwh)} kWh`, b.discharge?.entity_id)}
-          ${this._row("„Cena w ESS”", `${pln(b.delivered_cost)} zł/kWh`)}
-        `,
-      )}
-    </div>`;
+    return this._card(
+      "battery",
+      chg >= dis ? ESS_CHARGE_COLOR : ESS_DISCHARGE_COLOR,
+      "🔋",
+      "Bateria ESS",
+      `w godzinie: ${batState}`,
+      html`
+        ${this._row("SoC", liveText(b.soc), b.soc?.entity_id, true)}
+        ${this._row("ładowanie", `${kwh(b.charge_kwh)} kWh`, b.charge?.entity_id)}
+        ${this._row("rozładowanie", `${kwh(b.discharge_kwh)} kWh`, b.discharge?.entity_id)}
+        ${this._row("„Cena w ESS”", `${pln(b.delivered_cost)} zł/kWh`)}
+      `,
+    );
   }
 
-  private _middleColumn(t: FlowTopology): TemplateResult {
-    const root = t.tree;
-    const det = t.detection;
+  private _switchCard(t: FlowTopology): TemplateResult {
     const onMeter2 = t.supply.state === "meter_2";
-    const hasSwitch = t.supply.active && !!root?.children.some((c) => c.apartment);
-    return html`<div class="col">
-      <div class="col-head">${hasSwitch ? "Baza i przełącznik" : "Baza"}</div>
-      <div class="spacer"></div>
-      ${root ? this._baseCard(root) : nothing}
-      <div class="spacer"></div>
-      ${hasSwitch
-        ? html`${det ? this._detectionCard(det) : nothing}
-          ${this._card(
-            "switch",
-            SWITCH_COLOR,
-            "🔀",
-            "Przełącznik mieszkania",
-            "ręczny: Victron (PPE 1) albo licznik 2 (PPE 2)",
-            html`
-              <div class="switch">
-                <span class="pos ${onMeter2 ? "" : "on"}">Victron</span>
-                <span class="pos ${onMeter2 ? "on ppe2" : ""}">licznik 2</span>
-              </div>
-              <div class="sub">
-                teraz: <b>${SUPPLY_LABEL[t.supply.state ?? "unknown"] ?? "nieznane"}</b>
-                ${t.supply.since
-                  ? html` od ${new Date(t.supply.since).toLocaleString("pl-PL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}`
-                  : nothing}
-              </div>
-            `,
-          )}`
-        : nothing}
-    </div>`;
+    return this._card(
+      "switch",
+      SWITCH_COLOR,
+      "🔀",
+      "Przełącznik mieszkania",
+      "ręczny: Victron (PPE 1) albo licznik 2 (PPE 2)",
+      html`
+        <div class="switch">
+          <span class="pos ${onMeter2 ? "" : "on"}">Victron</span>
+          <span class="pos ${onMeter2 ? "on ppe2" : ""}">licznik 2</span>
+        </div>
+        <div class="sub">
+          teraz: <b>${SUPPLY_LABEL[t.supply.state ?? "unknown"] ?? "nieznane"}</b>
+          ${t.supply.since
+            ? html` od ${new Date(t.supply.since).toLocaleString("pl-PL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}`
+            : nothing}
+        </div>
+      `,
+    );
   }
 
   private _detectionCard(det: NonNullable<FlowTopology["detection"]>): TemplateResult {
@@ -618,26 +638,51 @@ export class PowerPilotFlowDiagram extends LitElement {
     );
   }
 
-  private _loadColumns(t: FlowTopology): TemplateResult {
-    const root = t.tree;
-    if (!root) return html`<div class="col"></div><div class="col"></div>`;
-    const direct = [...root.children].sort((a, b) => Number(a.apartment) - Number(b.apartment));
-    const nested = direct.filter((c) => c.children.length);
-    const deeper = (n: TreeNode): TemplateResult =>
-      html`${n.children.map((c) => html`${this._deviceCard(c)}${c.children.length ? html`${deeper(c)}${this._ownCard(c)}` : nothing}`)}`;
-    return html`
-      <div class="col">
-        <div class="col-head">Odbiorniki</div>
-        ${direct.map((c) => this._deviceCard(c))}
-      </div>
-      <div class="col">
-        <div class="col-head">${nested.length === 1 ? `W środku: ${label(nested[0].entity_id)}` : "Liczniki w środku"}</div>
-        ${nested.map((n) => html`${deeper(n)}${this._ownCard(n)}`)}
-      </div>
-    `;
+  /** The meters inside ``n`` (deeper ones nested), then ``n``'s own part. */
+  private _inside(n: TreeNode): TemplateResult {
+    return html`${n.children.map(
+      (c) => html`${this._deviceCard(c)}${c.children.length ? this._inside(c) : nothing}`,
+    )}${this._ownCard(n)}`;
   }
 
   // ----------------------------------------------------------------- render
+
+  /**
+   * Two lanes on one grid. The upper one is everything behind the Victron;
+   * the lower one — with supply detection — is the apartment, switched
+   * between the Victron and PPE 2. Nothing stands in the lower lane under the
+   * Victron's column, so PPE 2's path to the switch runs through free space
+   * and never passes under a card it does not feed.
+   */
+  private _layout(t: FlowTopology): TemplateResult {
+    const root = t.tree;
+    const apartment = t.supply.active ? root?.children.find((c) => c.apartment) : undefined;
+    const lane = !!apartment;
+    const upper = root ? root.children.filter((c) => c !== apartment) : [];
+    const upperNested = upper.filter((c) => c.children.length);
+    const insideHead = upperNested.length || apartment?.children.length ? "Liczniki w środku" : "";
+    const cell = (col: number, row: number, body: unknown, cls = "") =>
+      html`<div class="cell ${cls}" style="grid-column:${col};grid-row:${row}">${body}</div>`;
+    return html`
+      ${["Sieć", "Za PPE 1", "Baza", "Odbiorniki", insideHead].map(
+        (h, i) => html`<div class="col-head" style="grid-column:${i + 1};grid-row:1">${h}</div>`,
+      )}
+      ${cell(1, 2, this._ppe1Card(t))}
+      ${cell(2, 2, html`${this._evCard(t)}${this._victronCard(t)}${this._batteryCard(t)}`)}
+      ${cell(3, 2, root ? this._baseCard(root) : nothing, "end")}
+      ${cell(4, 2, upper.map((c) => this._deviceCard(c)))}
+      ${cell(5, 2, upperNested.map((n) => this._inside(n)))}
+      ${lane && apartment
+        ? html`
+            <div class="lane" style="grid-row:3">Mieszkanie — przełączane między Victronem (PPE 1) a licznikiem 2 (PPE 2)</div>
+            ${cell(1, 4, this._ppe2Card(t))}
+            ${cell(3, 4, html`${this._switchCard(t)}${t.detection ? this._detectionCard(t.detection) : nothing}`)}
+            ${cell(4, 4, this._deviceCard(apartment))}
+            ${cell(5, 4, apartment.children.length ? this._inside(apartment) : nothing)}
+          `
+        : nothing}
+    `;
+  }
 
   protected render(): TemplateResult {
     const t = this.topology;
@@ -661,7 +706,7 @@ export class PowerPilotFlowDiagram extends LitElement {
               />`,
             )}
           </svg>
-          ${this._gridColumn(t)} ${this._connectionColumn(t)} ${this._middleColumn(t)} ${this._loadColumns(t)}
+          ${this._layout(t)}
         </div>
       </div>
       <div class="legend">
@@ -693,6 +738,7 @@ export class PowerPilotFlowDiagram extends LitElement {
       display: grid;
       grid-template-columns: repeat(5, minmax(190px, 1fr));
       column-gap: 46px;
+      row-gap: 10px;
       min-width: 1130px;
       align-items: stretch;
     }
@@ -711,7 +757,9 @@ export class PowerPilotFlowDiagram extends LitElement {
       opacity: 0.45;
     }
     .edge.active {
-      stroke-width: 2.6;
+      /* Light hues (PPE 2's lilac) darkened a little to read on a card background. */
+      stroke: color-mix(in srgb, var(--c) 82%, var(--primary-text-color, #000));
+      stroke-width: 3;
       stroke-dasharray: 7 7;
       opacity: 0.95;
       animation: flow 1.1s linear infinite;
@@ -736,13 +784,33 @@ export class PowerPilotFlowDiagram extends LitElement {
         animation: none;
       }
     }
-    .col {
+    .cell {
       position: relative;
       z-index: 1;
       display: flex;
       flex-direction: column;
       gap: 14px;
       min-width: 0;
+    }
+    .cell.end {
+      justify-content: flex-end;
+    }
+    .lane {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 10px 0 2px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--secondary-text-color);
+    }
+    .lane::after {
+      content: "";
+      flex: 1;
+      border-top: 1px dashed var(--divider-color, #cbd5e1);
     }
     .col-head {
       font-size: 11px;
@@ -751,10 +819,6 @@ export class PowerPilotFlowDiagram extends LitElement {
       text-transform: uppercase;
       color: var(--secondary-text-color);
       padding: 0 2px;
-    }
-    .spacer {
-      flex: 1 1 auto;
-      min-height: 8px;
     }
     .card {
       background: var(--card-background-color, #fff);

@@ -284,8 +284,8 @@ liczników*); the form refuses anything else.
   unknown hour has no PPE 2 import and no base: its split is not read from
   whole-hour meters. The cost panel shows PPE 2's hour at what its month
   settles: the Tarcza limit while PPE 2's month binds, the hour's price
-  otherwise, plus the hour's distribution; the control card shows both
-  meters' grid draw.
+  otherwise, plus the hour's distribution; the control card and the
+  *Przepływ* tab (with the detection's inputs and state) show both meters.
 - Recommendations (opt-in: options → *Zasilanie mieszkania* → recommend
   switches; off by default): the plan's runs of meter-2 hours are cycles
   (id = planned start, or the actual switch time for the one running). Each

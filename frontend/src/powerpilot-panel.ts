@@ -557,6 +557,15 @@ interface FlowData {
     calendars: string[];
     price_source: string | null;
   };
+  /** Which meter feeds the apartment (``active`` false without detection). */
+  supply?: {
+    active: boolean;
+    state: SupplyState | null;
+    since: string | null;
+    apartment_power: FlowEntity | null;
+    victron_output: FlowEntity | null;
+    apartment_meter: FlowEntity | null;
+  };
   pricing: {
     markup: number;
     vat: number;
@@ -604,6 +613,11 @@ interface FlowData {
       battery_soc_end: number;
       hour_cost: number;
       battery_use_cost: number;
+      /** The plan's supply of the apartment this hour (null without detection). */
+      supply?: SupplyState | null;
+      /** Meter 2's import of the hour and its cost under PPE 2's month. */
+      ppe2_import_kwh?: number | null;
+      ppe2_hour_cost?: number | null;
     } | null;
   };
 }
@@ -3798,6 +3812,9 @@ export class PowerPilotPanel extends LitElement {
     const bat = f.battery;
     const opt = f.optimizer;
     const cur = opt.current;
+    // With supply detection the grid is two meters: PPE 1 behind the
+    // Victron, PPE 2 the apartment while it is on meter 2.
+    const sup = f.supply?.active ? f.supply : null;
     const arrow = (label: string) =>
       html`<div class="flow-arrow"><span>↓</span><span class="muted">${label}</span></div>`;
 
@@ -3810,7 +3827,12 @@ export class PowerPilotPanel extends LitElement {
             ${this._flowInput("🔋 SoC ESS", inp.battery_soc)}
             ${this._flowInput("🔋 Ładowanie ESS", inp.battery_charge)}
             ${this._flowInput("🔋 Rozładowanie ESS", inp.battery_discharge)}
-            ${this._flowInput("Import z sieci", inp.grid_import)}
+            ${this._flowInput(sup ? "Import z sieci — PPE 1" : "Import z sieci", inp.grid_import)}
+            ${sup
+              ? html`${this._flowInput("🏠 Moc mieszkania", sup.apartment_power)}
+                ${this._flowInput("Moc wyjściowa Victrona", sup.victron_output)}
+                ${this._flowInput("🏠 Licznik mieszkania (PPE 2 na liczniku 2)", sup.apartment_meter)}`
+              : nothing}
             ${this._flowInput("Cena energii (RDN)", inp.buy_price_sensor)}
             ${this._flowInput("Pogoda", inp.weather)}
             ${this._flowInput("🚗 SoC EV", inp.ev_soc)}
@@ -3825,6 +3847,12 @@ export class PowerPilotPanel extends LitElement {
               ? html` · kalendarze: <b>${inp.calendars.join(", ")}</b>`
               : nothing}
           </div>
+          ${sup
+            ? html`<div class="check muted">
+                Mieszkanie zasilane z: <b>${this._supplyLabel(sup.state)}</b>
+                ${sup.since ? html` od ${this._clock(sup.since)}` : nothing}
+              </div>`
+            : nothing}
         </div>
 
         ${arrow("surowe odczyty → składanie ceny brutto")}
@@ -3901,13 +3929,21 @@ export class PowerPilotPanel extends LitElement {
                 <b>${INVERTER_MODE_META[cur.inverter_mode]?.label ?? cur.inverter_mode}</b> ·
                 ładowanie <b>${n2(cur.battery_charge_kwh)} kWh</b> ·
                 rozładowanie <b>${n2(cur.battery_discharge_kwh)} kWh</b> ·
-                import <b>${n2(cur.grid_buy_kwh)} kWh</b>
+                import${sup ? " PPE 1" : ""} <b>${n2(cur.grid_buy_kwh)} kWh</b>
+                ${sup
+                  ? html` · import PPE 2 <b>${n2(cur.ppe2_import_kwh)} kWh</b>
+                      <span class="muted">(mieszkanie: ${this._supplyLabel(cur.supply ?? null)})</span>`
+                  : nothing}
                 ${cur.ev_charge_kwh > 0.005
                   ? html` · EV <b>${n2(cur.ev_charge_kwh)} kWh</b>`
                   : nothing}
               </div>
               <div class="check muted">
-                Koszt godziny: ${n2(cur.hour_cost)} PLN z sieci +
+                Koszt godziny: ${n2(cur.hour_cost)} PLN z sieci${sup ? " PPE 1" : ""} +
+                ${sup
+                  ? html`${n2(cur.ppe2_hour_cost)} PLN z PPE 2 (po limicie Tarczy, gdy
+                      średnia miesiąca PPE 2 jest ponad nim) + `
+                  : nothing}
                 ${n2(cur.battery_use_cost)} PLN z ESS (rozładowanie ×
                 „cena w ESS") · SoC ESS na koniec: ${cur.battery_soc_end.toFixed(0)} %
               </div>`

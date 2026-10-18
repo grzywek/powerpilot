@@ -3819,6 +3819,222 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             },
         }
 
+    async def async_flow_topology(self) -> dict:
+        """The installation as the "Przepływ" diagram draws it.
+
+        What is behind what — PPE 1 and its meters (the EV charger before the
+        house meters or behind them, the Victron's AC input), the battery, the
+        Victron's AC output with the meter tree under it, the apartment's
+        switch between the Victron and PPE 2 — what every sensor reads, and
+        how each computed value comes out of them, with the very terms the
+        integration uses: the meter tree's own energy (``exclusive_series``),
+        PPE 1's import (its meters' sum), PPE 2's (``_ppe2_measured_kwh``) and
+        the detection's rule (``SupplyModule.live_reading``).
+
+        Two clocks: power sensors read now (W); energy meters and every
+        subtraction show the last complete hour (kWh), whose arithmetic can be
+        checked. A value that cannot be read is ``None`` and drawn as missing.
+        """
+        from .const import (
+            CONF_CONSUMPTION_SENSOR,
+            CONF_EV_BEHIND_METER,
+            CONF_EV_ENERGY_ADDED_SENSOR,
+            CONF_GRID_IMPORT_SENSOR,
+            CONF_SENSOR_PARENTS,
+            CONF_SOC_SENSOR,
+            CONF_SUPPLY_CONFIRM_SAMPLES,
+            CONF_SUPPLY_MIN_APARTMENT_W,
+            CONF_SUPPLY_VICTRON_SHARE,
+            CONF_BATTERY_CHARGE_SENSOR,
+            CONF_BATTERY_DISCHARGE_SENSOR,
+        )
+        from .hierarchy import build_children, exclusive_series, metered_sensors
+        from .modules.supply import classify_sample
+
+        hour = dt_util.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+
+        def name(eid: str) -> str:
+            state = self.hass.states.get(eid)
+            return state.name if state is not None else eid
+
+        def live(eid: str | None) -> dict | None:
+            """A sensor's state now, with its unit."""
+            if not eid:
+                return None
+            state = self.hass.states.get(eid)
+            usable = state is not None and state.state not in ("unknown", "unavailable")
+            return {
+                "entity_id": eid,
+                "name": name(eid),
+                "value": state.state if usable else None,
+                "unit": state.attributes.get("unit_of_measurement") if state else None,
+            }
+
+        async def hour_kwh(eid: str | None) -> float | None:
+            """The meter's energy in ``hour`` (the reader needs the hour before)."""
+            if not eid:
+                return None
+            series = await self.consumption.async_range_kwh(
+                eid, hour - timedelta(hours=1), hour + timedelta(hours=1)
+            )
+            value = series.get(hour)
+            return round(value, 3) if value is not None else None
+
+        def outcome(ppe: str) -> dict | None:
+            for o in self.data.billing if self.data else []:
+                if o.period.ppe == ppe and o.period.month_start <= hour < o.period.month_end:
+                    return {
+                        "binds": o.cap_binds,
+                        "average_kwh": (
+                            round(o.average_kwh, 4) if o.average_kwh is not None else None
+                        ),
+                        "limit_kwh": o.period.limit_kwh,
+                        "terms_name": o.period.terms_name,
+                    }
+            return None
+
+        supply = self.supply
+        main = self.config.get(CONF_CONSUMPTION_SENSOR)
+        device_ids = metered_sensors(self.config)
+        parents = self.config.get(CONF_SENSOR_PARENTS) or {}
+        hour_state = (
+            (await supply.async_past_hour_states(hour, hour + timedelta(hours=1))).get(hour)
+            if supply.active
+            else None
+        )
+
+        # The meter tree: every meter's reading in the hour and its own energy
+        # (the reading minus its direct children; the apartment's subtree is
+        # not part of the root's while it is on meter 2).
+        tree: dict | None = None
+        own: dict[str, float | None] = {}
+        if main:
+            raw = {eid: await hour_kwh(eid) for eid in [main, *device_ids]}
+            exclusive = exclusive_series(
+                main,
+                device_ids,
+                parents,
+                {eid: ({hour: v} if v is not None else {}) for eid, v in raw.items()},
+                apartment=supply.apartment_meter or None,
+                supply={hour: hour_state} if hour_state else None,
+            ).series
+            own = {
+                eid: (round(v, 3) if (v := exclusive.get(eid, {}).get(hour)) is not None else None)
+                for eid in raw
+            }
+            children = build_children(main, device_ids, parents)
+            apartment = supply.apartment_meter if supply.active else None
+            off_victron = self._off_victron_devices(hour_state)
+
+            def node(eid: str) -> dict:
+                return {
+                    "entity_id": eid,
+                    "name": name(eid),
+                    "kwh": raw.get(eid),
+                    "own_kwh": own.get(eid),
+                    # Index in the chart's device list: the same colour there.
+                    "device_index": device_ids.index(eid) if eid in device_ids else None,
+                    "apartment": eid == apartment,
+                    "climate": self.climate.handles(eid),
+                    # Not part of the root's reading this hour (on meter 2).
+                    "off_victron": eid in off_victron,
+                    "children": [node(c) for c in children.get(eid, [])],
+                }
+
+            tree = node(main)
+            tree["power"] = live(main)
+
+        ppe1_meters = self.billing.ppe_sensors().get(PPE_1) or []
+        ppe1_terms = [
+            {"entity_id": eid, "name": name(eid), "kwh": await hour_kwh(eid)}
+            for eid in ppe1_meters
+        ]
+        ppe1_import = (
+            round(sum(t["kwh"] for t in ppe1_terms), 3)
+            if ppe1_terms and all(t["kwh"] is not None for t in ppe1_terms)
+            else None
+        )
+
+        detection: dict | None = None
+        if supply.active:
+            reading = supply.live_reading()
+            a, r = reading["apartment_w"], reading["victron_net_w"]
+            min_w = float(self.config[CONF_SUPPLY_MIN_APARTMENT_W])
+            share = float(self.config[CONF_SUPPLY_VICTRON_SHARE])
+            detection = {
+                "apartment": live(supply.apartment_sensor),
+                "victron_output": live(supply.victron_sensor),
+                "others": [live(e) for e in supply.other_sensors],
+                "apartment_w": a,
+                "victron_w": reading["victron_w"],
+                "others_w": reading["others_w"],
+                "victron_net_w": r,
+                "min_apartment_w": min_w,
+                "victron_share": share,
+                "confirm_samples": int(self.config[CONF_SUPPLY_CONFIRM_SAMPLES]),
+                "decision": (
+                    classify_sample(a, r, min_w, share)
+                    if a is not None and r is not None
+                    else None
+                ),
+                "streak": supply.detector.streak if supply.detector is not None else None,
+            }
+
+        eta_d = float(self.config[CONF_DISCHARGE_EFFICIENCY])
+        wear = float(self.config[CONF_BATTERY_WEAR_COST])
+        return {
+            "hour": hour.isoformat(),
+            "supply": {
+                "active": supply.active,
+                "state": supply.state,
+                "since": supply.since.isoformat() if supply.since else None,
+                "hour_state": hour_state,
+            },
+            "ppe1": {
+                "terms": ppe1_terms,
+                "import_kwh": ppe1_import,
+                "tarcza": outcome(PPE_1),
+            },
+            "ppe2": (
+                {
+                    "meter": supply.apartment_meter,
+                    "import_kwh": self._ppe2_measured_kwh(hour_state, own),
+                    "tarcza": outcome(PPE_2),
+                }
+                if supply.active
+                else None
+            ),
+            "grid_power": live(self.config.get(CONF_GRID_IMPORT_SENSOR)),
+            "ev": (
+                {
+                    # Off: the charger taps in before the house meters, on PPE 1.
+                    "behind_meter": bool(self.config.get(CONF_EV_BEHIND_METER, True)),
+                    "soc": self.ev.soc,
+                    "plug": live(self.config.get(CONF_EV_PLUG_SENSOR)),
+                    "energy_added": live(self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)),
+                    "energy_added_kwh": await hour_kwh(
+                        self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
+                    ),
+                }
+                if self.ev.enabled
+                else None
+            ),
+            "battery": {
+                "soc": live(self.config.get(CONF_SOC_SENSOR)),
+                "charge": live(self.config.get(CONF_BATTERY_CHARGE_SENSOR)),
+                "discharge": live(self.config.get(CONF_BATTERY_DISCHARGE_SENSOR)),
+                "charge_kwh": await hour_kwh(self.config.get(CONF_BATTERY_CHARGE_SENSOR)),
+                "discharge_kwh": await hour_kwh(
+                    self.config.get(CONF_BATTERY_DISCHARGE_SENSOR)
+                ),
+                "delivered_cost": (
+                    round(self._battery_energy_cost / eta_d + wear, 4) if eta_d > 0 else None
+                ),
+            },
+            "tree": tree,
+            "detection": detection,
+        }
+
     def get_status(self) -> dict:
         """Feature/module status for the panel: what works, what's missing."""
         from .const import (

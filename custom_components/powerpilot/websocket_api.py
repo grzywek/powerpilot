@@ -112,10 +112,16 @@ async def ws_accuracy(hass: HomeAssistant, connection, msg) -> None:
 
 
 @websocket_api.websocket_command({vol.Required("type"): "powerpilot/flow"})
-@callback
-def ws_flow(hass: HomeAssistant, connection, msg) -> None:
+@websocket_api.async_response
+async def ws_flow(hass: HomeAssistant, connection, msg) -> None:
     coordinator = _coordinator(hass)
-    connection.send_result(msg["id"], coordinator.get_flow() if coordinator else {})
+    if not coordinator:
+        connection.send_result(msg["id"], {})
+        return
+    result = coordinator.get_flow()
+    # The diagram: what is behind what, and the last hour's arithmetic.
+    result["topology"] = await coordinator.async_flow_topology()
+    connection.send_result(msg["id"], result)
 
 
 @websocket_api.websocket_command(

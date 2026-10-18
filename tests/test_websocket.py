@@ -739,6 +739,59 @@ async def test_flow_prices_the_running_hour_before_its_snapshot(
         assert pricing["total_now"] == round(pricing["buy_price_now"] + expected, 4)
 
 
+async def test_flow_topology_subtracts_like_the_meter_tree(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """The diagram's arithmetic is the integration's own.
+
+    The root's own energy is its reading minus its direct children, the
+    apartment left out while it is on meter 2; PPE 2's import is then the
+    apartment's energy. PPE 1's import sums its meters.
+    """
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.powerpilot.const import (
+        CONF_APARTMENT_METER,
+        CONF_CONSUMPTION_SENSOR,
+        CONF_PPE1_IMPORT_SENSORS,
+        SUPPLY_METER_2,
+        SUPPLY_VICTRON,
+    )
+
+    coordinator = await _supply_series_coordinator(hass, monkeypatch)
+    main, in_out, in_inv = "sensor.main_energy", "sensor.ac_in_out", "sensor.ac_in_inv"
+    coordinator.config[CONF_CONSUMPTION_SENSOR] = main
+    coordinator.supply.config[CONF_APARTMENT_METER] = APT
+    coordinator.config[CONF_PPE1_IMPORT_SENSORS] = [in_out, in_inv]
+    hour = dt_util.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    readings = {main: 1.0, APT: 0.4, BOILER: 0.25, in_out: 0.6, in_inv: 0.15}
+
+    async def fake_range(sensor, start, end):
+        return {hour: readings[sensor]} if sensor in readings else {}
+
+    coordinator.consumption.async_range_kwh = fake_range
+    for state, root_own, ppe2 in ((SUPPLY_METER_2, 0.75, 0.4), (SUPPLY_VICTRON, 0.35, 0.0)):
+
+        async def logged(start, end, state=state):
+            return {hour: state} if start <= hour < end else {}
+
+        coordinator.supply.async_past_hour_states = logged
+        topology = await coordinator.async_flow_topology()
+        assert topology["hour"] == hour.isoformat()
+        assert topology["supply"]["hour_state"] == state
+        tree = topology["tree"]
+        assert (tree["entity_id"], tree["kwh"], tree["own_kwh"]) == (main, 1.0, root_own)
+        apartment = next(c for c in tree["children"] if c["entity_id"] == APT)
+        assert apartment["apartment"] is True
+        assert apartment["off_victron"] is (state == SUPPLY_METER_2)
+        assert apartment["own_kwh"] == 0.4
+        assert topology["ppe2"]["import_kwh"] == ppe2
+        assert topology["ppe1"]["import_kwh"] == 0.75
+        assert [t["kwh"] for t in topology["ppe1"]["terms"]] == [0.6, 0.15]
+
+
 async def test_flow_without_detection_has_no_meter_2(hass: HomeAssistant) -> None:
     await _setup(hass)
     coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]

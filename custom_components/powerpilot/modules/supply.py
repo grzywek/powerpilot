@@ -1008,11 +1008,25 @@ class SupplyModule(PowerPilotModule):
         factor = self._unit_factor(entity_id, state.attributes.get(ATTR_UNIT_OF_MEASUREMENT))
         return None if factor is None else value * factor
 
-    def _sample(self) -> tuple[float | None, float | None]:
+    def live_reading(self) -> dict[str, Any]:
+        """The detection's inputs now, as the next tick reads them (W).
+
+        ``apartment_w`` is ``a``; ``victron_net_w`` is ``r`` = the Victron's
+        output minus every other sub-meter behind it (``others_w`` by entity).
+        """
         apartment_w = self._read_watts(self.apartment_sensor)
         victron_w = self._read_watts(self.victron_sensor)
-        others = [self._read_watts(e) for e in self.other_sensors]
-        return apartment_w, victron_net(victron_w, others)
+        others = {e: self._read_watts(e) for e in self.other_sensors}
+        return {
+            "apartment_w": apartment_w,
+            "victron_w": victron_w,
+            "others_w": others,
+            "victron_net_w": victron_net(victron_w, list(others.values())),
+        }
+
+    def _sample(self) -> tuple[float | None, float | None]:
+        reading = self.live_reading()
+        return reading["apartment_w"], reading["victron_net_w"]
 
     async def _async_tick(self, now: datetime) -> None:
         if self.detector is None or self._store is None:

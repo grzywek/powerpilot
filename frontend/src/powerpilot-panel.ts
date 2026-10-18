@@ -3816,8 +3816,10 @@ export class PowerPilotPanel extends LitElement {
     const arrow = (label: string) =>
       html`<div class="flow-arrow"><span>↓</span><span class="muted">${label}</span></div>`;
 
+    // The diagram takes the panel's whole width; the text stages below stay
+    // in the narrower reading column.
     return html`
-      <div class="flow-col">
+      <div class="flow-wide">
         <div class="card flow-stage">
           <div class="card-title">1 · Instalacja — co jest za czym, co mierzymy i co liczymy</div>
           ${f.topology
@@ -3834,7 +3836,8 @@ export class PowerPilotPanel extends LitElement {
               : nothing}
           </div>
         </div>
-
+      </div>
+      <div class="flow-col">
         ${arrow("surowe odczyty → składanie ceny brutto")}
 
         <div class="card flow-stage">
@@ -5236,6 +5239,10 @@ export class PowerPilotPanel extends LitElement {
       flex-direction: column;
       max-width: 860px;
       margin: 0 auto;
+    }
+    .flow-wide {
+      display: flex;
+      flex-direction: column;
     }
     .flow-stage {
       margin-bottom: 0;

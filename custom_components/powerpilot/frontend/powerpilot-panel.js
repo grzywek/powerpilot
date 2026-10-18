@@ -2059,7 +2059,7 @@ rect.legend-mouseover-inactive,
     </div>`:O}_renderFlow(){let e=this._flow;if(!e)return z`<div class="card empty">
         ${this._flowLoading?"\u0141adowanie\u2026":"Brak danych przep\u0142ywu."}
       </div>`;let s=(h,d=2)=>h==null?"\u2014":h.toFixed(d),i=e.inputs,a=e.pricing,r=e.battery,o=e.optimizer,n=o.current,c=e.supply?.active?e.supply:null,l=h=>z`<div class="flow-arrow"><span>↓</span><span class="muted">${h}</span></div>`;return z`
-      <div class="flow-col">
+      <div class="flow-wide">
         <div class="card flow-stage">
           <div class="card-title">1 · Instalacja — co jest za czym, co mierzymy i co liczymy</div>
           ${e.topology?z`<pp-flow-diagram .topology=${e.topology}></pp-flow-diagram>`:z`<div class="check muted">Brak danych schematu.</div>`}
@@ -2072,7 +2072,8 @@ rect.legend-mouseover-inactive,
             ${i.calendars.length?z` · kalendarze: <b>${i.calendars.join(", ")}</b>`:O}
           </div>
         </div>
-
+      </div>
+      <div class="flow-col">
         ${l("surowe odczyty \u2192 sk\u0142adanie ceny brutto")}
 
         <div class="card flow-stage">
@@ -3076,6 +3077,10 @@ rect.legend-mouseover-inactive,
       flex-direction: column;
       max-width: 860px;
       margin: 0 auto;
+    }
+    .flow-wide {
+      display: flex;
+      flex-direction: column;
     }
     .flow-stage {
       margin-bottom: 0;

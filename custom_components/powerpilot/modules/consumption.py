@@ -88,6 +88,36 @@ _ACTIVE_BUCKET_KWH = 0.01
 _ACTIVE_KW = 0.12
 
 
+# Counter steps an energy meter may move in (kWh), coarsest first; finer
+# than 0.1 kWh is precise enough for hourly energy.
+_COARSE_STEPS = (1.0, 0.1)
+# A counter is too coarse when its typical hour is under this many steps.
+_COARSE_HOUR_STEPS = 3
+# Non-zero hours needed before a counter's step is judged.
+_COARSE_MIN_HOURS = 24
+
+
+def coarse_energy_step(changes: list[float]) -> float | None:
+    """The step a too-coarse energy counter moves in, else ``None``.
+
+    Live 2026-10-18: the garage server's socket counts in 0.1 kWh steps under a
+    steady ~0.205 kWh/h load, so its hours read 0.2 or 0.3 kWh and the meter
+    tree's base came out negative in the 0.3 hours. A counter is too coarse
+    when every non-zero hourly change is a multiple of a step of 0.1 kWh or
+    more and its typical (median) hour is under three steps — an hour is then
+    off by a step, a third or more of it. Over many hours the counter still
+    sums right; only the split into hours is wrong.
+    """
+    moving = sorted(abs(c) for c in changes if abs(c) > 1e-9)
+    if len(moving) < _COARSE_MIN_HOURS:
+        return None
+    median = moving[len(moving) // 2]
+    for step in _COARSE_STEPS:
+        if all(abs(c / step - round(c / step)) < 1e-6 for c in moving):
+            return step if median < _COARSE_HOUR_STEPS * step else None
+    return None
+
+
 class ConsumptionModule(PowerPilotModule):
     """Provides learned base + per-device consumption per hour."""
 

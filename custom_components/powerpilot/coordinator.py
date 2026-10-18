@@ -1460,6 +1460,40 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             "profiles": profiles,
         }
 
+    async def _coarse_counter_hint(self, eid: str, now: datetime) -> str | None:
+        """Why an energy meter is too coarse for hourly energy, and what to use.
+
+        Reads the meter's last 14 days of hourly energy; a power sensor of the
+        same name (``…_energy`` → ``…_power``) is named when it exists — the
+        recorder's hourly mean of power has no counter step. Only a hint: the
+        integration reads what the options say.
+        """
+        from .modules.consumption import coarse_energy_step
+
+        state = self.hass.states.get(eid)
+        unit = state.attributes.get("unit_of_measurement") if state else None
+        if unit not in ("kWh", "Wh"):
+            return None
+        hours = await self.consumption.async_range_kwh(eid, now - timedelta(days=14), now)
+        step = coarse_energy_step(list(hours.values()))
+        if step is None:
+            return None
+        moving = sorted(abs(v) for v in hours.values() if abs(v) > 1e-9)
+        typical = moving[len(moving) // 2]
+        power = eid[: -len("_energy")] + "_power" if eid.endswith("_energy") else None
+        power_state = self.hass.states.get(power) if power else None
+        use = (
+            f" Ustaw w opcjach urządzeń czujnik mocy {power} — średnia godzinowa mocy nie ma kroku."
+            if power_state is not None
+            and power_state.attributes.get("unit_of_measurement") in ("W", "kW")
+            else " Użyj czujnika mocy tego urządzenia albo licznika o drobniejszym kroku."
+        )
+        return (
+            f"Licznik przyrasta skokami {step:g} kWh, a typowa godzina to {typical:.2f} kWh — "
+            f"pojedyncze godziny są błędne o ±{step:g} kWh (np. ujemna baza w drzewie liczników)."
+            + use
+        )
+
     async def get_diagnostics(self) -> dict:
         """Readiness report: does the optimizer have every input it needs?
 
@@ -1654,6 +1688,15 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         for eid in metered_sensors(self.config):
             di = await self.consumption.async_diagnose_sensor(eid, win_start, now)
             name = eid.split(".")[-1]
+            status = "ok" if di["series_hours"] > 0 else "warn"
+            message = (
+                f"{di['series_hours']} godz. danych / 48h"
+                if di["series_hours"] > 0
+                else "Brak danych godzinowych"
+            )
+            coarse = await self._coarse_counter_hint(eid, now)
+            if coarse is not None:
+                status, message = "warn", coarse
             optional_items.append(
                 {
                     "key": f"device:{eid}",
@@ -1665,12 +1708,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "required": False,
                     "entity_id": eid,
                     "detail": di,
-                    "status": "ok" if di["series_hours"] > 0 else "warn",
-                    "message": (
-                        f"{di['series_hours']} godz. danych / 48h"
-                        if di["series_hours"] > 0
-                        else "Brak danych godzinowych"
-                    ),
+                    "status": status,
+                    "message": message,
                 }
             )
         # Weather entities keep no recorder statistics (their state is a

@@ -467,3 +467,45 @@ def test_learning_run_records_its_dropped_hour_counts() -> None:
     )
     assert module.learning_dropped["supply_dropped"] == 5
     assert module.learning_dropped["missing_child"] == {WASHER: 2}
+
+
+def test_a_counter_in_steps_of_0_1_kwh_is_too_coarse_for_a_small_load() -> None:
+    """Live 2026-10-18: the garage socket's counter reads 0.2 or 0.3 kWh an hour.
+
+    Its steady ~0.205 kWh/h load moves the counter in 0.1 kWh steps, so the
+    hours alternate and the meter tree's base goes negative in the 0.3 ones.
+    """
+    from custom_components.powerpilot.modules.consumption import coarse_energy_step
+
+    garage = [0.2] * 66 + [0.3] * 3 + [0.1] * 3
+    assert coarse_energy_step(garage) == 0.1
+    # A counter with 0.01 kWh steps is fine at any load.
+    fine = [0.205, 0.21, 0.2, 0.204, 0.198, 0.212] * 6
+    assert coarse_energy_step(fine) is None
+    # 0.1 kWh steps under a large load are a small error: not flagged.
+    boiler = [1.6, 0.8, 1.2, 1.0, 0.9, 1.4] * 6
+    assert coarse_energy_step(boiler) is None
+    # Too few moving hours to judge; idle hours do not count.
+    assert coarse_energy_step([0.2] * 10 + [0.0] * 100) is None
+
+
+async def test_diagnostics_name_the_power_sensor_of_a_coarse_counter(hass) -> None:
+    from types import SimpleNamespace
+
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.powerpilot.coordinator import PowerPilotCoordinator
+
+    hass.states.async_set("sensor.garage_energy", "486.4", {"unit_of_measurement": "kWh"})
+    hass.states.async_set("sensor.garage_power", "205", {"unit_of_measurement": "W"})
+    now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+
+    async def hourly(entity_id, start, end):
+        return {now - timedelta(hours=i): (0.3 if i % 20 == 0 else 0.2) for i in range(1, 100)}
+
+    stub = SimpleNamespace(hass=hass, consumption=SimpleNamespace(async_range_kwh=hourly))
+    hint = await PowerPilotCoordinator._coarse_counter_hint(stub, "sensor.garage_energy", now)
+    assert hint is not None
+    assert "0.1 kWh" in hint and "sensor.garage_power" in hint
+    # A power sensor itself has no counter step.
+    assert await PowerPilotCoordinator._coarse_counter_hint(stub, "sensor.garage_power", now) is None

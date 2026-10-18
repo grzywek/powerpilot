@@ -3629,6 +3629,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         sanity check of the inputs.
         """
         from .const import (
+            CONF_APARTMENT_METER,
+            CONF_APARTMENT_POWER_SENSOR,
             CONF_BATTERY_CAPACITY_KWH,
             CONF_BATTERY_CHARGE_SENSOR,
             CONF_BATTERY_DISCHARGE_SENSOR,
@@ -3646,6 +3648,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_PRICE_SOURCE,
             CONF_PRICE_VAT,
             CONF_SOC_SENSOR,
+            CONF_VICTRON_OUTPUT_POWER_SENSOR,
             CONF_WEATHER_ENTITY,
             DEFAULTS,
         )
@@ -3684,6 +3687,22 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         live_soc = self._read_soc()
 
         current = self.current_decision(self.data) if self.data else None
+        # Meter 2's import of the current hour under the plan's supply, and
+        # what it costs under PPE 2's month settlement (as on the chart).
+        cur_index = (
+            next(
+                (i for i, d in enumerate(self.data.decisions) if d is current),
+                None,
+            )
+            if current is not None and self.data is not None
+            else None
+        )
+        ppe2_kwh = (
+            round(self.data.ppe2_import_kwh(cur_index), 3)
+            if self.supply.active and self.data is not None and cur_index is not None
+            else None
+        )
+        supply = self.supply
 
         return {
             "now": now.isoformat(),
@@ -3703,6 +3722,16 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "ev_energy_added": ent(CONF_EV_ENERGY_ADDED_SENSOR),
                 "calendars": list(self.config.get(CONF_CALENDARS) or []),
                 "price_source": self.config.get(CONF_PRICE_SOURCE),
+            },
+            # Which meter feeds the apartment: the detection's inputs and its
+            # confirmed state (``active`` false without detection).
+            "supply": {
+                "active": supply.active,
+                "state": supply.state,
+                "since": supply.since.isoformat() if supply.since else None,
+                "apartment_power": ent(CONF_APARTMENT_POWER_SENSOR),
+                "victron_output": ent(CONF_VICTRON_OUTPUT_POWER_SENSOR),
+                "apartment_meter": ent(CONF_APARTMENT_METER),
             },
             "pricing": {
                 "markup": cfg(CONF_PRICE_MARKUP),
@@ -3778,6 +3807,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "battery_soc_end": round(current.battery_soc, 1),
                         "hour_cost": round(current.hour_cost, 4),
                         "battery_use_cost": round(current.battery_use_cost, 4),
+                        "supply": current.supply,
+                        "ppe2_import_kwh": ppe2_kwh,
+                        "ppe2_hour_cost": self._ppe2_hour_cost(now, ppe2_kwh, buy, dist),
                     }
                     if current
                     else None

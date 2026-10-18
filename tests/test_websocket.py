@@ -689,6 +689,39 @@ def test_ppe_2_hour_cost_follows_its_month_settlement() -> None:
     assert cost(True, kwh=None) is None
 
 
+async def test_flow_shows_the_supply_inputs_and_meter_2_import(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """The "Przepływ" tab names the detection's inputs and both meters' import.
+
+    With the current hour planned on meter 2 the optimizer stage reads PPE 2's
+    import (the apartment's forecast) next to PPE 1's; without detection the
+    supply block says so and there is no PPE 2 import.
+    """
+    from custom_components.powerpilot.const import SUPPLY_METER_2
+
+    coordinator = await _supply_series_coordinator(hass, monkeypatch)
+    plan = coordinator.data
+    plan.decisions[0].supply = SUPPLY_METER_2
+    plan.forecast.slots[0].apartment_kwh = 0.4
+
+    flow = coordinator.get_flow()
+    assert flow["supply"]["active"] is True
+    assert set(flow["supply"]) >= {"state", "since", "apartment_power", "victron_output"}
+    current = flow["optimizer"]["current"]
+    assert current["supply"] == SUPPLY_METER_2
+    assert current["ppe2_import_kwh"] == 0.4
+
+
+async def test_flow_without_detection_has_no_meter_2(hass: HomeAssistant) -> None:
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+    flow = coordinator.get_flow()
+    assert flow["supply"]["active"] is False
+    assert flow["optimizer"]["current"]["ppe2_import_kwh"] is None
+    assert flow["optimizer"]["current"]["ppe2_hour_cost"] is None
+
+
 async def test_series_without_detection_carries_no_supply(hass: HomeAssistant) -> None:
     await _setup(hass)
     coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]

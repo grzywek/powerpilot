@@ -713,6 +713,32 @@ async def test_flow_shows_the_supply_inputs_and_meter_2_import(
     assert current["ppe2_import_kwh"] == 0.4
 
 
+async def test_flow_prices_the_running_hour_before_its_snapshot(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """Live 2026-10-18 11:00: "cena pełna teraz" and PPE 2's cost read "—".
+
+    The flow took the running hour's distribution from the snapshot store,
+    which records an hour only later; the chart's current hour reads the
+    tariff. Both use ``distribution_for`` now.
+    """
+    from homeassistant.util import dt as dt_util
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+    now = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    coordinator.tariff._snapshots.clear()  # the running hour not recorded yet
+    monkeypatch.setattr(
+        coordinator.tariff, "_resolve_price", lambda slot, offset: (0.25, None, None)
+    )
+    expected = coordinator.tariff.distribution_for(now)
+    assert expected == 0.25
+    pricing = coordinator.get_flow()["pricing"]
+    assert pricing["distribution_now"] == expected
+    if pricing["buy_price_now"] is not None:
+        assert pricing["total_now"] == round(pricing["buy_price_now"] + expected, 4)
+
+
 async def test_flow_without_detection_has_no_meter_2(hass: HomeAssistant) -> None:
     await _setup(hass)
     coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]

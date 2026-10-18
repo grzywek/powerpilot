@@ -3679,7 +3679,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 return float(DEFAULTS.get(key) or 0.0)
 
         buy = self.prices.price_at(now)
-        dist = self.tariff.snapshot_for(now)
+        # The running hour's distribution: its snapshot once recorded, the
+        # tariff's own price before that (as the chart's current hour).
+        dist = self.tariff.distribution_for(now)
         eta_c = cfg(CONF_CHARGE_EFFICIENCY)
         eta_d = cfg(CONF_DISCHARGE_EFFICIENCY)
         wear = cfg(CONF_BATTERY_WEAR_COST)

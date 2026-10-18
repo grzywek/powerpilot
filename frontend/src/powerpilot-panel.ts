@@ -1,6 +1,16 @@
 import { LitElement, html, css, svg, nothing, unsafeCSS, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import ApexCharts from "apexcharts";
+import {
+  DEVICE_PALETTE,
+  ESS_CHARGE_COLOR,
+  ESS_DISCHARGE_COLOR,
+  EV_COLOR,
+  PPE1_COLOR,
+  PPE2_COLOR,
+} from "./palette";
+import "./flow-diagram";
+import type { FlowTopology } from "./flow-diagram";
 
 interface PlanHour {
   start: string;
@@ -543,6 +553,8 @@ interface FlowEntity {
 /** Payload of powerpilot/flow — a live snapshot of the computation pipeline. */
 interface FlowData {
   now: string;
+  /** The installation diagram's data (what is behind what, the last hour's arithmetic). */
+  topology?: FlowTopology;
   inputs: {
     consumption: FlowEntity | null;
     device_sensors: { entity_id: string }[];
@@ -662,20 +674,6 @@ const WEEKDAY_PL: Record<string, string> = {
   sat: "Sob",
   sun: "Nd",
 };
-// Device bar colors. Deliberately avoids the fixed stack series — grid import
-// purple (#8e44ad), battery discharge khaki (#b0a14f) / charge ochre
-// (#c98a3a), base-consumption maroon (#b5475d) and the EV green (#15803d) —
-// so every device reads as its own hue next to them.
-const DEVICE_PALETTE = [
-  "#7b6cf6", // indigo
-  "#e91e63", // pink
-  "#f97316", // orange
-  "#06b6d4", // cyan
-  "#facc15", // yellow
-  "#e74c3c", // red
-  "#14b8a6", // teal
-  "#84cc16", // lime
-];
 
 /** Inverter operating mode → human label + solid dot color. The mode is drawn
  *  as a row of colored dots along the bottom of the energy chart (background
@@ -2176,13 +2174,13 @@ export class PowerPilotPanel extends LitElement {
     // of the import's purple; the band's teal is too close to a device colour).
     const upRows: Row[] = s.supply_active
       ? [
-          { label: "⚡ Import z sieci — PPE 1", color: "#8e44ad", key: "grid", get: flow("grid", (h) => h.grid_buy_kwh) },
-          { label: "⚡ Import z sieci — PPE 2", color: "#c39bd3", key: "grid_ppe2", get: flow("grid_ppe2", (h) => h.ppe2_import_kwh ?? null) },
-          { label: "🔋 ESS — rozładowanie", color: "#b0a14f", key: "discharge", get: flow("discharge", (h) => h.battery_discharge_kwh) },
+          { label: "⚡ Import z sieci — PPE 1", color: PPE1_COLOR, key: "grid", get: flow("grid", (h) => h.grid_buy_kwh) },
+          { label: "⚡ Import z sieci — PPE 2", color: PPE2_COLOR, key: "grid_ppe2", get: flow("grid_ppe2", (h) => h.ppe2_import_kwh ?? null) },
+          { label: "🔋 ESS — rozładowanie", color: ESS_DISCHARGE_COLOR, key: "discharge", get: flow("discharge", (h) => h.battery_discharge_kwh) },
         ]
       : [
-          { label: "⚡ Import z sieci", color: "#8e44ad", key: "grid", get: flow("grid", (h) => h.grid_buy_kwh) },
-          { label: "🔋 ESS — rozładowanie", color: "#b0a14f", key: "discharge", get: flow("discharge", (h) => h.battery_discharge_kwh) },
+          { label: "⚡ Import z sieci", color: PPE1_COLOR, key: "grid", get: flow("grid", (h) => h.grid_buy_kwh) },
+          { label: "🔋 ESS — rozładowanie", color: ESS_DISCHARGE_COLOR, key: "discharge", get: flow("discharge", (h) => h.battery_discharge_kwh) },
         ];
     const downRows: Row[] = [
       { label: "🏠 Zużycie bazowe", color: "#b5475d", key: "base", get: baseConsumption },
@@ -2192,8 +2190,8 @@ export class PowerPilotPanel extends LitElement {
         key: `dev:${eid}`,
         get: device(eid),
       })),
-      { label: "🚗 Ładowanie EV", color: "#15803d", key: "ev", get: flow("ev", (h) => h.ev_charge_kwh) },
-      { label: "🔋 ESS — ładowanie", color: "#c98a3a", key: "charge", get: flow("charge", (h) => h.battery_charge_kwh) },
+      { label: "🚗 Ładowanie EV", color: EV_COLOR, key: "ev", get: flow("ev", (h) => h.ev_charge_kwh) },
+      { label: "🔋 ESS — ładowanie", color: ESS_CHARGE_COLOR, key: "charge", get: flow("charge", (h) => h.battery_charge_kwh) },
     ];
 
     // √-compressed bar heights: an EV-charge hour (10+ kWh) would otherwise
@@ -3821,38 +3819,20 @@ export class PowerPilotPanel extends LitElement {
     return html`
       <div class="flow-col">
         <div class="card flow-stage">
-          <div class="card-title">1 · Wejścia — sensory i źródła danych</div>
+          <div class="card-title">1 · Instalacja — co jest za czym, co mierzymy i co liczymy</div>
+          ${f.topology
+            ? html`<pp-flow-diagram .topology=${f.topology}></pp-flow-diagram>`
+            : html`<div class="check muted">Brak danych schematu.</div>`}
           <div class="flow-inputs">
-            ${this._flowInput("Zużycie domu", inp.consumption)}
-            ${this._flowInput("🔋 SoC ESS", inp.battery_soc)}
-            ${this._flowInput("🔋 Ładowanie ESS", inp.battery_charge)}
-            ${this._flowInput("🔋 Rozładowanie ESS", inp.battery_discharge)}
-            ${this._flowInput(sup ? "Import z sieci — PPE 1" : "Import z sieci", inp.grid_import)}
-            ${sup
-              ? html`${this._flowInput("🏠 Moc mieszkania", sup.apartment_power)}
-                ${this._flowInput("Moc wyjściowa Victrona", sup.victron_output)}
-                ${this._flowInput("🏠 Licznik mieszkania (PPE 2 na liczniku 2)", sup.apartment_meter)}`
-              : nothing}
             ${this._flowInput("Cena energii (RDN)", inp.buy_price_sensor)}
             ${this._flowInput("Pogoda", inp.weather)}
-            ${this._flowInput("🚗 SoC EV", inp.ev_soc)}
-            ${this._flowInput("EV energia sesji", inp.ev_energy_added)}
           </div>
           <div class="check muted">
             Źródło cen: <b>${inp.price_source === "pradcast" ? "Prądcast API" : "sensor HA"}</b>
-            ${inp.device_sensors.length
-              ? html` · podliczniki: <b>${inp.device_sensors.length}</b>`
-              : nothing}
             ${inp.calendars.length
               ? html` · kalendarze: <b>${inp.calendars.join(", ")}</b>`
               : nothing}
           </div>
-          ${sup
-            ? html`<div class="check muted">
-                Mieszkanie zasilane z: <b>${this._supplyLabel(sup.state)}</b>
-                ${sup.since ? html` od ${this._clock(sup.since)}` : nothing}
-              </div>`
-            : nothing}
         </div>
 
         ${arrow("surowe odczyty → składanie ceny brutto")}

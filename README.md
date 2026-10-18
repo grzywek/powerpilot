@@ -33,7 +33,7 @@ PowerPilot also ships a **custom sidebar panel** (Lit + TypeScript, ApexCharts)
 that registers itself automatically — a **PowerPilot** entry appears in the HA
 sidebar with ten tabs: *Przegląd* (energy and price charts, the current control,
 the apartment-supply card), *Ceny* (the hourly price archive), *Symulacje*
-(forecast accuracy against what happened), *Przepływ* (the live pipeline),
+(forecast accuracy against what happened), *Przepływ* (a diagram of the installation — what is behind what, every sensor's reading and the arithmetic of each computed value — then the live pipeline),
 *Sprawność* (measured vs configured efficiencies), *Status* (what works and
 what is missing), *Diagnostyka*, *Profile* (learned consumption profiles),
 *Logi* and *Debug* (a full state export). It is backed by a WebSocket API

@@ -620,6 +620,7 @@ async def test_series_draws_the_apartment_on_meter_2_as_ppe_2_import(
         assert row["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
     assert (on_meter_2["ppe2_import_kwh"], on_meter_2["forecast"]["grid_ppe2"]) == (0.4, 0.4)
     assert (on_victron["ppe2_import_kwh"], on_victron["forecast"]["grid_ppe2"]) == (0.0, 0.0)
+    assert on_victron["ppe2_hour_cost"] == 0.0
     for row in (on_meter_2, on_victron):
         bars = row["base_consumption_forecast"] + sum(row["devices_forecast"].values())
         assert abs(bars - row["ppe2_import_kwh"] - row["consumption_forecast"]) < 1e-9
@@ -643,6 +644,49 @@ async def test_series_draws_the_apartment_on_meter_2_as_ppe_2_import(
     assert current["devices_forecast"] == {APT: 0.4, BOILER: 0.25}
     assert current["ppe2_import_kwh"] == 0.0
     assert current["forecast"]["grid_ppe2"] == 0.0
+
+
+def test_ppe_2_hour_cost_follows_its_month_settlement() -> None:
+    """Meter 2's hour on the cost chart costs what its month settles at.
+
+    While PPE 2's month binds every kWh costs the limit, however expensive
+    the hour; while it does not, or on a day no Tarcza covers, the hour's
+    energy price as on PPE 1. Distribution is the hour's either way. A month
+    whose settlement is unknown has no cost rather than the market one.
+    """
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from custom_components.powerpilot.const import PPE_1, PPE_2
+    from custom_components.powerpilot.coordinator import PowerPilotCoordinator
+    from custom_components.powerpilot.models import BillingOutcome
+    from tests.test_optimizer_supply import H0, LIMIT, _period
+
+    def outcome(ppe: str, binds: bool | None) -> BillingOutcome:
+        return BillingOutcome(
+            period=_period(ppe, 10.0, 20.0),
+            energy_kwh=10.0,
+            cost_pln=20.0,
+            cap_binds=binds,
+            settled_cost_pln=10.0 * LIMIT if binds else 20.0,
+            planned_energy_kwh=0.0,
+            tail_energy_kwh=0.0,
+        )
+
+    def cost(binds, *, tarcza=True, kwh=2.0, hour=H0):
+        stub = SimpleNamespace(
+            billing=SimpleNamespace(terms_on=lambda day: object() if tarcza else None),
+            data=SimpleNamespace(billing=[outcome(PPE_1, False), outcome(PPE_2, binds)]),
+        )
+        return PowerPilotCoordinator._ppe2_hour_cost(stub, hour, kwh, 1.8, 0.5)
+
+    assert cost(True) == round(2.0 * (LIMIT + 0.5), 4)
+    assert cost(False) == round(2.0 * (1.8 + 0.5), 4)
+    assert cost(None, tarcza=False) == round(2.0 * (1.8 + 0.5), 4)
+    assert cost(None) is None  # the month could not be modelled
+    assert cost(True, hour=H0 + timedelta(days=90)) is None  # no outcome for it
+    assert cost(True, kwh=0.0) == 0.0
+    assert cost(True, kwh=None) is None
 
 
 async def test_series_without_detection_carries_no_supply(hass: HomeAssistant) -> None:

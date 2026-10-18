@@ -2208,6 +2208,47 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             return None
         return round(sum(v for v in values if v is not None), 3)
 
+    def _ppe2_hour_cost(
+        self,
+        hour: datetime,
+        kwh: float | None,
+        energy_price: float | None,
+        distribution: float | None,
+    ) -> float | None:
+        """What meter 2's import of one hour costs under its month's settlement.
+
+        The Tarcza settles a month as ``min(C, L·E)``: while the plan's PPE 2
+        month binds, each kWh costs the limit ``L``; while it does not, or on a
+        day no edition covers, the hour's energy price (as PPE 1's hours).
+        Distribution is the hour's either way. ``None`` when the import, a
+        price, or the month's settlement (no PPE 2 outcome, or one that could
+        not be modelled) is unknown.
+        """
+        if kwh is None:
+            return None
+        if kwh == 0:
+            return 0.0
+        if distribution is None:
+            return None
+        if self.billing.terms_on(dt_util.as_local(hour).date()) is None:
+            energy = energy_price
+        else:
+            outcome = next(
+                (
+                    o
+                    for o in (self.data.billing if self.data else [])
+                    if o.period.ppe == PPE_2
+                    and o.period.month_start <= hour < o.period.month_end
+                ),
+                None,
+            )
+            if outcome is None or outcome.cap_binds is None:
+                return None
+            energy = outcome.period.limit_kwh if outcome.cap_binds else energy_price
+        if energy is None:
+            return None
+        return round(kwh * (energy + distribution), 4)
+
     async def get_series(
         self,
         past_hours: int = 24,
@@ -2801,6 +2842,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "ev_charge_minutes": _fc(h, "ev_min"),
                     "ev_minutes_real": ev_minutes_real.get(h),
                     "hour_cost": real_hour_cost,
+                    "ppe2_hour_cost": self._ppe2_hour_cost(h, ppe2_real, buy_price, dist_price),
                     "energy_cost": real_energy_cost,
                     "distribution_cost": real_dist_cost,
                     "battery_use_cost": real_bat_use_cost,
@@ -3072,6 +3114,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         if cur_grid is not None and total_price is not None
                         else None
                     ),
+                    "ppe2_hour_cost": self._ppe2_hour_cost(
+                        now, cur_ppe2, buy_price, dist_price
+                    ),
                     "energy_cost": (
                         round(cur_grid * buy_price, 4)
                         if cur_grid is not None and buy_price is not None
@@ -3241,6 +3286,12 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         ),
                         "ev_minutes_real": None,
                         "hour_cost": round(decision.hour_cost, 4),
+                        "ppe2_hour_cost": self._ppe2_hour_cost(
+                            slot.start,
+                            planned_ppe2,
+                            slot.buy_price,
+                            slot.distribution_price_kwh,
+                        ),
                         "energy_cost": round(decision.energy_cost, 4),
                         "distribution_cost": round(decision.distribution_cost, 4),
                         "battery_use_cost": round(decision.battery_use_cost, 4),
@@ -3298,6 +3349,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                         "base_consumption_forecast": p("base_fc"),
                         "devices_real": {eid: None for eid in device_ids},
                         "hour_cost": p("cost"),
+                        "ppe2_hour_cost": self._ppe2_hour_cost(hstart, p("ppe2"), buy, dist),
                         "energy_cost": (
                             round(grid * buy, 4)
                             if grid is not None and buy is not None

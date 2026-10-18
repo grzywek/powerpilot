@@ -282,7 +282,10 @@ liczników*); the form refuses anything else.
   subtree while it is on meter 2 — the plan's supply for planned hours, the
   logged one for past hours), so both stacks balance. A past mixed or
   unknown hour has no PPE 2 import and no base: its split is not read from
-  whole-hour meters.
+  whole-hour meters. The cost panel shows PPE 2's hour at what its month
+  settles: the Tarcza limit while PPE 2's month binds, the hour's price
+  otherwise, plus the hour's distribution; the control card shows both
+  meters' grid draw.
 - Recommendations (opt-in: options → *Zasilanie mieszkania* → recommend
   switches; off by default): the plan's runs of meter-2 hours are cycles
   (id = planned start, or the actual switch time for the one running). Each

@@ -327,6 +327,9 @@ interface SeriesHour {
    *  multiple of 5, and null for hours that have not happened yet. */
   ev_minutes_real: number | null;
   hour_cost: number | null;
+  /** What meter 2's import costs this hour under its month's settlement
+   *  (the Tarcza limit while PPE 2's month binds), PLN. */
+  ppe2_hour_cost?: number | null;
   energy_cost: number | null;
   distribution_cost: number | null;
   battery_use_cost: number | null;
@@ -1748,6 +1751,11 @@ export class PowerPilotPanel extends LitElement {
 
     const elapsed = Math.max(0, Math.min(1, (Date.now() - curMs) / 3600_000));
     const elapsedMin = Math.round(elapsed * 60);
+    // With supply detection the grid draw is shown per meter (PPE 2 = the
+    // apartment while it is on meter 2).
+    const supplyOn = !!this._series?.supply_active;
+    const gridLabel = supplyOn ? "⚡ Pobór z sieci — PPE 1" : "⚡ Pobór z sieci";
+    const PPE2_LABEL = "⚡ Pobór z sieci — PPE 2";
 
     // --- previous hour: its own plan (vintage) vs what actually happened ---
     const prevBody =
@@ -1761,7 +1769,10 @@ export class PowerPilotPanel extends LitElement {
               realSuffix: this._minSuffix(sPrev.ev_minutes_real),
             })}
             ${this._pvRow("🏠 Zużycie domu", sPrev.consumption_forecast, sPrev.consumption_real)}
-            ${this._pvRow("⚡ Pobór z sieci", sPrev.forecast?.grid, sPrev.realized?.grid)}
+            ${this._pvRow(gridLabel, sPrev.forecast?.grid, sPrev.realized?.grid)}
+            ${supplyOn
+              ? this._pvRow(PPE2_LABEL, sPrev.forecast?.grid_ppe2, sPrev.realized?.grid_ppe2)
+              : nothing}
             ${this._socRow("🔋 SoC ESS na koniec", sPrev.forecast?.soc_end, sPrev.realized?.soc_end)}
             ${ev
               ? this._socRow(
@@ -1805,7 +1816,10 @@ export class PowerPilotPanel extends LitElement {
         realSuffix: this._minSuffix(sCur?.ev_minutes_real),
       })}
       ${this._pvRow("🏠 Zużycie domu", planCons, sCur?.consumption_real, { elapsed })}
-      ${this._pvRow("⚡ Pobór z sieci", planGrid, sCur?.realized?.grid, { elapsed })}
+      ${this._pvRow(gridLabel, planGrid, sCur?.realized?.grid, { elapsed })}
+      ${supplyOn
+        ? this._pvRow(PPE2_LABEL, sCur?.forecast?.grid_ppe2, sCur?.realized?.grid_ppe2, { elapsed })
+        : nothing}
       ${this._socRow("🔋 SoC ESS: teraz → plan na koniec", planSocEnd, sCur?.soc ?? null)}
       ${ev
         ? html`${this._socRow(
@@ -1830,7 +1844,10 @@ export class PowerPilotPanel extends LitElement {
             planSuffix: this._minSuffix(pNext.ev_charge_minutes),
           })}
           ${this._pvRow("🏠 Zużycie domu", this._forecastConsumptionAt(nextMs), null, { planOnly: true })}
-          ${this._pvRow("⚡ Pobór z sieci", pNext.grid_buy_kwh, null, { planOnly: true })}
+          ${this._pvRow(gridLabel, pNext.grid_buy_kwh, null, { planOnly: true })}
+          ${supplyOn
+            ? this._pvRow(PPE2_LABEL, sNext?.ppe2_import_kwh, null, { planOnly: true })
+            : nothing}
           ${this._socRow("🔋 SoC ESS na koniec", pNext.battery_soc, null, true)}
           ${ev
             ? html`${this._socRow(
@@ -2561,9 +2578,11 @@ export class PowerPilotPanel extends LitElement {
               `</tr>`
             );
           };
+          // Signed sums, as the bars stack: a negative component (a device's
+          // own energy below zero from meter timing) lowers its total.
           const totalRow = (label: string, rows: Row[]) => {
             const totals = sides.map((s) =>
-              rows.reduce((a, r) => a + Math.abs(sideVal(s.g, r.key) ?? 0), 0),
+              rows.reduce((a, r) => a + (sideVal(s.g, r.key) ?? 0), 0),
             );
             return (
               `<tr><td style="padding:1px 0;font-weight:600">${label}</td>` +
@@ -2967,7 +2986,7 @@ export class PowerPilotPanel extends LitElement {
     // hours cost 10-50× a normal hour) with per-component shares preserved.
     // Axis labels square back to real PLN; the tooltip reads raw values.
     const costTotalOf = (h: SeriesHour): number =>
-      (h.hour_cost ?? 0) + (h.battery_use_cost ?? 0);
+      (h.hour_cost ?? 0) + (h.ppe2_hour_cost ?? 0) + (h.battery_use_cost ?? 0);
     const costSqrt = (h: SeriesHour, v: number | null): number | null => {
       if (v == null) return null;
       const total = costTotalOf(h);
@@ -2975,6 +2994,13 @@ export class PowerPilotPanel extends LitElement {
     };
     const gridCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].hour_cost) }));
     const batUseCostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].battery_use_cost) }));
+    const ppe2CostData = ts.map((t, i) => ({ x: t + HALF_HOUR, y: costSqrt(hrs[i], hrs[i].ppe2_hour_cost ?? null) }));
+    // With supply detection the grid cost is drawn per meter, like the import.
+    const gridCostName = s.supply_active ? "⚡ Koszt energii — PPE 1" : "⚡ Koszt energii — sieć";
+    const ppe2CostName = "⚡ Koszt energii — PPE 2";
+    const costNames = s.supply_active
+      ? [gridCostName, ppe2CostName, "🔋 Koszt energii — ESS"]
+      : [gridCostName, "🔋 Koszt energii — ESS"];
 
     // Explicit axis bounds computed from the data, in √-space. Apex's
     // forceNiceScale rounds the √ maximum up to a "nice" number (e.g. 1.4 → 3),
@@ -3019,9 +3045,13 @@ export class PowerPilotPanel extends LitElement {
         data: batCostData,
         color: dark ? "#e5e7eb" : "#111827",
       },
-      { name: "⚡ Koszt energii — sieć", type: "column", data: gridCostData, color: "#e67e22" },
+      { name: gridCostName, type: "column", data: gridCostData, color: "#e67e22" },
+      ...(s.supply_active
+        ? [{ name: ppe2CostName, type: "column", data: ppe2CostData, color: "#f5c26b" }]
+        : []),
       { name: "🔋 Koszt energii — ESS", type: "column", data: batUseCostData, color: "#3b82f6" },
     ];
+    const columns = costNames.length;
 
     const nowTs = s.now ? new Date(s.now).getTime() : Date.now();
     const nowColor = dark ? "#ffffff" : "#333333";
@@ -3043,16 +3073,16 @@ export class PowerPilotPanel extends LitElement {
       },
       theme: { mode: dark ? "dark" : "light" },
       stroke: {
-        // 3 typed price lines + battery-cost line + 2 columns. Steplines: the
-        // price holds flat for its whole hour instead of ramping between
-        // hour starts.
-        width: [3, 3, 3, 2, 0, 0],
-        curve: ["stepline", "stepline", "stepline", "stepline", "straight", "straight"],
-        dashArray: [0, 0, 0, 3, 0, 0],
+        // 3 typed price lines + battery-cost line + the cost columns.
+        // Steplines: the price holds flat for its whole hour instead of
+        // ramping between hour starts.
+        width: [3, 3, 3, 2, ...Array(columns).fill(0)],
+        curve: ["stepline", "stepline", "stepline", "stepline", ...Array(columns).fill("straight")],
+        dashArray: [0, 0, 0, 3, ...Array(columns).fill(0)],
       },
       plotOptions: { bar: { columnWidth: "95%", borderRadius: 0 } },
       dataLabels: { enabled: false },
-      fill: { opacity: [1, 1, 1, 1, 0.75, 0.7] },
+      fill: { opacity: [1, 1, 1, 1, ...Array(columns - 1).fill(0.75), 0.7] },
       series,
       xaxis: {
         type: "datetime",
@@ -3083,7 +3113,7 @@ export class PowerPilotPanel extends LitElement {
           decimalsInFloat: 2,
         },
         {
-          seriesName: ["⚡ Koszt energii — sieć", "🔋 Koszt energii — ESS"],
+          seriesName: costNames,
           opposite: true,
           title: { text: "PLN/h, skala √" },
           // Column heights live in √-space — square tick values back to PLN.
@@ -3141,7 +3171,8 @@ export class PowerPilotPanel extends LitElement {
                 ${row.fixed_cost ? `<tr><td style="padding:1px 0 1px 10px;opacity:0.8">· koszt stały (z VAT)</td><td style="text-align:right;opacity:0.8;font-variant-numeric:tabular-nums">${fmtPrice(row.fixed_cost)} PLN/h</td></tr>` : ""}
                 <tr><td style="padding:1px 0">🔋 Cena w ESS</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtPrice(row.battery_energy_cost)} PLN/kWh</td></tr>
                 <tr><td colspan="2" style="padding:4px 0 2px"><div style="border-top:1px solid ${tt.border}"></div></td></tr>
-                <tr><td style="padding:1px 0">Koszt z sieci</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.hour_cost)} PLN</td></tr>
+                <tr><td style="padding:1px 0">Koszt z sieci${s.supply_active ? " — PPE 1" : ""}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.hour_cost)} PLN</td></tr>
+                ${s.supply_active ? `<tr><td style="padding:1px 0">Koszt z sieci — PPE 2</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.ppe2_hour_cost ?? null)} PLN</td></tr>` : ""}
                 <tr><td style="padding:1px 0">🔋 Koszt z ESS</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.battery_use_cost)} PLN</td></tr>
                 <tr><td style="padding:1px 0">Koszt stały</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmt2(row.fixed_cost)} PLN/h</td></tr>
               </table>

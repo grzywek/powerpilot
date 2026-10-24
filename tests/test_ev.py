@@ -487,6 +487,7 @@ def _bare_module(**state) -> EVModule:
     module._unavailable_hours = set()
     module._partial_hours = {}
     module._trip_drain = {}
+    module._started_trip_drain = {}
     module._capacity = state.get("capacity", 60.0)
     module._kwh_per_km = state.get("kwh_per_km")
     module._soc = state.get("soc")
@@ -979,6 +980,7 @@ def _module_with_state(**state) -> EVModule:
     module._unavailable_hours = state.get("unavailable_hours", set())
     module._partial_hours = state.get("partial_hours", {})
     module._trip_drain = state.get("trip_drain", {})
+    module._started_trip_drain = state.get("started_trip_drain", {})
     min_soc = state.get("min_soc")
     module.min_soc_entity = (
         SimpleNamespace(native_value=min_soc) if min_soc is not None else None
@@ -1658,9 +1660,10 @@ def test_still_plugged_keeps_the_cap_of_an_hour_about_to_end_in_a_departure() ->
     assert req.hour_fraction == {now_hour: 0.5}
 
 
-def test_still_plugged_drops_the_running_hour_drive_drain() -> None:
-    """A car on the cable at home is not on the road, whatever the calendar
-    predicted — its drain must not pull the projected SoC down."""
+def test_still_plugged_drops_the_running_hour_drain_of_a_trip_it_is_back_from() -> None:
+    """Back on the cable from a trip the pack has paid for: what the calendar
+    still predicts for this hour is the prediction's leftover error, and it
+    must not pull the projected SoC down while the car demonstrably charges."""
     fc = _now_forecast()
     now_hour = fc.slots[0].start
     later = fc.slots[2].start
@@ -1669,12 +1672,126 @@ def test_still_plugged_drops_the_running_hour_drive_drain() -> None:
         plugged=True,
         unavailable_hours={now_hour},
         trip_drain={now_hour: 4.0, later: 3.0},
+        started_trip_drain={now_hour: 4.0, later: 3.0},
     )
 
     req = module.get_request(fc)
 
-    assert now_hour not in req.drain_kwh
+    # Only the running hour: whether the car leaves again later is unknown.
     assert req.drain_kwh == {later: 3.0}
+
+
+def test_still_plugged_drops_only_the_started_trips_share_of_the_hour() -> None:
+    """Two trips in one hour: the one the car is back from loses its share,
+    the one it has not left for yet keeps its whole drive."""
+    fc = _now_forecast()
+    now_hour = fc.slots[0].start
+    module = _module_with_state(
+        soc=20.0,
+        plugged=True,
+        unavailable_hours={now_hour},
+        trip_drain={now_hour: 5.5},
+        started_trip_drain={now_hour: 1.5},
+    )
+
+    req = module.get_request(fc)
+
+    assert req.drain_kwh == {now_hour: 4.0}
+
+
+def _replan_trip(module: EVModule, trip: Trip, now: datetime) -> None:
+    """One cycle's trip pass, reset the way _load_calendar_plans resets it."""
+    module._unavailable_hours = set()
+    module._partial_hours = {}
+    module._trip_drain = {}
+    module._started_trip_drain = {}
+    module._apply_trip(trip, now)
+
+
+def _forecast_from(start: datetime, hours: int = 8) -> Forecast:
+    return Forecast(
+        slots=[
+            HourSlot(start=start + timedelta(hours=i), buy_price=0.5)
+            for i in range(hours)
+        ]
+    )
+
+
+def _round_trip(depart, event_start, event_end, return_end) -> Trip:
+    """70 km each way: 21 kWh per leg at 0.3 kWh/km."""
+    return Trip(
+        label="Epil Studio",
+        location="Kraków",
+        event_start=event_start,
+        event_end=event_end,
+        depart=depart,
+        return_end=return_end,
+        outbound_distance_km=70.0,
+        return_distance_km=70.0,
+    )
+
+
+def test_still_plugged_after_the_calendar_departure_keeps_the_whole_drive(
+    freezer,
+) -> None:
+    """Left late: the calendar says the car went at 10:10, but at 10:30 it is
+    still on the cable and the pack has given nothing up (it charged). All of
+    the drive is still ahead, yet the plug used to drop the running hour's
+    share of it — 12.6 of 42 kWh here, together with the charge the car still
+    needed in the one hour it can get it."""
+    now_hour = BASE + timedelta(hours=10)
+    trip = _round_trip(
+        depart=now_hour + timedelta(minutes=10),
+        event_start=now_hour + timedelta(hours=1, minutes=10),
+        event_end=now_hour + timedelta(hours=2, minutes=40),
+        return_end=now_hour + timedelta(hours=3, minutes=40),
+    )
+    module = _module_with_state(
+        soc=60.0, plugged=True, min_soc=10.0, capacity=75.0, kwh_per_km=0.3
+    )
+    freezer.move_to(trip.depart)
+    _replan_trip(module, trip, dt_util.now())  # baseline at the calendar departure
+    freezer.move_to(now_hour + timedelta(minutes=30))
+    module._soc = 61.0  # still at home, charging
+    _replan_trip(module, trip, dt_util.now())
+
+    req = module.get_request(_forecast_from(now_hour))
+
+    assert now_hour in req.available_hours  # the plug re-opened the hour
+    assert round(sum(req.drain_kwh.values()), 6) == 42.0
+    assert round(req.drain_kwh[now_hour], 6) == 12.6
+
+
+def test_back_on_the_cable_drops_the_running_hours_leftover_of_the_trip(
+    freezer,
+) -> None:
+    """Home early: left at 7:00 on 80 %, on the cable at 10:30 with the pack
+    37.5 kWh lighter while the calendar still has the drive home running until
+    11:45. The 4.5 kWh it still predicts is the forecast's error, not driving;
+    the running hour's share of it must not pull down a car that charges."""
+    now_hour = BASE + timedelta(hours=10)
+    trip = _round_trip(
+        depart=now_hour - timedelta(hours=3),
+        event_start=now_hour - timedelta(hours=2),
+        event_end=now_hour - timedelta(minutes=15),
+        return_end=now_hour + timedelta(hours=1, minutes=45),
+    )
+    module = _module_with_state(
+        soc=80.0, plugged=False, min_soc=10.0, capacity=75.0, kwh_per_km=0.3
+    )
+    freezer.move_to(trip.depart)
+    _replan_trip(module, trip, dt_util.now())  # baseline at the departure
+    freezer.move_to(now_hour + timedelta(minutes=30))
+    module._soc = 30.0
+    module._plugged = True
+    _replan_trip(module, trip, dt_util.now())
+
+    req = module.get_request(_forecast_from(now_hour))
+
+    assert now_hour in req.available_hours
+    assert now_hour not in req.drain_kwh
+    # The 11:00 share stays: whether the car is still home then is unknown.
+    assert round(sum(req.drain_kwh.values()), 6) == round(4.5 * 45 / 75, 6)
 
 
 def test_still_plugged_keeps_the_drive_of_a_departure_later_this_hour(

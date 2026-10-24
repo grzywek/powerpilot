@@ -409,6 +409,9 @@ class EVModule(PowerPilotModule):
         self._partial_hours: dict[datetime, float] = {}
         # Predicted per-hour drive drain (kWh) from calendar trips.
         self._trip_drain: dict[datetime, float] = {}
+        # The part of ``_trip_drain`` that belongs to trips the pack shows the
+        # car has already been out on (see _trip_remaining_kwh).
+        self._started_trip_drain: dict[datetime, float] = {}
         self._request = EVRequest()
         # The integration's own writable min-SoC entity (see number.py). Set by
         # NumberEntity.async_added_to_hass; read-only here.
@@ -480,6 +483,7 @@ class EVModule(PowerPilotModule):
             self._trip_targets = []
             self._forced_hours = set()
             self._trip_drain = {}
+            self._started_trip_drain = {}
             self.log_info("EV wyłączony w konfiguracji.")
             return
 
@@ -822,6 +826,7 @@ class EVModule(PowerPilotModule):
         self._unavailable_hours = set()
         self._partial_hours = {}
         self._trip_drain = {}
+        self._started_trip_drain = {}
 
         calendar = self.coordinator.calendar
         now = dt_util.now()
@@ -961,7 +966,7 @@ class EVModule(PowerPilotModule):
         # car drove home an hour before its return bucket, so by the calendar
         # the leg had barely started while the pack had already paid for it in
         # full — 31 % projected as 3 %.
-        remaining = self._trip_remaining_kwh(trip, now, by_calendar)
+        remaining, started = self._trip_remaining_kwh(trip, now, by_calendar)
         if remaining <= 1e-9:
             return
 
@@ -972,11 +977,16 @@ class EVModule(PowerPilotModule):
         for (start, kwh), leg_end in ahead:
             for bucket, part in _spread_energy(start, leg_end, kwh * scale).items():
                 self._trip_drain[bucket] = self._trip_drain.get(bucket, 0.0) + part
+                if started:
+                    self._started_trip_drain[bucket] = (
+                        self._started_trip_drain.get(bucket, 0.0) + part
+                    )
 
     def _trip_remaining_kwh(
         self, trip: Trip, now: datetime, by_calendar: float
-    ) -> float:
-        """Driving still to forecast, reconciled against the pack.
+    ) -> tuple[float, bool]:
+        """Driving still to forecast, reconciled against the pack, and whether
+        the pack shows the car has already been out on this trip.
 
         On the first cycle after departure the calendar's own figure stands and
         is banked together with the SoC of that moment. From then on the pair
@@ -995,19 +1005,25 @@ class EVModule(PowerPilotModule):
         Charging away from home shows up as a negative drop and is floored at
         zero rather than credited — this figure exists only to stop double
         counting, not to track energy in.
+
+        The trip counts as started once the pack has given up anything since
+        the baseline. That is what tells a car still on the cable after its
+        calendar departure (left late: all of the drive is ahead) from one
+        already back from it (home early: what is left is the prediction's
+        error). Without a baseline nothing has been seen, so it is not started.
         """
         if not self._capacity or self._soc is None:
-            return by_calendar
+            return by_calendar, False
         if now < trip.depart or now >= trip.return_end:
-            return by_calendar
+            return by_calendar, False
         key = trip.depart.isoformat()
         seen = self._trip_soc_baseline.get(key)
         if seen is None:
             self._trip_soc_baseline[key] = (self._soc, by_calendar)
-            return by_calendar
+            return by_calendar, False
         baseline_soc, baseline_remaining = seen
         spent = max(0.0, (baseline_soc - self._soc) / 100.0 * self._capacity)
-        return max(0.0, baseline_remaining - spent)
+        return max(0.0, baseline_remaining - spent), spent > 0.0
 
     def _prune_trip_baselines(self, trips: list[Trip], now: datetime) -> None:
         """Forget baselines for trips that are over (or vanished from the calendar)."""
@@ -1129,17 +1145,24 @@ class EVModule(PowerPilotModule):
             if hour in available_hours
         }
 
-        # A car sitting on the cable in an hour the calendar wrote off as away
-        # is not on the road — that hour's drive drain would otherwise pull the
-        # projected SoC down while the car demonstrably charges. Only such a
-        # re-opened hour loses it: in the hour the car is still due to leave
-        # in, the plug says nothing about the minutes after departure, and
-        # dropping that drain deleted real driving (2026-10-24: 7.2 kWh of a
-        # 10:54 departure vanished, so a trip ending at 11 % with a 10 %
-        # reserve was forecast to leave the car at 20 %).
+        # A car on the cable in an hour the calendar wrote off as away is either
+        # back early or has not left yet, and only the pack can tell which. Back
+        # from a trip it has started, that trip's drain here is the prediction's
+        # leftover error, which would pull the projected SoC down while the car
+        # demonstrably charges — drop it. A trip the pack has not paid anything
+        # for is still all ahead (left late), so its drive stays. Hours the car
+        # is still due to leave in are never re-opened, so their drain always
+        # stays: the plug says nothing about the minutes after departure, and
+        # dropping it deleted real driving (2026-10-24: 7.2 kWh of a 10:54
+        # departure vanished, so a trip ending at 11 % with a 10 % reserve was
+        # forecast to leave the car at 20 %).
         drain = dict(self._trip_drain)
         if reopened:
-            drain.pop(now_hour, None)
+            ahead = drain.pop(now_hour, 0.0) - self._started_trip_drain.get(
+                now_hour, 0.0
+            )
+            if ahead > 1e-9:
+                drain[now_hour] = ahead
 
         # Explicit keyword plans take over routine sizing; automatic trip
         # targets do NOT — they are a floor on top of normal behaviour, so the

@@ -59,10 +59,13 @@ Calendar trips are the only source of EV *unavailability*, but they are a
 overrides the calendar **for the running hour in both directions**: unplugged
 drops that hour from the plan, still plugged brings it back even when the trip
 window says the car should already be gone (it left late, came home early, the
-event overran) — and the hour's predicted drive drain is dropped with it, since a
-car on the cable is not on the road. Only the running hour is re-opened; whether
-the car is still home in two hours is genuinely unknown, so later hours stay
-calendar-driven and each one re-opens as it becomes current.
+event overran). What happens to that hour's predicted drive drain depends on the
+pack: a trip it has paid anything for since its departure baseline is one the car
+is back from, so its leftover drain is the prediction's error and is dropped; a
+trip the pack has paid nothing for has not started (left late), so all of its
+drive stays ahead. Only the running hour is re-opened; whether the car is still
+home in two hours is genuinely unknown, so later hours stay calendar-driven and
+each one re-opens as it becomes current.
 
 Availability is not all-or-nothing per hour either: the hour a trip departs in is
 carried as a **fraction** (`EVRequest.hour_fraction`), so a 13:40 departure keeps
@@ -71,10 +74,10 @@ hour's yield and its charging minutes by the fraction; for the running hour the
 value already folds in the minutes elapsed. The RETURN hour stays unavailable —
 its free minutes sit at the end of the hour, out of reach of a charger started at
 the top of it. A departure hour keeps its drive drain even while the car is on
-the cable: only an hour the plug *re-opened* loses it, because being plugged in
-now says nothing about the minutes after departure. Each leg's energy is bucketed
-by the minutes driven in each hour, so that drain is the few minutes before the
-next hour, not an equal share of the leg.
+the cable — it is never re-opened, and being plugged in now says nothing about
+the minutes after departure. Each leg's energy is bucketed by the minutes driven
+in each hour, so that drain is the few minutes before the next hour, not an
+equal share of the leg.
 
 ### Vintage and plan revisions
 One snapshot of the inputs + plan is persisted per clock hour (a **vintage**),

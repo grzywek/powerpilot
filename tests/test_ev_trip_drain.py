@@ -35,6 +35,7 @@ def _module(soc: float | None = None) -> EVModule:
     ev._unavailable_hours = set()
     ev._partial_hours = {}
     ev._trip_drain = {}
+    ev._started_trip_drain = {}
     ev._kwh_per_km = KWH_PER_KM
     ev._capacity = CAPACITY
     ev._soc = soc

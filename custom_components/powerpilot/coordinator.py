@@ -9,9 +9,12 @@ and exposes the resulting :class:`Plan` to the entities.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta
 from functools import partial
 from typing import Final
@@ -40,7 +43,10 @@ from .const import (
     CONF_CHARGE_EFFICIENCY,
     CONF_CHARGE_EFFICIENCY_CURVE,
     CONF_DISCHARGE_EFFICIENCY,
+    CONF_EV_CHARGER_KW,
+    CONF_EV_CHARGER_PHASES,
     CONF_EV_CHARGING_SENSOR,
+    CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_PLUG_SENSOR,
     CONF_EV_PRESENCE_ENTITIES,
@@ -70,6 +76,7 @@ from .const import (
     PRICE_TYPE_FORECAST,
     PTYPE_CODE,
     PTYPE_CODE_INV,
+    STORAGE_VERSION_MISSES,
     STORAGE_VERSION_SNAPSHOTS,
     SUPPLY_METER_2,
     SUPPLY_VICTRON,
@@ -83,6 +90,33 @@ from .execution import (
     assess_execution,
 )
 from .forecast import ForecastBuilder
+from .misses import (
+    KIND_ESS,
+    KIND_SUPPLY,
+    NOTE_ESS,
+    NOTE_NO_EV_SENSOR,
+    SETTLE_GIVE_UP,
+    SETTLE_LATENCY,
+    SUPPLY_NAMES,
+    Counterfactual,
+    MissLedger,
+    PlanAsks,
+    Settlement,
+    ask_from_plan,
+    counterfactual,
+    ess_record,
+    ev_left_unplugged,
+    ev_off_plan,
+    ev_off_plan_record,
+    ev_unplugged_record,
+    followed_transition_at,
+    miss_id,
+    settle_ev_unplugged,
+    settle_supply,
+    supply_not_followed,
+    supply_record,
+    switch_moment,
+)
 from .models import (
     BillingOutcome,
     BillingPeriod,
@@ -95,7 +129,7 @@ from .models import (
 )
 from .modules.billing import BillingModule, month_bounds
 from .modules.calendar import CALENDAR_LOOKAHEAD_HOURS
-from .modules.ev import CHARGING_STATES, HOME_STATES, PLUGGED_STATES
+from .modules.ev import CHARGING_STATES, HOME_STATES, PLUGGED_STATES, EVRequest
 from .modules.snapshots import SnapshotStore
 from .modules.supply import SupplyModule
 from .modules import (
@@ -155,6 +189,18 @@ _REVISION_EV_EPS: Final = 0.05
 # How long a charger may overrun the end of a planned hour before the spill into
 # the next hour stops reading as "that session finishing" (see ``_ev_off_plan``).
 _EV_SPILL_MINUTES: Final = 10
+
+
+def _settled(solve: Callable[..., Plan], planning: SupplyPlanning | None) -> Plan:
+    """Plan the refresh's inputs under ``planning``.
+
+    With switching modelled every proposed cycle is valued by re-solving the
+    same inputs without it (``supply_cycles.py``) — the one procedure for the
+    plan and for its counterfactuals alike.
+    """
+    if planning is None:
+        return solve()
+    return settle_cycles(lambda supply: solve(supply=supply), planning)
 
 
 class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
@@ -241,6 +287,17 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self.snapshots = SnapshotStore()
         self._snapshot_store: Store | None = None
         self._last_snapshot_hour: datetime | None = None
+
+        # Missed plan actions (misses.py, ADR 002): what the plan asked of the
+        # running and the next hour (persisted with the snapshots), and the
+        # ledger of what was not done, in its own store that is never pruned.
+        # ``misses_store_error`` says why the ledger is not kept this run.
+        self.plan_asks = PlanAsks()
+        self.misses = MissLedger()
+        self._misses_store: Store | None = None
+        self._misses_writable = True
+        self.misses_store_error: str | None = None
+        self._settle_lock = asyncio.Lock()
 
     @callback
     def async_start_hour_boundary_updates(self) -> None:
@@ -375,6 +432,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
     async def async_setup_modules(self) -> None:
         await self.registry.async_setup_all()
         await self._async_setup_snapshots()
+        await self._async_setup_misses()
         # A confirmed switch ends (or starts) a required switch between plans.
         self.entry.async_on_unload(
             async_dispatcher_connect(
@@ -426,6 +484,16 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 or None
             )
             self.switch_notices = SwitchNotices.from_list(stored.get("supply_notified"))
+            try:
+                self.plan_asks = PlanAsks.from_dict(stored.get("asks"))
+            except ValueError as err:
+                _LOGGER.warning("Stored plan asks are unreadable (%s); starting without", err)
+                self.log_warning(
+                    "misses",
+                    f"Zapisane prośby planu są nieczytelne ({err}) — bieżąca i "
+                    "następna godzina nie mają prośby, więc ich pominięcia nie "
+                    "zostaną wykryte.",
+                )
 
     def _snapshots_payload(self) -> dict:
         return {
@@ -441,7 +509,94 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             ),
             # Switch notifications already shown: never repeated after a restart.
             "supply_notified": self.switch_notices.to_list(),
+            # What the plan asked of the running and the next hour, so a restart
+            # across an hour boundary still knows what was asked (ADR 002).
+            "asks": self.plan_asks.to_dict(),
         }
+
+    async def _async_setup_misses(self) -> None:
+        """Load the ledger of missed plan actions; never start empty over a bad file."""
+        self._misses_store = Store(
+            self.hass,
+            STORAGE_VERSION_MISSES,
+            f"{DOMAIN}_{self.entry.entry_id}_misses",
+        )
+        stored = await self._misses_store.async_load()
+        try:
+            self.misses = MissLedger.from_dict(stored)
+        except ValueError as err:
+            await self._async_move_misses_aside(err)
+            return
+        self._close_ess_episodes_after_restart()
+
+    async def _async_move_misses_aside(self, err: ValueError) -> None:
+        """Keep an undecodable ledger for inspection and start a new one beside it.
+
+        Home Assistant's ``Store`` moves a file that is not JSON aside itself;
+        this covers JSON the ledger cannot decode. Only once the old file is
+        out of the way does a new ledger start; when it cannot be moved, the
+        ledger is not saved at all this run, so the file is never overwritten.
+        """
+        assert self._misses_store is not None
+        path = self._misses_store.path
+        aside = f"{path}.corrupt-{dt_util.utcnow():%Y-%m-%dT%H%M%S}"
+        try:
+            await self.hass.async_add_executor_job(os.rename, path, aside)
+        except OSError as move_err:
+            _LOGGER.error(
+                "Missed-plan ledger %s cannot be decoded (%s) nor moved aside (%s); "
+                "it is not written this run",
+                path,
+                err,
+                move_err,
+            )
+            self._misses_writable = False
+            self.misses_store_error = (
+                f"Rejestr niewykonanych zaleceń jest nieczytelny ({err}) i nie dało "
+                f"się go odłożyć ({move_err}). Nowe pominięcia nie są zapisywane — "
+                f"popraw lub usuń plik {path} i uruchom ponownie."
+            )
+        else:
+            _LOGGER.warning(
+                "Missed-plan ledger %s cannot be decoded (%s); moved to %s, a new "
+                "ledger starts",
+                path,
+                err,
+                aside,
+            )
+            self.misses_store_error = (
+                f"Rejestr niewykonanych zaleceń był nieczytelny ({err}) i został "
+                f"odłożony do {aside}; zapisy zaczynają się od nowa."
+            )
+        self.log_warning("misses", self.misses_store_error)
+
+    def _async_save_misses(self, delay: float = 1.0) -> None:
+        """Save the ledger soon: a found miss must survive a restart."""
+        if self._misses_store is None or not self._misses_writable:
+            return
+        self._misses_store.async_delay_save(self.misses.to_dict, delay)
+
+    def _close_ess_episodes_after_restart(self) -> None:
+        """End the ESS episodes a restart interrupted, at their last confirmation.
+
+        The watchdog's alarm lives in memory: after a restart it starts over, so
+        an episode still open in the ledger has lost its ending. It ends where it
+        was last seen; a failure that persists opens a new one.
+        """
+        now = dt_util.now()
+        changed = False
+        for record in self.misses.open_records(KIND_ESS):
+            actual = record.get("actual") or {}
+            last_seen = actual.get("last_seen") or record["found_at"]
+            seen = dt_util.parse_datetime(last_seen)
+            note = (
+                f"{NOTE_ESS}; zakończone restartem HA, ostatnio potwierdzone "
+                f"{moment_label(seen) if seen else last_seen}"
+            )
+            settlement = Settlement(None, note, {**actual, "until": last_seen})
+            changed |= self.misses.settle(record["id"], settlement, now)
+        if changed:
+            self._async_save_misses()
 
     async def _async_save_snapshots(self) -> None:
         if self._snapshot_store is None:
@@ -454,8 +609,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         Removes every storage file (optimizer snapshots plus each module's
         learned consumption profile / price archive / tariff snapshots),
         cancelling any pending delayed save, and resets in-memory state. The
-        config entry (data/options) is left untouched. Callers should reload the
-        entry afterwards so modules re-initialise from a clean slate.
+        config entry (data/options) is left untouched, and so is the ledger of
+        missed plan actions, a record rather than a cache (ADR 002). Callers
+        should reload the entry afterwards so modules re-initialise from a
+        clean slate.
         """
         if self._snapshot_store is not None:
             await self._snapshot_store.async_remove()
@@ -463,6 +620,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         self._last_snapshot_hour = None
         self._battery_energy_cost = 0.0
         self.switch_notices = SwitchNotices()
+        self.plan_asks = PlanAsks()
+        # The ledger of missed plan actions stays: it records what happened,
+        # it is not a cache (ADR 002).
         self.events.clear()
         await self.registry.async_clear_all()
 
@@ -514,13 +674,22 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         verdict = assess_execution(mode, decision.charge_power_kw, discharged, charged)
         if verdict is None:
             return  # no statistics for the window — cannot say either way
-        self._set_execution_alarm(not verdict.ok, verdict.reason, mode)
+        self._set_execution_alarm(
+            not verdict.ok, verdict.reason, mode, decision.charge_power_kw
+        )
 
-    def _set_execution_alarm(self, on: bool, reason: str | None, mode: str | None) -> None:
+    def _set_execution_alarm(
+        self,
+        on: bool,
+        reason: str | None,
+        mode: str | None,
+        charge_power_kw: float | None = None,
+    ) -> None:
         previous = self.execution_alarm
         was_on = previous["on"] is True
         since = (previous["since"] if was_on else dt_util.now()) if on else None
         alarm = {"on": on, "reason": reason, "mode": mode, "since": since}
+        self._record_ess_episode(was_on, on, previous["since"], since, alarm, charge_power_kw)
         if alarm == previous:
             return
         self.execution_alarm = alarm
@@ -537,6 +706,37 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             self.log_info("execution", "Falownik znów wykonuje plan.", extra={"mode": mode})
             persistent_notification.async_dismiss(self.hass, notification_id)
         self.async_update_listeners()
+
+    def _record_ess_episode(
+        self,
+        was_on: bool,
+        on: bool,
+        previous_since: datetime | None,
+        since: datetime | None,
+        alarm: dict,
+        charge_power_kw: float | None,
+    ) -> None:
+        """Keep the watchdog's alarm in the ledger: one record per episode.
+
+        Opened when the alarm goes on, confirmed on every check while it holds
+        (so a restart can end it where it was last seen), settled when it ends.
+        """
+        if not self._misses_writable:
+            return
+        now = dt_util.now()
+        if on and not was_on and since is not None:
+            if self.misses.add(ess_record(since, alarm["mode"], charge_power_kw, alarm["reason"])):
+                self._async_save_misses()
+        elif on and since is not None:
+            if self.misses.touch(miss_id(KIND_ESS, since), last_seen=now.isoformat()):
+                self._async_save_misses(30.0)
+        elif was_on and previous_since is not None:
+            record_id = miss_id(KIND_ESS, previous_since)
+            record = self.misses.get(record_id)
+            if record is not None:
+                actual = {**record["actual"], "last_seen": now.isoformat(), "until": now.isoformat()}
+                if self.misses.settle(record_id, Settlement(None, NOTE_ESS, actual), now):
+                    self._async_save_misses()
 
     def _soc_flips_recovery(self, state: str) -> bool:
         """Whether a new SoC reading would flip the reserve-recovery latch."""
@@ -627,6 +827,11 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         trigger = self._consume_trigger() or (
             "start integracji" if self.data is None else None
         )
+        # What the plan asked of this hour before it began (ADR 002): frozen
+        # as the hour's first run starts, before this run's plan replaces it.
+        now = dt_util.now()
+        hour = now.replace(minute=0, second=0, microsecond=0)
+        ask = self.plan_asks.begin(hour)
 
         # The plan is only as good as its starting SoC. If the sensor is
         # momentarily unavailable, never seed from a fabricated value — keep the
@@ -673,24 +878,20 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         supply_planning, ppe2_reason = self._supply_inputs(
             forecast, billing_periods, billing_reason
         )
-        solve = partial(
-            optimizer.optimize,
-            forecast,
-            battery,
-            ev_request,
-            reminders,
-            ess_request=ess_request,
-            billing=billing_periods,
-            tail=tail,
-        )
-        if supply_planning is None:
-            plan = await self.hass.async_add_executor_job(solve)
-        else:
-            # With switching modelled every proposed cycle is valued by
-            # re-solving these same inputs without it (``supply_cycles.py``).
-            plan = await self.hass.async_add_executor_job(
-                settle_cycles, lambda planning: solve(supply=planning), supply_planning
+        def solve_for(request: EVRequest) -> Callable[..., Plan]:
+            return partial(
+                optimizer.optimize,
+                forecast,
+                battery,
+                request,
+                reminders,
+                ess_request=ess_request,
+                billing=billing_periods,
+                tail=tail,
             )
+
+        solve = solve_for(ev_request)
+        plan = await self.hass.async_add_executor_job(_settled, solve, supply_planning)
         if billing_reason is not None:
             plan.billing = self._unavailable_outcomes(billing_reason, forecast, PPE_1)
         elif billing_periods:
@@ -705,11 +906,332 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if current is not None:
             self._battery_energy_cost = current.battery_energy_cost
 
-        await self._maybe_record_snapshot(forecast, plan, trigger)
+        # A miss is recorded at once; what it cost needs more solves, which
+        # run after this plan is out rather than delaying it.
+        pending = self._find_misses(ask, now, forecast, solve, solve_for, supply_planning)
+        await self._maybe_record_snapshot(forecast, plan, trigger, ask)
+        # The next clock hour in UTC: local wall-clock arithmetic would skip the
+        # repeated hour when the clocks go back.
+        next_hour = dt_util.as_utc(hour) + timedelta(hours=1)
+        if self.plan_asks.offer(ask_from_plan(plan, next_hour, now)):
+            await self._async_save_snapshots()
         self._record_event(plan)
         self.supply_planning = supply_planning
         self._sync_switch_notification(plan)
+        if pending:
+            self.entry.async_create_background_task(
+                self.hass,
+                self._async_cost_misses(plan, pending, hour),
+                f"{DOMAIN} cost missed plan actions",
+            )
+        self.entry.async_create_background_task(
+            self.hass, self._async_settle_misses(), f"{DOMAIN} settle missed plan actions"
+        )
         return plan
+
+    # ------------------------------------------------------------------
+    # Missed plan actions (misses.py, ADR 002)
+    # ------------------------------------------------------------------
+    def _find_misses(
+        self,
+        ask,
+        now: datetime,
+        forecast,
+        solve: Callable[..., Plan],
+        solve_for: Callable[[EVRequest], Callable[..., Plan]],
+        supply_planning: SupplyPlanning | None,
+    ) -> list[tuple[str, Callable[[], Plan]]]:
+        """Record what this run sees contradicting the running hour's ask.
+
+        Returns each new record's id with the solve of its counterfactual — the
+        refresh's inputs with the ask honoured for the rest of the hour.
+        """
+        if ask is None or not self._misses_writable:
+            return []
+        pending: list[tuple[str, Callable[[], Plan]]] = []
+        ev = self.ev
+        if ev.enabled and ev_left_unplugged(
+            ask,
+            plugged=ev.plugged,
+            home=ev.home,
+            calendar_available=ev.calendar_available(ask.hour),
+        ):
+            record = ev_unplugged_record(ask, now)
+            if self.misses.add(record):
+                self.log_warning(
+                    "misses",
+                    f"Plan prosił o ładowanie EV {ask.ev_kwh:.1f} kWh w godzinie "
+                    f"{moment_label(ask.hour)}, a auto stoi w domu niepodłączone.",
+                    extra={"hour": ask.hour.isoformat(), "ev_kwh": ask.ev_kwh},
+                )
+                followed = solve_for(ev.request_as_plugged(forecast))
+                pending.append((record["id"], partial(_settled, followed, supply_planning)))
+        if (
+            supply_planning is not None
+            and supply_planning.switching
+            and supply_not_followed(ask, supply_planning.actual)
+        ):
+            record = supply_record(ask, now, supply_planning.actual)
+            if self.misses.add(record):
+                self.log_warning(
+                    "misses",
+                    f"Plan prosił o zasilanie mieszkania z: "
+                    f"{SUPPLY_NAMES.get(ask.supply, ask.supply)} w godzinie "
+                    f"{moment_label(ask.hour)}, a jest: "
+                    f"{SUPPLY_NAMES.get(supply_planning.actual, supply_planning.actual)}.",
+                    extra={"hour": ask.hour.isoformat(), "asked": ask.supply},
+                )
+                followed_planning = replace(
+                    supply_planning,
+                    actual=ask.supply,
+                    last_transition_at=followed_transition_at(
+                        self.supply.transitions, ask.supply, ask.hour
+                    ),
+                )
+                pending.append((record["id"], partial(_settled, solve, followed_planning)))
+        if pending:
+            self._async_save_misses()
+        return pending
+
+    async def _async_cost_misses(
+        self,
+        reality: Plan,
+        pending: list[tuple[str, Callable[[], Plan]]],
+        hour: datetime,
+    ) -> None:
+        """Solve each new miss's counterfactual and keep the difference in PLN."""
+        changed = False
+        for record_id, followed_solve in pending:
+            try:
+                followed = await self.hass.async_add_executor_job(followed_solve)
+                cf = counterfactual(reality, followed, hour)
+            except Exception as err:  # noqa: BLE001 — kept on the record and logged
+                _LOGGER.warning(
+                    "Counterfactual of missed plan action %s failed: %s",
+                    record_id,
+                    err,
+                    exc_info=True,
+                )
+                cf = Counterfactual(None, error=str(err) or type(err).__name__)
+            changed |= self.misses.set_counterfactual(record_id, cf)
+        if changed:
+            self._async_save_misses()
+
+    async def _async_settle_misses(self) -> None:
+        """Settle the misses whose hour is over; check those hours for off-plan charging."""
+        if not self._misses_writable:
+            return
+        async with self._settle_lock:
+            now = dt_util.now()
+            ready = now - SETTLE_LATENCY
+            ev_sensor = self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
+            changed = False
+            for record in self.misses.open_records():
+                if record["kind"] == KIND_ESS:
+                    continue  # ends with the watchdog's alarm
+                hour = dt_util.parse_datetime(record["hour"])
+                end = hour + timedelta(hours=1)
+                if end > ready:
+                    continue
+                found = dt_util.parse_datetime(record["found_at"])
+                if record["kind"] == KIND_SUPPLY:
+                    switched = switch_moment(
+                        self.supply.transitions, record["asked"]["supply"], found, end
+                    )
+                    settlement = settle_supply(record, switched)
+                elif not ev_sensor:
+                    settlement = Settlement(
+                        None, NOTE_NO_EV_SENSOR, {**record["actual"], "ev_kwh": None}
+                    )
+                else:
+                    after = await self.consumption.async_partial_kwh(ev_sensor, found, end)
+                    whole = await self.consumption.async_partial_kwh(ev_sensor, hour, end)
+                    if after is None and now - end < SETTLE_GIVE_UP:
+                        continue  # the sensor cannot be read yet; try again later
+                    settlement = settle_ev_unplugged(record, after, whole)
+                changed |= self.misses.settle(record["id"], settlement, now)
+            changed |= await self._async_find_off_plan_charging(ready, ev_sensor, now)
+            if changed:
+                self._async_save_misses()
+
+    async def _async_find_off_plan_charging(
+        self, ready: datetime, ev_sensor: str | None, now: datetime
+    ) -> bool:
+        """Record the settled hours in which the car charged without a plan.
+
+        Walks the hours after ``misses.off_plan_through`` (from the oldest vintage
+        the first time: the record starts with the history that is left) up to
+        the last hour whose statistics are complete.
+        """
+        if not self.ev.enabled or not ev_sensor:
+            return False
+        last = dt_util.as_utc(ready - timedelta(hours=1)).replace(
+            minute=0, second=0, microsecond=0
+        )
+        through = self.misses.off_plan_through
+        if through is not None:
+            start = dt_util.as_utc(through) + timedelta(hours=1)
+        else:
+            oldest = self.snapshots.oldest_hour()
+            start = oldest if oldest is not None else last
+        if start > last:
+            return False
+        end = last + timedelta(hours=1)
+        realized = await self.consumption.async_range_kwh(ev_sensor, start, end)
+        away = self._away_windows(self._trips_between(start, end, now))
+        spill = self._ev_spill_kwh()
+        hour = start
+        while hour <= last:
+            realized_kwh = realized.get(hour)
+            if self._ev_off_plan(hour, realized_kwh, away, spill):
+                self.misses.add(
+                    ev_off_plan_record(hour, self._planned_ev(hour) or 0.0, realized_kwh, now)
+                )
+            hour += timedelta(hours=1)
+        self.misses.off_plan_through = last
+        return True
+
+    def _planned_ev(self, hour: datetime) -> float | None:
+        """Most EV energy any plan of ``hour`` asked for — its vintage or any
+        mid-hour revision; ``None`` when no vintage backs the hour."""
+        sn = self.snapshots
+        if sn.origin_at(hour, 0) is None:
+            return None
+        values = [sn.run0_at(hour, "ev")] + [r.get("ev") for r in sn.revisions_at(hour)]
+        return max((value or 0.0) for value in values)
+
+    def _ev_off_plan(
+        self,
+        hour: datetime,
+        realized_ev: float | None,
+        away_windows: list[tuple[datetime, datetime]],
+        spill_kwh: float,
+    ) -> bool:
+        """Did the car charge in ``hour`` though no plan of it asked to?
+
+        Judged against the hour's OWN plans — its vintage plus every recorded
+        mid-hour revision — never a pinned view, so the answer does not move
+        with the forecast-lead picker (``misses.ev_off_plan`` has the rule).
+        """
+        hour_end = hour + timedelta(hours=1)
+        return ev_off_plan(
+            realized_kwh=realized_ev,
+            planned_kwh=self._planned_ev(hour),
+            planned_before_kwh=self._planned_ev(hour - timedelta(hours=1)) or 0.0,
+            watched=self.snapshots.records_revisions_at(hour),
+            away=any(dep < hour_end and ret > hour for dep, ret in away_windows),
+            spill_kwh=spill_kwh,
+        )
+
+    def _ev_spill_kwh(self) -> float:
+        """How much a charger told to stop at the end of a planned hour may
+        still deliver in the next one — a session finishing, not an unplanned one."""
+        return (
+            float(self.config.get(CONF_EV_CHARGER_KW, 0) or 0)
+            * max(int(self.config.get(CONF_EV_CHARGER_PHASES, 1) or 1), 1)
+            * _EV_SPILL_MINUTES
+            / 60.0
+        )
+
+    @staticmethod
+    def _away_windows(trips: list[dict]) -> list[tuple[datetime, datetime]]:
+        windows: list[tuple[datetime, datetime]] = []
+        for trip in trips:
+            depart = dt_util.parse_datetime(trip.get("depart") or "")
+            ret = dt_util.parse_datetime(trip.get("return_end") or "")
+            if depart and ret:
+                windows.append((depart, ret))
+        return windows
+
+    def _trips_between(self, start: datetime, end: datetime, now: datetime) -> list[dict]:
+        """Trips overlapping ``[start, end)``: the live calendar, plus history
+        harvested from vintages where the live calendar says nothing.
+
+        Past events removed from the calendar stay where they shaped plans,
+        while an edited future event leaves no ghost copy from older snapshots:
+        a harvested trip overlapping a live one is either the same event or its
+        stale pre-edit copy.
+        """
+        live = self.ev.trips_payload()
+
+        def _window(t: dict) -> tuple[datetime, datetime] | None:
+            depart = dt_util.parse_datetime(t.get("depart") or "")
+            ret = dt_util.parse_datetime(t.get("return_end") or "")
+            return (depart, ret) if depart and ret else None
+
+        live_windows = [w for w in map(_window, live) if w]
+
+        def _clashes_with_live(t: dict) -> bool:
+            w = _window(t)
+            if w is None:
+                return True  # unparseable history row — cannot place it
+            return any(w[0] < ret and w[1] > dep for dep, ret in live_windows)
+
+        return sorted(
+            [
+                t
+                for t in self.snapshots.trips_overlapping(
+                    start, end, started_at_or_before=now
+                )
+                if not _clashes_with_live(t)
+            ]
+            + live,
+            key=lambda t: t.get("depart") or "",
+        )
+
+    def get_misses(self, days: int | None = 30) -> dict:
+        """The ledger for the panel: records newest first, totals, what is watched."""
+        now = dt_util.now()
+        records = self.misses.records()
+
+        def hour_of(record: dict) -> datetime:
+            return dt_util.parse_datetime(record["hour"])
+
+        def totals(window_days: int) -> dict:
+            cutoff = now - timedelta(days=window_days)
+            chosen = [r for r in records if hour_of(r) >= cutoff]
+            costed = [r["cost_pln"] for r in chosen if r.get("cost_pln") is not None]
+            by_kind: dict[str, int] = {}
+            for r in chosen:
+                by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+            return {
+                "count": len(chosen),
+                "cost_pln": round(sum(costed), 2),
+                "costed": len(costed),
+                "open": sum(1 for r in chosen if r.get("settled_at") is None),
+                "by_kind": by_kind,
+            }
+
+        cutoff = now - timedelta(days=days) if days else None
+        shown = [r for r in records if cutoff is None or hour_of(r) >= cutoff]
+        shown.sort(key=lambda r: (r["hour"], r["found_at"]), reverse=True)
+        ev_enabled = self.ev.enabled
+        return {
+            "records": shown,
+            "days": days,
+            "total_records": len(records),
+            # The oldest hour on record (off-plan charging is backfilled).
+            "since": min((r["hour"] for r in records), default=None),
+            "totals": {"7": totals(7), "30": totals(30)},
+            "store_error": self.misses_store_error,
+            # Which kinds can be found with this configuration at all.
+            "watched": {
+                "ev_unplugged": ev_enabled and bool(self.config.get(CONF_EV_PLUG_SENSOR)),
+                "supply": self.supply.active and bool(self.config[CONF_SUPPLY_RECOMMENDATIONS]),
+                "ess": bool(self.config.get(CONF_BATTERY_DISCHARGE_SENSOR)),
+                "ev_off_plan": ev_enabled
+                and bool(self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)),
+            },
+        }
+
+    def misses_by_hour(self, start: datetime, end: datetime) -> dict[datetime, list[dict]]:
+        """The ledger's records of the clock hours in ``[start, end)``, by hour."""
+        out: dict[datetime, list[dict]] = {}
+        for record in self.misses.records():
+            hour = dt_util.parse_datetime(record["hour"])
+            if hour is not None and start <= hour < end:
+                out.setdefault(hour, []).append(record)
+        return out
 
     # ------------------------------------------------------------------
     # Monthly price cap ("Tarcza")
@@ -1078,7 +1600,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         )
 
     async def _maybe_record_snapshot(
-        self, forecast, plan, trigger: str | None = None
+        self, forecast, plan, trigger: str | None = None, ask=None
     ) -> None:
         """Persist one columnar snapshot per clock hour (a 'vintage').
 
@@ -1109,6 +1631,9 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             # such marker, and for them "no revision recorded" must not be read as
             # "the plan never changed" — nobody was looking.
             "revcap": True,
+            # What the plan asked of this hour before it began (ADR 002): the
+            # vintage itself is already the plan adapted to reality.
+            "ask": ask.to_dict() if ask is not None else None,
             "n": len(slots),
             "horizon_hours": len(decisions),
             "total_cost": _r(plan.total_cost, 2),
@@ -2325,9 +2850,6 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             CONF_CONSUMPTION_SENSOR,
             CONF_EV_BEHIND_METER,
             CONF_EV_CHARGE_EFFICIENCY,
-            CONF_EV_CHARGER_KW,
-            CONF_EV_CHARGER_PHASES,
-            CONF_EV_ENERGY_ADDED_SENSOR,
             CONF_EV_SOC_SENSOR,
             CONF_GRID_IMPORT_SENSOR,
             CONF_SENSOR_PARENTS,
@@ -2593,35 +3115,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         if pin_requested:
             trips = list((pin_rec or {}).get("trips") or [])
         else:
-            live = self.ev.trips_payload()
-
-            def _window(t: dict) -> tuple[datetime, datetime] | None:
-                depart = dt_util.parse_datetime(t.get("depart") or "")
-                ret = dt_util.parse_datetime(t.get("return_end") or "")
-                return (depart, ret) if depart and ret else None
-
-            live_windows = [w for w in map(_window, live) if w]
-
-            def _clashes_with_live(t: dict) -> bool:
-                w = _window(t)
-                if w is None:
-                    return True  # unparseable history row — cannot place it
-                return any(w[0] < ret and w[1] > dep for dep, ret in live_windows)
-
-            # The live calendar is the current truth wherever it says anything:
-            # a harvested trip overlapping a live one is either the same event
-            # (already in ``live``) or its stale pre-edit copy — drop it.
-            trips = sorted(
-                [
-                    t
-                    for t in sn.trips_overlapping(
-                        past_start, series_end, started_at_or_before=real_now
-                    )
-                    if not _clashes_with_live(t)
-                ]
-                + live,
-                key=lambda t: t.get("depart") or "",
-            )
+            trips = self._trips_between(past_start, series_end, real_now)
 
         # EV wired BEFORE the meters (its own tap): the house sensors never see
         # the charging, so the realized grid import and hour costs get the
@@ -2632,12 +3126,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         ev_charge_eff = max(
             float(self.config.get(CONF_EV_CHARGE_EFFICIENCY, 1.0) or 1.0), 0.01
         )
-        away_windows: list[tuple[datetime, datetime]] = []
-        for t in trips:
-            dep = dt_util.parse_datetime(t.get("depart") or "")
-            ret = dt_util.parse_datetime(t.get("return_end") or "")
-            if dep and ret:
-                away_windows.append((dep, ret))
+        away_windows = self._away_windows(trips)
 
         def _unmetered_ev_grid(hour: datetime, added_kwh: float | None) -> float:
             if ev_behind_meter or not added_kwh:
@@ -2647,54 +3136,16 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 return 0.0
             return added_kwh / ev_charge_eff
 
-        # A charger told to run to the end of an hour stops a little late, so a
-        # few minutes of the PREVIOUS hour's planned session land in this one.
-        # That much charging after a planned hour is a session finishing, not an
-        # unplanned one — flagging it would cry wolf on ordinary days.
-        ev_spill_kwh = (
-            float(self.config.get(CONF_EV_CHARGER_KW, 0) or 0)
-            * max(int(self.config.get(CONF_EV_CHARGER_PHASES, 1) or 1), 1)
-            * _EV_SPILL_MINUTES
-            / 60.0
-        )
-
-        def _planned_ev(hour: datetime) -> float:
-            """Most EV energy any plan of ``hour`` asked for — its vintage or any
-            mid-hour revision of it."""
-            values = [sn.run0_at(hour, "ev")] + [
-                r.get("ev") for r in sn.revisions_at(hour)
-            ]
-            return max((value or 0.0) for value in values)
+        ev_spill_kwh = self._ev_spill_kwh()
 
         def _ev_off_plan(hour: datetime, realized_ev: float | None) -> bool:
-            """Did the car charge in an hour no plan ever asked it to?
+            return self._ev_off_plan(hour, realized_ev, away_windows, ev_spill_kwh)
 
-            Judged against the hour's OWN plans — its vintage plus every recorded
-            mid-hour revision — never the pinned view: "was this charging planned"
-            must not change its answer when the forecast-lead picker moves. This
-            is what tells a deliberate re-plan (the cable went in mid-hour, a
-            revision records it) apart from charging nothing in PowerPilot asked
-            for. Hours with no vintage at all are not flagged — there was no plan
-            to contradict — and neither are trip hours, where the charging
-            happened away from home. Neither are hours older than revision
-            tracking itself: their re-plans went unrecorded, so their silence
-            means "nobody was looking", not "nothing was planned".
-            """
-            if realized_ev is None:
-                return False
-            if sn.origin_at(hour, 0) is None:
-                return False
-            if not sn.records_revisions_at(hour):
-                return False
-            hour_end = hour + timedelta(hours=1)
-            if any(dep < hour_end and ret > hour for dep, ret in away_windows):
-                return False
-            if _planned_ev(hour) > _REVISION_EV_EPS:
-                return False
-            floor = _REVISION_EV_EPS
-            if _planned_ev(hour - timedelta(hours=1)) > _REVISION_EV_EPS:
-                floor = max(floor, ev_spill_kwh)
-            return realized_ev > floor
+        # The ledger's missed plan actions, shown with their hours.
+        misses_at = self.misses_by_hour(past_start, now + timedelta(hours=1))
+
+        def _misses(hour: datetime) -> list[dict] | None:
+            return misses_at.get(dt_util.as_utc(hour)) or None
 
         # ----- Past hours -----
         h = past_start
@@ -2827,6 +3278,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "revisions": revisions or None,
                     "revisions_dropped": sn.revisions_dropped_at(h) or None,
                     "ev_off_plan": _ev_off_plan(h, ev_charge_real.get(h)) or None,
+                    "misses": _misses(h),
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,
@@ -3079,6 +3531,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                     "revisions": cur_revisions or None,
                     "revisions_dropped": sn.revisions_dropped_at(now) or None,
                     "ev_off_plan": _ev_off_plan(now, cur_ev) or None,
+                    "misses": _misses(now),
                     "buy_price": buy_price,
                     "distribution_price_kwh": dist_price,
                     "total_price_kwh": total_price,

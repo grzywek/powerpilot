@@ -109,6 +109,28 @@ revision tracking is active are marked `revcap`; hours without that marker are
 never flagged, since their silence means nobody was watching for re-plans rather
 than that none happened.
 
+### Missed plan actions
+PowerPilot has no actuator, so the plan can be ignored, and the next plan
+quietly adapts: the plug gates the running hour and the running hour is
+planned on the apartment's actual supply, so the vintage of an hour the car
+was left unplugged in reads as if nothing had been asked. After every run the
+coordinator therefore keeps the plan's row for the next hour — the **ask** —
+persisted with the snapshots; when that hour begins, its last ask is frozen
+and stored in its vintage as `ask` (`misses.py`, [ADR 002](adr/002-missed-plan-actions.md)).
+
+A run that sees reality contradict the running hour's ask on something a
+person controls — the car at home with the cable out while the ask charges
+it, the apartment on the other meter — records a **miss** in an append-only
+ledger (its own store, never pruned or cleared) and solves the refresh's
+inputs once more with the ask followed. The difference of the two plans'
+`objective_pln` (the horizon's spend in PLN: the solver's objective without
+its steering terms, with the fixed demand and EV load priced in) is what the
+miss cost; when the hour is over it is scaled by the energy or the minutes
+that stayed missed, from the recorder and the supply log. The ESS watchdog's
+alarm is kept as episodes, and EV charging in an hour none of its plans asked
+for (`ev_off_plan`, one rule shared with the series) is recorded as the hour
+settles.
+
 ### Forecast
 A `Forecast` is an ordered list of `HourSlot`s, each carrying everything a module
 knew about that hour: buy/sell price (and whether it is *confirmed* or
@@ -196,6 +218,8 @@ custom_components/powerpilot/
   optimizer.py         heuristic optimizer
   forecast.py          ForecastBuilder
   coordinator.py       DataUpdateCoordinator running the pipeline
+  misses.py            missed plan actions: asks, the ledger, their cost
+  when.py              moments in stored text, always with their day
   config_flow.py       config + options flow
   sensor.py            output + plan sensors
   binary_sensor.py     ev_charge / ev_connect_charger

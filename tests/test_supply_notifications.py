@@ -80,6 +80,7 @@ def _fake_coordinator(plan, planning, state: dict, notices: SwitchNotices):
         _snapshots_payload=lambda: None,
         logged=[],
         snapshots=SimpleNamespace(to_dict=lambda: {}),
+        plan_asks=SimpleNamespace(to_dict=lambda: {}),
         _battery_energy_cost=0.0,
         _last_snapshot_hour=None,
     )

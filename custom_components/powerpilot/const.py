@@ -347,6 +347,11 @@ STORAGE_VERSION_TARIFF_SNAPSHOTS: Final = 1
 # ``Store(version=STORAGE_VERSION_SNAPSHOTS, key=f"{DOMAIN}_{entry_id}_snapshots")``.
 STORAGE_VERSION_SNAPSHOTS: Final = 1
 
+# --- Missed plan actions (ADR 002) ---
+# The ledger of what the plan asked for and nobody did, never pruned:
+# ``Store(version=STORAGE_VERSION_MISSES, key=f"{DOMAIN}_{entry_id}_misses")``.
+STORAGE_VERSION_MISSES: Final = 1
+
 # Single-char codes keep the columnar snapshot records compact on disk.
 MODE_CODE: Final = {"charge": "c", "discharge": "d", "passthrough": "p"}
 MODE_CODE_INV: Final = {v: k for k, v in MODE_CODE.items()}

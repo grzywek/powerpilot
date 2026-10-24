@@ -1161,6 +1161,29 @@ class EVModule(PowerPilotModule):
     # Request building
     # ------------------------------------------------------------------
     def get_request(self, forecast: Forecast) -> EVRequest:
+        """The charging need for the plan; kept for the reminders and the panel."""
+        self._request = self._build_request(forecast, self.chargeable_now())
+        return self._request
+
+    def request_as_plugged(self, forecast: Forecast) -> EVRequest:
+        """The request as if the cable were in the car right now.
+
+        What the plan would have done had its ask to plug the car in been
+        followed (``misses.py``): only the running hour's plug gate differs.
+        Leaves the module's own request alone.
+        """
+        return self._build_request(forecast, True)
+
+    def calendar_available(self, hour: datetime) -> bool:
+        """Whether the calendar has the car home for (part of) ``hour``.
+
+        Compared in UTC: ``hour`` may come from another zone, and in the hour
+        the clocks go back a local 02:00 matches no instant of another zone.
+        """
+        target = dt_util.as_utc(hour)
+        return all(dt_util.as_utc(away) != target for away in self._unavailable_hours)
+
+    def _build_request(self, forecast: Forecast, chargeable: bool | None) -> EVRequest:
         if not self.enabled:
             return EVRequest(enabled=False)
 
@@ -1180,7 +1203,7 @@ class EVModule(PowerPilotModule):
         # stay available — the car comes back and the plug-flip listener
         # re-plans the moment it does; each cycle re-evaluates this hour.
         now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
-        chargeable = self.chargeable_now()
+        partial = dict(self._partial_hours)
         reopened = False
         if chargeable is False:
             available_hours.discard(now_hour)
@@ -1203,14 +1226,12 @@ class EVModule(PowerPilotModule):
             # (departure at 13:40 → 40 minutes), and that cap must survive —
             # being plugged in right now says nothing about staying past 13:40.
             available_hours.add(now_hour)
-            self._partial_hours.pop(now_hour, None)
+            partial.pop(now_hour, None)
             reopened = True
 
         # Fractions only mean anything for hours that survived as available.
         partial_hours = {
-            hour: fraction
-            for hour, fraction in self._partial_hours.items()
-            if hour in available_hours
+            hour: fraction for hour, fraction in partial.items() if hour in available_hours
         }
 
         # A car on the cable in an hour the calendar wrote off as away is either
@@ -1251,7 +1272,7 @@ class EVModule(PowerPilotModule):
                 if routine is not None:
                     routine_targets.append(routine)
 
-        self._request = EVRequest(
+        return EVRequest(
             enabled=True,
             charger_kw=float(self.config.get(CONF_EV_CHARGER_KW, 3.5)),
             phase=int(self.config.get(CONF_EV_CHARGER_PHASE, 1)),
@@ -1277,7 +1298,6 @@ class EVModule(PowerPilotModule):
                 self.config.get(CONF_EV_CHARGE_EFFICIENCY, 1.0) or 1.0
             ),
         )
-        return self._request
 
     def collect_reminders(self) -> list[str]:
         if not self.enabled:
@@ -1558,6 +1578,11 @@ class EVModule(PowerPilotModule):
     @property
     def home(self) -> bool | None:
         return self._home
+
+    @property
+    def plugged(self) -> bool | None:
+        """The plug sensor at the last update; ``None`` without one or unreadable."""
+        return self._plugged
 
     @property
     def charging(self) -> bool | None:

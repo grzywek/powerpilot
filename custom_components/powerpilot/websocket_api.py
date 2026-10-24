@@ -179,12 +179,29 @@ async def ws_consumption_stats(hass: HomeAssistant, connection, msg) -> None:
 
 
 @callback
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "powerpilot/misses",
+        # Days back from now; 0 = the whole ledger.
+        vol.Optional("days", default=30): vol.All(int, vol.Range(min=0)),
+    }
+)
+@callback
+def ws_misses(hass: HomeAssistant, connection, msg) -> None:
+    """The ledger of missed plan actions (ADR 002)."""
+    coordinator = _coordinator(hass)
+    connection.send_result(
+        msg["id"], coordinator.get_misses(msg["days"] or None) if coordinator else {}
+    )
+
+
 def async_register_ws(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_plan)
     websocket_api.async_register_command(hass, ws_status)
     websocket_api.async_register_command(hass, ws_log)
     websocket_api.async_register_command(hass, ws_profiles)
     websocket_api.async_register_command(hass, ws_series)
+    websocket_api.async_register_command(hass, ws_misses)
     websocket_api.async_register_command(hass, ws_prices)
     websocket_api.async_register_command(hass, ws_accuracy)
     websocket_api.async_register_command(hass, ws_flow)

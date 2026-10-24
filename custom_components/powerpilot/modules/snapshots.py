@@ -21,6 +21,8 @@ Record shape (arrays are parallel, one entry per horizon hour)::
                "mode": "c"|"d"|"p"}],   # mid-hour re-plans, oldest first
       "rev_more": int,                  # revisions dropped at the cap
       "revcap": True,                   # this hour was watched for re-plans
+      "ask": {...} | None,              # what the plan asked of the hour before
+                                        # it began (misses.Ask, ADR 002)
     }
 """
 
@@ -110,6 +112,16 @@ class SnapshotStore:
         """
         rec = self._records.get(self._key(hour))
         return bool(rec.get("revcap")) if rec else False
+
+    def oldest_hour(self) -> datetime | None:
+        """The clock hour of the oldest vintage kept (UTC), ``None`` when empty."""
+        stamps = []
+        for key in self._records:
+            try:
+                stamps.append(datetime.fromisoformat(key))
+            except (TypeError, ValueError):
+                continue
+        return min(stamps) if stamps else None
 
     def runs(self) -> list[dict[str, Any]]:
         """Lightweight list of available vintages, newest first (for the picker)."""

@@ -83,6 +83,7 @@ from ..const import (
 )
 from ..hierarchy import metered_sensors, subtree
 from ..models import SupplyTransition
+from ..when import moment_label
 from .base import PowerPilotModule
 
 if TYPE_CHECKING:
@@ -1053,7 +1054,7 @@ class SupplyModule(PowerPilotModule):
             await self._async_save()
         if transition is not None:
             self.log_info(
-                f"Zasilanie mieszkania: {transition.state} od {transition.at.isoformat()}",
+                f"Zasilanie mieszkania: {transition.state} od {moment_label(transition.at)}",
                 extra=transition.to_dict(),
             )
         if transition is not None or self.detector.streak != streak_before:

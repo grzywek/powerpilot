@@ -434,7 +434,7 @@ class PriceModule(PowerPilotModule):
         )
         self.log_info(
             f"Źródło {source_label}: {confirmed_count}h potwierdzonych + {forecast_count}h prognozy "
-            f"(do {last_hour.isoformat() if last_hour else '–'}). "
+            f"(do {moment_label(last_hour) if last_hour else '–'}). "
             f"Archiwum: {len(self.archive)} godzin.",
             extra={
                 "source": source_label,

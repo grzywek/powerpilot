@@ -48,6 +48,7 @@ from ..const import (
     STORAGE_VERSION_TARIFF_SNAPSHOTS,
 )
 from ..models import Forecast, Tariff, tariff_for_day
+from ..when import moment_label
 from .base import PowerPilotModule
 
 _LOGGER = logging.getLogger(__name__)
@@ -347,7 +348,7 @@ class TariffModule(PowerPilotModule):
             return price, tariff.id, period.id
 
         self.log_warning(
-            f"Brak pasującego okresu dla {slot_dt.isoformat()} "
+            f"Brak pasującego okresu dla {moment_label(slot_dt)} "
             f"(taryfa: {tariff.name}). Dodaj jawny okres typu pozaszczyt "
             f"(0–24h, bez sensora dnia).",
             extra={"tariff": tariff.name, "hour": slot_dt.isoformat()},

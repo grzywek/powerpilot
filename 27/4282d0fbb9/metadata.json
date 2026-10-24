@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "274282d0fbb9",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "AGENTS.md",
+    "README.md",
+    "custom_components/powerpilot/modules/ev.py",
+    "docs/ARCHITECTURE.md",
+    "tests/test_ev.py",
+    "tests/test_ev_trip_drain.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/27/4282d0fbb9/0/metadata.json",
+      "transcript": "/27/4282d0fbb9/0/full.jsonl",
+      "compact_transcript": "/27/4282d0fbb9/0/transcript.jsonl",
+      "content_hash": "/27/4282d0fbb9/0/content_hash.txt",
+      "prompt": "/27/4282d0fbb9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 78,
+    "cache_creation_tokens": 276776,
+    "cache_read_tokens": 10939790,
+    "output_tokens": 50815,
+    "api_call_count": 39
+  }
+}

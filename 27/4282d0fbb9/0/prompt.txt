@@ -1,0 +1,3 @@
+ale tego nie robiłem. - to zrób.. czemu nie robisz od razu;
+
+Wahnięcie SoC na postoju: jeśli auto stoi podpięte i nie ładuje, a SoC spadnie o 1 punkt (np. 90 → 89), kod uzna, że auto już jeździło, i usunie jazdę z bieżącej godziny, czyli zachowa się jak przed tą zmianą. - ups, to bardzo źle? przecież masz lokalizację auta lol

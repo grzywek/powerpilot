@@ -919,7 +919,7 @@ async def test_pending_or_gap_splits_are_never_archived() -> None:
         assert abs(period.energy_kwh - 0.1) < 1e-9  # 09:00 counted…
         assert module.archive.lookup(nine, list(windows)) is None  # …not archived
         # 08:00: its window 08:40–09:00 has no bucket — a gap, not archived.
-        assert period.missing == (f"14.09 08:00: brak odczytu {APT}",)
+        assert period.missing == (f"pon 14.09 08:00: brak odczytu {APT}",)
         assert len(module.archive) == 0
 
     # A window of the hour that just ended still on its way: pending, not archived.

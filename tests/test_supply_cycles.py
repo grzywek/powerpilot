@@ -22,6 +22,7 @@ from custom_components.powerpilot.const import (
     SUPPLY_VICTRON,
 )
 from custom_components.powerpilot.models import Forecast, SupplyPlanning
+from custom_components.powerpilot.when import moment_label
 from custom_components.powerpilot.supply_cycles import (
     REASON_NOT_ACTIVE,
     plan_cycles,
@@ -258,7 +259,8 @@ def test_the_recommendation_is_the_next_hour_and_a_switch_is_required() -> None:
     assert rec.switch_required is True
     cycle = plan.supply_cycles[0]
     assert rec.notice == (cycle.id, SUPPLY_METER_2)
-    at = dt_util.as_local(H0 + timedelta(hours=1)).strftime("%H:%M")
+    # The notification outlives the hour it was written in: the moment names its day.
+    at = moment_label(H0 + timedelta(hours=1))
     assert rec.notice_message.startswith(f"Przełącz mieszkanie na licznik 2 do {at}")
     assert "powrót po horyzoncie planu" in rec.notice_message
     assert "oszczędność ~3,56 zł" in rec.notice_message
@@ -292,6 +294,7 @@ def test_a_planned_return_requires_the_switch_back_until_it_happens() -> None:
     assert rec.switch_required is True
     assert rec.notice == (_utc_id(switched), SUPPLY_VICTRON)
     assert "z powrotem na Victron" in rec.notice_message
+    assert f"od {moment_label(switched)}." in rec.notice_message
     assert rec.next_target == SUPPLY_VICTRON
     assert rec.next_cycle.running is True
 

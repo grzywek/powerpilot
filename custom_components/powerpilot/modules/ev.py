@@ -75,6 +75,7 @@ from ..const import (
 )
 from ..models import Forecast
 from ..profiles import WeeklyAccumulator
+from ..when import moment_label
 from .base import PowerPilotModule
 from .calendar import CalendarEvent, Trip, has_tag, is_trip_location, soc_tag
 
@@ -1367,7 +1368,7 @@ class EVModule(PowerPilotModule):
                 - (current_kwh - drain_before)
             )
             if need_kwh > achievable_kwh + 0.05:
-                label = target.label or target.deadline.isoformat()
+                label = target.label or moment_label(target.deadline)
                 out.append(
                     f"EV nie zdąży osiągnąć {target.target_soc:.0f}% przed "
                     f"„{label}” — brakuje "

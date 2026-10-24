@@ -116,6 +116,7 @@ from .supply_cycles import (
     recommendation,
     settle_cycles,
 )
+from .when import moment_label
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -754,7 +755,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 None,
                 None,
                 f"brak ceny pod Tarczę dla {len(uncapped)} h horyzontu (od "
-                f"{dt_util.as_local(uncapped[0].start).strftime('%d.%m %H:%M')}) — "
+                f"{moment_label(uncapped[0].start)}) — "
                 "źródło cen nie podaje składników ceny",
             )
 
@@ -777,7 +778,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 None,
                 f"brak estymaty cen dla {len(unpriced)} z {len(tail_slots)} h "
                 f"ogona miesiąca (od "
-                f"{dt_util.as_local(unpriced[0].start).strftime('%d.%m %H:%M')}) — "
+                f"{moment_label(unpriced[0].start)}) — "
                 "za krótka historia cen w archiwum",
             )
 

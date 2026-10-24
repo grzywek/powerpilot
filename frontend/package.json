@@ -6,7 +6,8 @@
   "description": "PowerPilot custom Home Assistant sidebar panel (Lit + esbuild).",
   "scripts": {
     "build": "node esbuild.mjs",
-    "watch": "node esbuild.mjs --watch"
+    "watch": "node esbuild.mjs --watch",
+    "test": "TZ=Europe/Warsaw node --test \"test/**/*.test.ts\""
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

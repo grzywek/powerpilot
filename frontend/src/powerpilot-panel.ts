@@ -10,6 +10,7 @@ import {
   PPE2_COLOR,
 } from "./palette";
 import "./flow-diagram";
+import { fmtTime, fmtWhen, fmtWhenRange } from "./when";
 import type { FlowTopology } from "./flow-diagram";
 
 interface PlanHour {
@@ -1253,16 +1254,6 @@ export class PowerPilotPanel extends LitElement {
     return state ? SUPPLY_LABEL[state] ?? state : "nieznane";
   }
 
-  /** "HH:MM" today, "DD.MM HH:MM" on another day. */
-  private _clock(iso: string | null | undefined): string {
-    if (!iso) return "—";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return iso;
-    const time = d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
-    if (d.toDateString() === new Date().toDateString()) return time;
-    return `${d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" })} ${time}`;
-  }
-
   private _pln(v: number | null | undefined): string {
     return v == null ? "—" : `${v.toFixed(2)} PLN`;
   }
@@ -1278,7 +1269,7 @@ export class PowerPilotPanel extends LitElement {
         <div class="check">
           Teraz: <b>${this._supplyLabel(supply.state)}</b>
           ${supply.since
-            ? html`<span class="muted">od ${this._clock(supply.since)}</span>`
+            ? html`<span class="muted">od ${fmtWhen(supply.since)}</span>`
             : nothing}
         </div>
         ${rec.reason
@@ -1326,11 +1317,11 @@ export class PowerPilotPanel extends LitElement {
       <div class="check">
         Następne przełączenie:
         ${rec.next_switch
-          ? html`<b>${this._clock(rec.next_switch)}</b> → ${this._supplyLabel(rec.next_target)}
+          ? html`<b>${fmtWhen(rec.next_switch)}</b> → ${this._supplyLabel(rec.next_target)}
               ${rec.next_target === "meter_2"
                 ? html`<span class="muted">
                     ${rec.next_return
-                      ? `powrót ok. ${this._clock(rec.next_return)}`
+                      ? `powrót ok. ${fmtWhen(rec.next_return)}`
                       : "powrót po horyzoncie planu"}
                   </span>`
                 : nothing}`
@@ -1341,8 +1332,8 @@ export class PowerPilotPanel extends LitElement {
             ${rec.cycles.map(
               (c) => html`<div class="supply-cycle">
                 <span>
-                  ${c.running ? html`<b>trwa</b> · ` : nothing}${this._clock(c.start)} →
-                  ${c.return ? this._clock(c.return) : "po horyzoncie"}
+                  ${c.running ? html`<b>trwa</b> · ` : nothing}${fmtWhen(c.start)} →
+                  ${c.return ? fmtWhen(c.return) : "po horyzoncie"}
                 </span>
                 <span class="muted">${c.hours.toFixed(1)} h · ${c.apartment_kwh.toFixed(1)} kWh</span>
                 <span>
@@ -1704,15 +1695,10 @@ export class PowerPilotPanel extends LitElement {
     const revs = hour?.revisions ?? [];
     const dropped = hour?.revisions_dropped ?? 0;
     if (!revs.length && !dropped && !hour?.ev_off_plan) return nothing;
-    const hm = (iso: string) => {
-      const d = new Date(iso);
-      return isNaN(d.getTime())
-        ? "—"
-        : d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
-    };
+    // The column header already names the hour and its day.
     return html`<div class="pv-note">
       ${revs.map(
-        (r) => html`<div>↻ ${hm(r.at)} przeliczono${r.why ? ` — ${r.why}` : ""}</div>`
+        (r) => html`<div>↻ ${fmtTime(r.at)} przeliczono${r.why ? ` — ${r.why}` : ""}</div>`
       )}
       ${dropped ? html`<div>… i ${dropped} dalszych zmian planu (limit zapisu)</div>` : nothing}
       ${hour?.ev_off_plan
@@ -1737,9 +1723,7 @@ export class PowerPilotPanel extends LitElement {
   }
 
   private _renderHoursCard(plan: Plan, current: PlanHour): TemplateResult {
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const range = (ms: number) =>
-      `${pad(new Date(ms).getHours())}:00–${pad(new Date(ms + 3600_000).getHours())}:00`;
+    const range = (ms: number) => fmtWhenRange(ms, ms + 3600_000);
 
     const curStart = new Date();
     curStart.setMinutes(0, 0, 0);
@@ -2449,14 +2433,7 @@ export class PowerPilotPanel extends LitElement {
             ? { bg: "#1f2937", fg: "#f3f4f6", border: "#374151" }
             : { bg: "#ffffff", fg: "#1f2937", border: "#d1d5db" };
           const fmt = (v: number) => v.toFixed(2);
-          const start = new Date(h.start);
-          const date = start.toLocaleString("pl-PL", {
-            weekday: "short",
-            day: "2-digit",
-            month: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-          });
+          const date = fmtWhen(h.start);
           const modeMeta = h.inverter_mode ? INVERTER_MODE_META[h.inverter_mode] : null;
           const modeStr = modeMeta ? `  •  falownik: ${modeMeta.label}` : "";
           // Planned charger runtime for hours with EV charging (full power,
@@ -2479,12 +2456,6 @@ export class PowerPilotPanel extends LitElement {
           // (event slot, departure/return incl. margins, distance, energy).
           const esc = (x: string) =>
             x.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
-          const fmtHM = (iso: string) => {
-            const d = new Date(iso);
-            return isNaN(d.getTime())
-              ? "—"
-              : d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
-          };
           const hourTs = new Date(h.start).getTime();
           const tripRows = this._chartTrips()
             .filter((t) => {
@@ -2503,7 +2474,7 @@ export class PowerPilotPanel extends LitElement {
               return (
                 `<div style="font-weight:500;font-size:11px;opacity:0.85;margin-top:3px">🚗 ${esc(t.label)}</div>` +
                 `<div style="font-weight:400;font-size:11px;opacity:0.75">` +
-                `zdarzenie ${fmtHM(t.event_start)}–${fmtHM(t.event_end)} · wyjazd ${fmtHM(t.depart)} · powrót do ${fmtHM(t.return_end)}` +
+                `zdarzenie ${fmtWhenRange(t.event_start, t.event_end)} · wyjazd ${fmtWhen(t.depart)} · powrót ${fmtWhen(t.return_end)}` +
                 `</div>` +
                 (facts
                   ? `<div style="font-weight:400;font-size:11px;opacity:0.75">${facts}</div>`
@@ -2522,14 +2493,7 @@ export class PowerPilotPanel extends LitElement {
           if (h.forecast) {
             // Surface the vintage the forecast came from (date + hour) so the
             // forecast-lead view shows which plan each prognoza line reflects.
-            const originStr = h.forecast_origin
-              ? new Date(h.forecast_origin).toLocaleString("pl-PL", {
-                  day: "2-digit",
-                  month: "2-digit",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })
-              : null;
+            const originStr = h.forecast_origin ? fmtWhen(h.forecast_origin) : null;
             const fcLabel =
               (h.partial ? "prognoza (godz.)" : "prognoza") +
               (originStr
@@ -2659,7 +2623,7 @@ export class PowerPilotPanel extends LitElement {
               .filter(Boolean)
               .join(" · ");
             return (
-              `<div style="opacity:0.85">↻ ${fmtHM(r.at)} przeliczono${why}</div>` +
+              `<div style="opacity:0.85">↻ ${fmtTime(r.at)} przeliczono${why}</div>` +
               `<div style="opacity:0.65;padding-left:14px">plan na resztę godziny: ${bits}</div>`
             );
           };
@@ -2748,9 +2712,7 @@ export class PowerPilotPanel extends LitElement {
     const made = new Date(pin.run_at).getTime();
     if (isNaN(from) || isNaN(to) || to <= from) return [];
     const color = "#8e44ad";
-    const d = new Date(isNaN(made) ? from : made);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const madeTxt = `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:00`;
+    const madeTxt = fmtWhen(isNaN(made) ? from : made);
     return [
       { x: from, x2: to, fillColor: color, opacity: 0.06 },
       {
@@ -3146,7 +3108,7 @@ export class PowerPilotPanel extends LitElement {
         followCursor: false,
         // NOTE: ApexCharts datetime tokens, not date-fns — "EEEE" would
         // render literally in the x-axis hover box.
-        x: { format: "dd.MM HH:mm" },
+        x: { formatter: (v: number) => fmtWhen(v) },
         // Custom HTML so price lines can show the energy/distribution split
         // that's encoded in the total. ApexCharts passes the data index of
         // the hovered point; we use it to look the slot back up.
@@ -3155,14 +3117,7 @@ export class PowerPilotPanel extends LitElement {
           if (!row) return "";
           const fmtPrice = (v: number | null) => (v == null ? "—" : v.toFixed(2));
           const fmt2 = (v: number | null) => (v == null ? "—" : v.toFixed(2));
-          const start = new Date(row.start);
-          const date = start.toLocaleString("pl-PL", {
-            weekday: "short",
-            day: "2-digit",
-            month: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-          });
+          const date = fmtWhen(row.start);
           // Price provenance badge (pewna/prognoza/szacowana), colored like
           // the line series and the Ceny tab.
           const ptMeta =
@@ -3223,21 +3178,9 @@ export class PowerPilotPanel extends LitElement {
     const selectedDay = this._pricesSelectedDay();
     const data = this._pricesData;
 
-    const fmtHour = (iso: string) => {
-      const d = new Date(iso);
-      return d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
-    };
-    const fmtStamp = (iso: string | null) => {
-      if (!iso) return "—";
-      const d = new Date(iso);
-      if (isNaN(d.getTime())) return "—";
-      return d.toLocaleString("pl-PL", {
-        day: "2-digit",
-        month: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-    };
+    // Rows of the selected day: the header above the table names it.
+    const fmtHour = (iso: string) => fmtTime(iso);
+    const fmtStamp = (iso: string | null) => fmtWhen(iso);
     const fmtPrice = (v: number | null) => (v == null ? "—" : v.toFixed(2));
     const fmtDayLabel = (iso: string) => {
       const d = new Date(iso + "T12:00:00");
@@ -3463,18 +3406,6 @@ export class PowerPilotPanel extends LitElement {
   // ------------------------------------------------------------------
   // Simulations (forecast accuracy: consumption + price)
   // ------------------------------------------------------------------
-  private _fmtRun(iso: string | null): string {
-    if (!iso) return "—";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "—";
-    return d.toLocaleString("pl-PL", {
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  }
-
   private _renderSimulations(): TemplateResult {
     const acc = this._accuracy;
     if (!acc) {
@@ -3559,7 +3490,7 @@ export class PowerPilotPanel extends LitElement {
       yaxis: { title: { text: "PLN/kWh", style: { color: fg } }, labels: { style: { colors: fg } }, decimalsInFloat: 2 },
       legend: { labels: { colors: fg } },
       grid: { borderColor: grid },
-      tooltip: { theme: dark ? "dark" : "light", x: { format: "dd.MM HH:mm" } },
+      tooltip: { theme: dark ? "dark" : "light", x: { formatter: (v: number) => fmtWhen(v) } },
     };
   }
 
@@ -3582,7 +3513,7 @@ export class PowerPilotPanel extends LitElement {
       yaxis: { title: { text: "kWh", style: { color: fg } }, labels: { style: { colors: fg } }, decimalsInFloat: 2 },
       legend: { labels: { colors: fg } },
       grid: { borderColor: grid },
-      tooltip: { theme: dark ? "dark" : "light", x: { format: "dd.MM HH:mm" } },
+      tooltip: { theme: dark ? "dark" : "light", x: { formatter: (v: number) => fmtWhen(v) } },
     };
   }
 
@@ -3623,17 +3554,13 @@ export class PowerPilotPanel extends LitElement {
     return name || entityId;
   }
 
-  /** Merge consecutive 1-hour forced slots into "HH:MM–HH:MM" ranges. */
+  /** Merge consecutive 1-hour forced slots into ranges ("jutro 13:00–15:00"). */
   private _evForcedRanges(hours: string[]): string[] {
     const sorted = [...hours]
       .map((iso) => new Date(iso))
       .filter((d) => !isNaN(d.getTime()))
       .sort((a, b) => a.getTime() - b.getTime());
     if (!sorted.length) return [];
-    const fmt = (d: Date) =>
-      d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
-    const fmtDay = (d: Date) =>
-      d.toLocaleDateString("pl-PL", { day: "2-digit", month: "2-digit" });
     const ranges: string[] = [];
     let start = sorted[0];
     let prev = sorted[0];
@@ -3643,7 +3570,7 @@ export class PowerPilotPanel extends LitElement {
         cur && cur.getTime() - prev.getTime() === 3600_000;
       if (!contiguous) {
         const end = new Date(prev.getTime() + 3600_000);
-        ranges.push(`${fmtDay(start)} ${fmt(start)}–${fmt(end)}`);
+        ranges.push(fmtWhenRange(start, end));
         if (cur) start = cur;
       }
       prev = cur;
@@ -3713,7 +3640,7 @@ export class PowerPilotPanel extends LitElement {
                       >`
                     : nothing}
                   <span class="muted">
-                    ${this._fmtRun(t.depart)} → ${this._fmtRun(t.return_end)}
+                    ${fmtWhen(t.depart)} → ${fmtWhen(t.return_end)}
                     ${t.distance_km != null
                       ? ` · ${t.distance_km.toFixed(0)} km w jedną stronę`
                       : " · brak dystansu (Google Maps)"}
@@ -3728,7 +3655,7 @@ export class PowerPilotPanel extends LitElement {
               ${ev.targets.map(
                 (t) => html`<div class="check">
                   <span class="dot ok"></span>${t.source === "trip" ? "min " : ""}${t.target_soc.toFixed(0)}% do
-                  <b>${this._fmtRun(t.deadline)}</b>
+                  <b>${fmtWhen(t.deadline)}</b>
                   ${t.label ? html`<span class="muted">${t.label}</span>` : nothing}
                   ${t.calendar
                     ? html`<span class="cal-src"
@@ -3764,7 +3691,7 @@ export class PowerPilotPanel extends LitElement {
         </div>
         <div class="check">
           Start ładowania:
-          <b>${ev.control.charge_start ? this._fmtRun(ev.control.charge_start) : "—"}</b> ·
+          <b>${ev.control.charge_start ? fmtWhen(ev.control.charge_start) : "—"}</b> ·
           Limit SoC: <b>${ev.control.soc_limit !== null ? `${ev.control.soc_limit}%` : "—"}</b> ·
           Minuty w godzinie:
           <b>${ev.control.charge_minutes !== null ? `${ev.control.charge_minutes} min` : "—"}</b>
@@ -3902,7 +3829,7 @@ export class PowerPilotPanel extends LitElement {
         <div class="card flow-stage">
           <div class="card-title">5 · Optymalizator</div>
           <div class="check">
-            Plan z <b>${opt.created_at ? this._fmtRun(opt.created_at) : "—"}</b> ·
+            Plan z <b>${opt.created_at ? fmtWhen(opt.created_at) : "—"}</b> ·
             horyzont <b>${opt.horizon_hours} h</b> ·
             koszt horyzontu <b>${n2(opt.total_cost)} PLN</b>
           </div>

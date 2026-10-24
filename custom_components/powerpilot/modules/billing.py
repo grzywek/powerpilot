@@ -81,6 +81,7 @@ from ..models import (
     price_cap_problems,
     price_cap_terms_for_day,
 )
+from ..when import moment_label
 from .base import PowerPilotModule
 
 _LOGGER = logging.getLogger(__name__)
@@ -811,7 +812,7 @@ class BillingModule(PowerPilotModule):
         hour = month_start
         while hour < hour_now:
             expected += 1
-            label = dt_util.as_local(hour).strftime("%d.%m %H:%M")
+            label = moment_label(hour)
             await account(label, hour, hours.completed(hour), True)
             hour += _HOUR
 
@@ -820,7 +821,7 @@ class BillingModule(PowerPilotModule):
         # once its first bucket is overdue, not while it is being compiled.
         if now > hour_now:
             expected += 1
-            label = dt_util.as_local(hour_now).strftime("%d.%m %H:%M")
+            label = moment_label(hour_now)
             await account(f"{label} (bieżąca)", hour_now, hours.running(hour_now, now), False)
 
         if gaps > len(missing):

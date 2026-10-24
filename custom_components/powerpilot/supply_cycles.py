@@ -39,6 +39,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import SUPPLY_METER_2, SUPPLY_VICTRON
 from .models import Plan, SupplyCycle, SupplyPlanning
+from .when import moment_label
 
 # Two optima of one model differ by up to the MIP's absolute gap
 # (``mip_abs_gap`` 1e-7 per solve); a cycle whose saving equals the threshold
@@ -227,13 +228,6 @@ class SupplyRecommendation:
         }
 
 
-def _clock(moment: datetime, reference: datetime) -> str:
-    local = dt_util.as_local(moment)
-    if local.date() == dt_util.as_local(reference).date():
-        return local.strftime("%H:%M")
-    return local.strftime("%d.%m %H:%M")
-
-
 def _pln(value: float) -> str:
     return f"{value:.2f}".replace(".", ",")
 
@@ -290,7 +284,7 @@ def recommendation(
         cycle = next(c for c in cycles if at in c.victron_hours)
         rec.notice = (cycle.id, SUPPLY_METER_2)
         back = (
-            f"powrót ok. {_clock(cycle.planned_return, at)}"
+            f"powrót ok. {moment_label(cycle.planned_return)}"
             if cycle.planned_return is not None
             else "powrót po horyzoncie planu"
         )
@@ -301,7 +295,7 @@ def recommendation(
         )
         rec.notice_title = "🏠 PowerPilot: przełącz mieszkanie na licznik 2"
         rec.notice_message = (
-            f"Przełącz mieszkanie na licznik 2 do {_clock(at, now)}, {back}{saving}."
+            f"Przełącz mieszkanie na licznik 2 do {moment_label(at)}, {back}{saving}."
         )
     else:
         if last_transition_at is None:
@@ -309,8 +303,8 @@ def recommendation(
         rec.notice = (_cycle_id(last_transition_at), SUPPLY_VICTRON)
         rec.notice_title = "🏠 PowerPilot: przełącz mieszkanie na Victron"
         rec.notice_message = (
-            f"Przełącz mieszkanie z powrotem na Victron (PPE 1) do {_clock(at, now)} — "
-            f"koniec cyklu na liczniku 2 od {_clock(last_transition_at, now)}."
+            f"Przełącz mieszkanie z powrotem na Victron (PPE 1) do {moment_label(at)} — "
+            f"koniec cyklu na liczniku 2 od {moment_label(last_transition_at)}."
         )
     return rec
 

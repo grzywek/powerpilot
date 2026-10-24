@@ -126,6 +126,7 @@ from .models import (
     SupplyPlanning,
 )
 from .modules.ev import EVRequest
+from .when import moment_label
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2258,7 +2259,7 @@ class Optimizer:
                         "(%.1f%% > sufit %.1f%%) — ta energia nie trafiłaby do "
                         "auta, a byłaby wyceniona i obciążyłaby plan domu.",
                         level - ceiling_kwh,
-                        dt_util.as_local(hour).strftime("%d.%m %H:%M"),
+                        moment_label(hour),
                         level / battery_kwh * 100.0,
                         ev_request.charge_ceiling_soc,
                     )

@@ -42,6 +42,7 @@ from ..const import (
     STORAGE_VERSION_PRICE_ARCHIVE,
 )
 from ..models import Forecast, PriceCapTerms
+from ..when import moment_label
 from .base import PowerPilotModule
 from .price_sources import (
     PradcastPriceSource,
@@ -408,7 +409,7 @@ class PriceModule(PowerPilotModule):
         ):
             next_fetch = self._last_source_fetch + interval
             self.log_info(
-                f"Ceny z pamięci podręcznej (następne pobranie ~{next_fetch.strftime('%H:%M')}). "
+                f"Ceny z pamięci podręcznej (następne pobranie ~{moment_label(next_fetch)}). "
                 f"Archiwum: {len(self.archive)} godzin.",
                 extra={
                     "cached": True,

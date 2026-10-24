@@ -22,7 +22,7 @@ bez stawiania serwera:
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-test.txt
-pytest -q
+pytest -q          # needs node on PATH: it also runs the panel's unit tests
 ```
 
 To realny dowód, że integracja „wstaje” i tworzy encje
@@ -135,6 +135,7 @@ cd frontend
 npm install
 npm run build      # lub: npm run watch
 npx tsc --noEmit   # sprawdzenie typów
+npm test           # panel unit tests (frontend/test); pytest runs them too
 ```
 
 Dane do panelu płyną przez WebSocket API (`powerpilot/plan`, `powerpilot/status`,

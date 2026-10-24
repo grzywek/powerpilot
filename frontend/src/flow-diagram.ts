@@ -8,6 +8,7 @@ import {
   PPE1_COLOR,
   PPE2_COLOR,
 } from "./palette";
+import { fmtWhen, fmtWhenRange } from "./when";
 
 /** A sensor's state now (powerpilot/flow → topology). */
 export interface LiveSensor {
@@ -520,7 +521,7 @@ export class PowerPilotFlowDiagram extends LitElement {
         <div class="sub">
           teraz: <b>${SUPPLY_LABEL[t.supply.state ?? "unknown"] ?? "nieznane"}</b>
           ${t.supply.since
-            ? html` od ${new Date(t.supply.since).toLocaleString("pl-PL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}`
+            ? html` od ${fmtWhen(t.supply.since)}`
             : nothing}
         </div>
       `,
@@ -689,10 +690,9 @@ export class PowerPilotFlowDiagram extends LitElement {
     if (!t) return html``;
     const hour = new Date(t.hour);
     const end = new Date(hour.getTime() + 3600_000);
-    const hh = (d: Date) => d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
     return html`
       <div class="note">
-        Odczyty kWh i wszystkie rachunki: ostatnia pełna godzina <b>${hh(hour)}–${hh(end)}</b> ·
+        Odczyty kWh i wszystkie rachunki: ostatnia pełna godzina <b>${fmtWhenRange(hour, end)}</b> ·
         moc (W): teraz · kolory urządzeń jak na wykresie zużycia
       </div>
       <div class="wrap">

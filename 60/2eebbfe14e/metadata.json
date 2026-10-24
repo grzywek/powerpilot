@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "602eebbfe14e",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/adr/002-missed-plan-actions.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/60/2eebbfe14e/0/metadata.json",
+      "transcript": "/60/2eebbfe14e/0/full.jsonl",
+      "compact_transcript": "/60/2eebbfe14e/0/transcript.jsonl",
+      "content_hash": "/60/2eebbfe14e/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 356,
+    "cache_creation_tokens": 458731,
+    "cache_read_tokens": 58308856,
+    "output_tokens": 210959,
+    "api_call_count": 178
+  }
+}

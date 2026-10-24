@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "602eebbfe14e",
+  "session_id": "da7f400a-e497-401f-83b1-66e73e2b780d",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-24T14:32:12.554017Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "save_step_count": 1,
+  "files_touched": [
+    "docs/adr/002-missed-plan-actions.md"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "0a216d26a18c",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 356,
+    "cache_creation_tokens": 458731,
+    "cache_read_tokens": 58308856,
+    "output_tokens": 210959,
+    "api_call_count": 178
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-24T14:32:12.399988Z",
+    "agent_lines": 98,
+    "agent_removed": 0,
+    "human_added": 2055,
+    "human_modified": 4,
+    "human_removed": 0,
+    "total_committed": 2157,
+    "total_lines_changed": 2272,
+    "agent_percentage": 4.313380281690141,
+    "metric_version": 2
+  }
+}

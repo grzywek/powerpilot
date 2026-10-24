@@ -32,14 +32,29 @@ frontend card (HACS → Frontend).
 PowerPilot also ships a **custom sidebar panel** (Lit + TypeScript, ApexCharts)
 that registers itself automatically — a **PowerPilot** entry appears in the HA
 sidebar with ten tabs: *Przegląd* (energy and price charts, the current control,
-the apartment-supply card), *Ceny* (the hourly price archive), *Symulacje*
+the plan actions that were not carried out, the apartment-supply card), *Ceny* (the hourly price archive), *Symulacje*
 (forecast accuracy against what happened), *Przepływ* (a diagram of the installation — what is behind what, every sensor's reading and the arithmetic of each computed value — then the live pipeline),
 *Sprawność* (measured vs configured efficiencies), *Status* (what works and
 what is missing), *Diagnostyka*, *Profile* (learned consumption profiles),
 *Logi* and *Debug* (a full state export). It is backed by a WebSocket API
-(`powerpilot/plan`, `status`, `log`, `profiles`, `series`, `prices`,
+(`powerpilot/plan`, `status`, `log`, `profiles`, `series`, `misses`, `prices`,
 `accuracy`, `flow`, `efficiency`, `debug`, `diagnostics`,
-`consumption_stats`), not by entity attributes. See
+`consumption_stats`), not by entity attributes. Every moment it shows names its
+day ("dziś 15:00", "jutro 07:00", "pon 26.10 21:00").
+
+#### Plan actions not carried out
+
+PowerPilot has no actuator, and the plan is recomputed every hour, so an action
+it asked for and nobody took would disappear with the next plan. The card
+*Niewykonane zalecenia planu* keeps them: the car left unplugged at home in an
+hour the plan charged it, the apartment left on the other meter than the plan
+asked for, the inverter not following the planned grid mode (the watchdog's
+alarm), and the car charging in an hour no plan asked for. Each record says
+when, what the plan asked for, what happened and, for the first two, what it
+cost: the plan's spend in reality minus the same inputs solved with the ask
+followed, scaled by the part of the hour that stayed missed. The ledger is never
+pruned nor cleared ("Wyczyść dane" keeps it); see
+[ADR 002](docs/adr/002-missed-plan-actions.md). See
 [docs/INSTALL_AND_VERIFY.md](docs/INSTALL_AND_VERIFY.md) for how to verify and
 [the frontend build notes](docs/INSTALL_AND_VERIFY.md#budowanie-frontendu-dla-deweloperów).
 

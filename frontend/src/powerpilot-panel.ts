@@ -323,6 +323,8 @@ interface SeriesHour {
   /** Realized EV charging that neither the hour's plan nor any of its revisions
    *  asked for — i.e. the charger ran off-plan. */
   ev_off_plan?: boolean | null;
+  /** The ledger's missed plan actions of this hour (ADR 002). */
+  misses?: MissRecord[] | null;
   battery_charge_kwh: number | null;
   battery_discharge_kwh: number | null;
   charge_power_kw: number | null;
@@ -365,6 +367,61 @@ interface PlanRevision {
   pw: number | null;
   grid: number | null;
   mode: string | null;
+}
+
+type MissKind = "ev_unplugged" | "supply" | "ess" | "ev_off_plan";
+
+/** One missed plan action (powerpilot/misses): what the plan asked for, what
+ *  happened, what it cost. Open until its hour settles, then frozen. */
+interface MissRecord {
+  id: string;
+  kind: MissKind;
+  /** The clock hour (an ESS episode: the hour it began in). */
+  hour: string;
+  found_at: string;
+  asked: {
+    at?: string;
+    ev_kwh?: number | null;
+    ev_minutes?: number | null;
+    supply?: SupplyState | null;
+    mode?: string | null;
+    charge_power_kw?: number | null;
+    price_kwh?: number | null;
+  };
+  actual: {
+    plugged?: boolean;
+    home?: boolean;
+    ev_kwh?: number | null;
+    supply?: SupplyState | null;
+    switched_at?: string | null;
+    reason?: string | null;
+    last_seen?: string | null;
+    until?: string | null;
+  };
+  /** The cost basis while open: reality minus the plan followed, PLN. */
+  cf: { delta_pln: number | null; ev_kwh: number | null; error: string | null } | null;
+  cost_pln: number | null;
+  note: string | null;
+  settled_at: string | null;
+}
+
+interface MissTotals {
+  count: number;
+  cost_pln: number;
+  costed: number;
+  open: number;
+  by_kind: Partial<Record<MissKind, number>>;
+}
+
+interface MissesData {
+  records: MissRecord[];
+  days: number | null;
+  total_records: number;
+  /** The oldest hour on record. */
+  since: string | null;
+  totals: { "7": MissTotals; "30": MissTotals };
+  store_error: string | null;
+  watched: Record<MissKind, boolean>;
 }
 
 interface TipSide {
@@ -703,6 +760,25 @@ const TRIP_FILL = { travel: "#9ca3af", event: "#4b5563" };
 const METER2_FILL = "#0d9488";
 const METER2_OPACITY = { actual: 0.18, planned: 0.08 };
 
+/** Missed plan action kinds: icon + what was not done, as the card names them. */
+const MISS_LABEL: Record<MissKind, string> = {
+  ev_unplugged: "🚗 auto niepodłączone",
+  supply: "🏠 mieszkanie nie przełączone",
+  ess: "🔋 falownik nie wykonał planu",
+  ev_off_plan: "🚗 ładowanie poza planem",
+};
+
+/** Why a kind cannot be found with this configuration (the card says so). */
+const MISS_UNWATCHED: Record<MissKind, string> = {
+  ev_unplugged: "niepodłączone auto (brak czujnika wtyczki EV)",
+  supply: "przełączanie mieszkania (wykrywanie zasilania lub rekomendacje wyłączone)",
+  ess: "wykonanie planu ESS (brak czujnika rozładowania baterii)",
+  ev_off_plan: "ładowanie poza planem (brak czujnika energii ładowania EV)",
+};
+
+/** How many records the card lists before "pokaż wszystkie". */
+const MISSES_SHOWN = 8;
+
 const SUPPLY_LABEL: Record<SupplyState, string> = {
   victron: "Victron (PPE 1)",
   meter_2: "licznik 2 (PPE 2)",
@@ -743,6 +819,10 @@ export class PowerPilotPanel extends LitElement {
   @state() private _statsKey: string | null = null;
   @state() private _series: Series | null = null;
   @state() private _error: string | null = null;
+  /** Missed plan actions (powerpilot/misses), 30 days or the whole ledger. */
+  @state() private _misses: MissesData | null = null;
+  @state() private _missesAll = false;
+  @state() private _missesExpanded = false;
 
   /** Debug dump state (generated on demand from the Debug tab). */
   @state() private _diagnostics: Diagnostics | null = null;
@@ -845,7 +925,7 @@ export class PowerPilotPanel extends LitElement {
       // history; the chart clips it via its own x-axis bounds, and nothing
       // sums over series.hours, so it changes no figure on screen.
       const seriesStart = new Date(start.getTime() - 3600_000);
-      const [plan, status, log, profiles, series] = await Promise.all([
+      const [plan, status, log, profiles, series, misses] = await Promise.all([
         this.hass.callWS({ type: "powerpilot/plan" }),
         this.hass.callWS({ type: "powerpilot/status" }),
         this.hass.callWS({ type: "powerpilot/log" }),
@@ -861,8 +941,10 @@ export class PowerPilotPanel extends LitElement {
           // Exact pin beats the lead: show the plan in force at that moment.
           ...(this._forecastRunAt ? { forecast_run_at: this._forecastRunAt } : {}),
         }),
+        this.hass.callWS({ type: "powerpilot/misses", days: this._missesAll ? 0 : 30 }),
       ]);
       this._plan = plan;
+      this._misses = misses;
       this._status = status;
       this._log = log?.events ?? [];
       this._profiles = profiles;
@@ -1212,6 +1294,7 @@ export class PowerPilotPanel extends LitElement {
     }
     return html`
       ${this._renderHoursCard(plan, current)}
+      ${this._misses ? this._renderMissesCard(this._misses) : nothing}
       ${this._renderNavBar()}
       <div class="card">
         <div class="card-title">
@@ -1694,15 +1777,170 @@ export class PowerPilotPanel extends LitElement {
   private _revisionNote(hour: SeriesHour | null | undefined): TemplateResult | typeof nothing {
     const revs = hour?.revisions ?? [];
     const dropped = hour?.revisions_dropped ?? 0;
-    if (!revs.length && !dropped && !hour?.ev_off_plan) return nothing;
+    const misses = hour?.misses ?? [];
+    if (!revs.length && !dropped && !hour?.ev_off_plan && !misses.length) return nothing;
     // The column header already names the hour and its day.
     return html`<div class="pv-note">
       ${revs.map(
         (r) => html`<div>↻ ${fmtTime(r.at)} przeliczono${r.why ? ` — ${r.why}` : ""}</div>`
       )}
       ${dropped ? html`<div>… i ${dropped} dalszych zmian planu (limit zapisu)</div>` : nothing}
-      ${hour?.ev_off_plan
+      ${hour?.ev_off_plan && !misses.some((m) => m.kind === "ev_off_plan")
         ? html`<div class="pv-note-alert">⚠ ładowanie EV poza planem</div>`
+        : nothing}
+      ${misses.map(
+        (m) => html`<div class="pv-note-alert">
+          ⚠ ${MISS_LABEL[m.kind] ?? m.kind}: ${this._missAsked(m)}${this._missCostShort(m)}
+        </div>`,
+      )}
+    </div>`;
+  }
+
+  // ------------------------------------------------------------------
+  // Missed plan actions (ADR 002)
+  // ------------------------------------------------------------------
+  /** What the plan asked for, in the card's words. */
+  private _missAsked(m: MissRecord): string {
+    const a = m.asked;
+    switch (m.kind) {
+      case "ev_unplugged":
+        return (
+          `plan: ładowanie EV ${this._fmtNum(a.ev_kwh, 1)} kWh` +
+          (a.ev_minutes != null ? ` (${a.ev_minutes} min)` : "") +
+          (a.price_kwh != null ? ` po ${this._fmtNum(a.price_kwh, 2)} PLN/kWh` : "")
+        );
+      case "supply":
+        return `plan: mieszkanie na ${this._supplyLabel(a.supply)}`;
+      case "ess": {
+        const mode = a.mode ? INVERTER_MODE_META[a.mode]?.label ?? a.mode : "—";
+        return `plan: ${mode}${a.charge_power_kw ? ` ${this._fmtNum(a.charge_power_kw, 1)} kW` : ""}`;
+      }
+      case "ev_off_plan":
+        return "plan: bez ładowania EV";
+    }
+    return "";
+  }
+
+  /** What actually happened. */
+  private _missActual(m: MissRecord): string {
+    const r = m.actual;
+    const settled = m.settled_at != null;
+    switch (m.kind) {
+      case "ev_unplugged":
+        return (
+          "było: auto w domu, kabel odłączony" +
+          (settled && r.ev_kwh != null ? ` · naładowano ${this._fmtNum(r.ev_kwh, 1)} kWh` : "")
+        );
+      case "supply":
+        return (
+          `było: ${this._supplyLabel(r.supply)}` +
+          (r.switched_at
+            ? ` · przełączono ${fmtWhen(r.switched_at)}`
+            : settled
+              ? " · bez przełączenia do końca godziny"
+              : "")
+        );
+      case "ess":
+        return (
+          `było: ${r.reason ?? "plan nie był wykonywany"}` +
+          (r.until ? ` · do ${fmtWhen(r.until)}` : " · trwa")
+        );
+      case "ev_off_plan":
+        return `było: naładowano ${this._fmtNum(r.ev_kwh, 1)} kWh`;
+    }
+    return "";
+  }
+
+  /** The cost: settled, provisional while the hour runs, or why there is none. */
+  private _missCost(m: MissRecord): TemplateResult {
+    if (m.settled_at != null) {
+      if (m.cost_pln == null) return html`<span class="muted">${m.note ?? "koszt nieznany"}</span>`;
+      return m.cost_pln >= 0
+        ? html`koszt <b>${this._pln(m.cost_pln)}</b>`
+        : html`<span title="Do tej godziny wykonanie planu kosztowałoby więcej"
+            >taniej o <b>${this._pln(-m.cost_pln)}</b></span
+          >`;
+    }
+    if (m.kind === "ess") return html`<span class="muted">${m.note ?? "trwa"}</span>`;
+    if (m.cf?.delta_pln != null) {
+      const d = m.cf.delta_pln;
+      return html`<span class="muted"
+        >${d >= 0 ? `wstępnie do ${this._pln(d)}` : `wstępnie taniej o ${this._pln(-d)}`} ·
+        rozliczenie po godzinie</span
+      >`;
+    }
+    return html`<span class="muted">${m.cf?.error ? `bez kosztu: ${m.cf.error}` : "liczę koszt…"}</span>`;
+  }
+
+  private _missCostShort(m: MissRecord): string {
+    if (m.cost_pln != null) return ` · ${m.cost_pln >= 0 ? "koszt" : "taniej o"} ${this._pln(Math.abs(m.cost_pln))}`;
+    const d = m.settled_at == null ? m.cf?.delta_pln : null;
+    if (d != null) return d >= 0 ? ` · wstępnie do ${this._pln(d)}` : ` · wstępnie taniej o ${this._pln(-d)}`;
+    return "";
+  }
+
+  /** When: the hour (with its day) for hourly kinds, the episode for ESS. */
+  private _missWhen(m: MissRecord): string {
+    if (m.kind === "ess") return fmtWhen(m.found_at);
+    const start = new Date(m.hour).getTime();
+    return fmtWhenRange(start, start + 3600_000);
+  }
+
+  private _renderMissesCard(data: MissesData): TemplateResult {
+    const t7 = data.totals["7"];
+    const t30 = data.totals["30"];
+    const total = (t: MissTotals, label: string) =>
+      html`<span
+        >${label}: <b>${t.count}</b>${t.costed
+          ? html` · <b>${this._pln(t.cost_pln)}</b>${t.costed < t.count
+                ? html` <span class="muted">(policzone ${t.costed} z ${t.count})</span>`
+                : nothing}`
+          : nothing}</span
+      >`;
+    const unwatched = (Object.keys(MISS_UNWATCHED) as MissKind[]).filter((k) => !data.watched?.[k]);
+    const records = this._missesExpanded ? data.records : data.records.slice(0, MISSES_SHOWN);
+    return html`<div class="card">
+      <div class="card-title">⚠ Niewykonane zalecenia planu</div>
+      ${data.store_error
+        ? html`<div class="check"><span class="dot bad"></span>${data.store_error}</div>`
+        : nothing}
+      <div class="check miss-totals">${total(t7, "7 dni")} ${total(t30, "30 dni")}</div>
+      ${records.length
+        ? html`<div class="miss-list">
+            ${records.map(
+              (m) => html`<div class=${"miss-row" + (m.settled_at ? "" : " open")}>
+                <div class="miss-head">
+                  <span class="miss-when">${this._missWhen(m)}</span>
+                  <span class="miss-kind">${MISS_LABEL[m.kind] ?? m.kind}</span>
+                  <span class="miss-cost">${this._missCost(m)}</span>
+                </div>
+                <div class="miss-detail">${this._missAsked(m)} · ${this._missActual(m)}</div>
+              </div>`,
+            )}
+          </div>`
+        : html`<div class="check muted">
+            ${this._missesAll ? "Brak zapisanych pominięć." : "Brak pominięć w ostatnich 30 dniach."}
+          </div>`}
+      <div class="check">
+        ${data.records.length > MISSES_SHOWN
+          ? html`<button class="nav-btn" @click=${() => (this._missesExpanded = !this._missesExpanded)}>
+              ${this._missesExpanded ? "zwiń" : `pokaż wszystkie (${data.records.length})`}
+            </button>`
+          : nothing}
+        <button
+          class="nav-btn ${this._missesAll ? "active" : ""}"
+          @click=${() => {
+            this._missesAll = !this._missesAll;
+            this._refresh();
+          }}
+          title="Rejestr nie jest nigdy czyszczony"
+        >
+          ${this._missesAll ? "ostatnie 30 dni" : `cała historia (${data.total_records})`}
+        </button>
+        ${data.since ? html`<span class="muted">rejestr od ${fmtWhen(data.since)}</span>` : nothing}
+      </div>
+      ${unwatched.length
+        ? html`<div class="check muted">Nie są wykrywane: ${unwatched.map((k) => MISS_UNWATCHED[k]).join("; ")}.</div>`
         : nothing}
     </div>`;
   }
@@ -4916,6 +5154,40 @@ export class PowerPilotPanel extends LitElement {
       align-items: center;
       gap: 8px;
       padding: 4px 0;
+    }
+    .miss-totals {
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .miss-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin: 4px 0;
+    }
+    .miss-row {
+      padding: 4px 8px;
+      border-left: 3px solid var(--warning-color, #f9a825);
+    }
+    .miss-row.open {
+      border-left-style: dashed;
+    }
+    .miss-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 2px 12px;
+    }
+    .miss-when,
+    .miss-kind {
+      font-weight: 600;
+    }
+    .miss-cost {
+      margin-left: auto;
+    }
+    .miss-detail {
+      font-size: 13px;
+      color: var(--secondary-text-color);
     }
     .supply-cycles {
       display: flex;

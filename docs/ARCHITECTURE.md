@@ -70,7 +70,11 @@ carried as a **fraction** (`EVRequest.hour_fraction`), so a 13:40 departure keep
 hour's yield and its charging minutes by the fraction; for the running hour the
 value already folds in the minutes elapsed. The RETURN hour stays unavailable —
 its free minutes sit at the end of the hour, out of reach of a charger started at
-the top of it.
+the top of it. A departure hour keeps its drive drain even while the car is on
+the cable: only an hour the plug *re-opened* loses it, because being plugged in
+now says nothing about the minutes after departure. Each leg's energy is bucketed
+by the minutes driven in each hour, so that drain is the few minutes before the
+next hour, not an equal share of the leg.
 
 ### Vintage and plan revisions
 One snapshot of the inputs + plan is persisted per clock hour (a **vintage**),

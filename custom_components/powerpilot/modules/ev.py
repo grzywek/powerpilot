@@ -104,12 +104,23 @@ def _hours_between(start: datetime, end: datetime) -> list[datetime]:
 
 
 def _spread_energy(start: datetime, end: datetime, kwh: float) -> dict[datetime, float]:
-    """Spread ``kwh`` evenly across the hour buckets of ``[start, end)``."""
+    """Spread ``kwh`` over the hour buckets of ``[start, end)`` by time spent in each.
+
+    Driving is taken as steady, so a leg leaving at 10:54 puts six minutes'
+    worth into the 10:00 bucket — an equal share per bucket put a third of a
+    75-minute leg there and bent the SoC forecast out of shape.
+    """
     if kwh <= 0:
         return {}
-    hours = _hours_between(start, end)
-    per_hour = kwh / len(hours)
-    return {hour: per_hour for hour in hours}
+    if end <= start:
+        return {_hour_floor(start): kwh}
+    total = (end - start).total_seconds()
+    return {
+        hour: kwh
+        * (min(end, hour + timedelta(hours=1)) - max(start, hour)).total_seconds()
+        / total
+        for hour in _hours_between(start, end)
+    }
 
 
 def _remaining_leg(
@@ -1086,6 +1097,7 @@ class EVModule(PowerPilotModule):
         # re-plans the moment it does; each cycle re-evaluates this hour.
         now_hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
         chargeable = self.chargeable_now()
+        reopened = False
         if chargeable is False:
             available_hours.discard(now_hour)
         elif (
@@ -1108,6 +1120,7 @@ class EVModule(PowerPilotModule):
             # being plugged in right now says nothing about staying past 13:40.
             available_hours.add(now_hour)
             self._partial_hours.pop(now_hour, None)
+            reopened = True
 
         # Fractions only mean anything for hours that survived as available.
         partial_hours = {
@@ -1116,11 +1129,16 @@ class EVModule(PowerPilotModule):
             if hour in available_hours
         }
 
-        # A car sitting on the cable at home is not on the road, whatever the
-        # calendar predicted for this hour — its drive drain would otherwise
-        # pull the projected SoC down while the car demonstrably charges.
+        # A car sitting on the cable in an hour the calendar wrote off as away
+        # is not on the road — that hour's drive drain would otherwise pull the
+        # projected SoC down while the car demonstrably charges. Only such a
+        # re-opened hour loses it: in the hour the car is still due to leave
+        # in, the plug says nothing about the minutes after departure, and
+        # dropping that drain deleted real driving (2026-10-24: 7.2 kWh of a
+        # 10:54 departure vanished, so a trip ending at 11 % with a 10 %
+        # reserve was forecast to leave the car at 20 %).
         drain = dict(self._trip_drain)
-        if chargeable is True:
+        if reopened:
             drain.pop(now_hour, None)
 
         # Explicit keyword plans take over routine sizing; automatic trip

@@ -945,6 +945,15 @@ def test_spread_energy_sub_hour_leg_lands_on_start_hour() -> None:
     assert list(out.keys())[0] == BASE + timedelta(hours=2)
 
 
+def test_spread_energy_weights_each_hour_by_the_minutes_driven_in_it() -> None:
+    """A 76-minute leg from 10:54 drives 6 minutes in the 10:00 hour, not a third."""
+    start = BASE + timedelta(hours=10, minutes=54)
+    out = _spread_energy(start, start + timedelta(minutes=76), 7.6)
+    assert {
+        int((h - BASE).total_seconds() // 3600): round(kwh, 6) for h, kwh in out.items()
+    } == {10: 0.6, 11: 6.0, 12: 1.0}
+
+
 # ---------------------------------------------------------------------------
 # get_request wiring
 # ---------------------------------------------------------------------------
@@ -1666,6 +1675,50 @@ def test_still_plugged_drops_the_running_hour_drive_drain() -> None:
 
     assert now_hour not in req.drain_kwh
     assert req.drain_kwh == {later: 3.0}
+
+
+def test_still_plugged_keeps_the_drive_of_a_departure_later_this_hour(
+    freezer,
+) -> None:
+    """Incident 2026-10-24: on the cable at 10:38, leaving at 10:54 for a
+    round trip that ends at 11 % with a 10 % reserve. A third of the outbound
+    leg was bucketed into the 10:00 hour and the plug then dropped that hour's
+    drain, so 7.2 kWh of driving vanished and the plan left the car at 20 %
+    after the trip — read as an EV minimum of 20 %. Being plugged in now says
+    nothing about the minutes after departure."""
+    now_hour = BASE + timedelta(hours=10)
+    freezer.move_to(now_hour + timedelta(minutes=38))
+    module = _module_with_state(
+        soc=67.0, plugged=True, min_soc=10.0, capacity=75.0, kwh_per_km=0.3
+    )
+    trip = Trip(
+        label="Epil Studio",
+        location="Kraków",
+        event_start=now_hour + timedelta(hours=2, minutes=10),
+        event_end=now_hour + timedelta(hours=3, minutes=40),
+        depart=now_hour + timedelta(minutes=54),
+        return_end=now_hour + timedelta(hours=4, minutes=33),
+        outbound_distance_km=70.0,
+        return_distance_km=70.0,
+    )
+    module._apply_trip(trip, dt_util.now())
+    module._apply_chain_targets([trip], dt_util.now())
+    fc = Forecast(
+        slots=[
+            HourSlot(start=now_hour + timedelta(hours=i), buy_price=0.5)
+            for i in range(8)
+        ]
+    )
+
+    req = module.get_request(fc)
+
+    # Both legs in full: 2 × 70 km × 0.3 kWh/km.
+    assert round(sum(req.drain_kwh.values()), 6) == 42.0
+    # Only the six minutes driven before 11:00 belong to the running hour.
+    assert round(req.drain_kwh[now_hour], 6) == round(21.0 * 6 / 76, 6)
+    # The projected line ends the trip on the reserve: 67 % − 42/75 = 11 %.
+    plan = _optimizer().optimize(fc, BatteryModel(capacity_kwh=10.0, soc=50.0), req)
+    assert [d.ev_soc for d in plan.decisions][-1] == 11.0
 
 
 def test_partial_departure_hour_reaches_the_request() -> None:

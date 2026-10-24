@@ -1,0 +1,7 @@
+<task-notification>
+<task-id>b61981qia</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/03774b33-232f-40f2-aff5-4ad38429e7ed/tasks/b61981qia.output</output-file>
+<status>completed</status>
+<summary>Background command "Commit the import fix and show branch state" completed (exit code 0)</summary>
+</task-notification>

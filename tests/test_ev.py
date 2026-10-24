@@ -6,7 +6,7 @@ These exercise pure logic (no Home Assistant runtime): the optimizer's
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from homeassistant.util import dt as dt_util

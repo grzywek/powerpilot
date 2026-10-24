@@ -1,0 +1,48 @@
+Task (from the session that started this one):
+Background (from the session that started this one):
+PowerPilot plans home energy hourly: house battery (Victron ESS), EV charging from calendar trips, and switching the apartment between two meters (PPE 1 via the Victron, PPE 2). The UI is Polish; everything committed is English. AGENTS.md has binding rules: no fallbacks without asking, the `main`-is-one-commit-behind release flow, and invariants. Live HA is at http://homeassistant.local:8123 and the built-in browser is logged in there. The panel is at /powerpilot, and the `powerpilot/status`, `powerpilot/plan` and `powerpilot/log` websocket commands return live data. v2.11.1 has just been released and installed in HA (an EV trip-drain fix, unrelated to this task). PowerPilot has no actuator: Dawid or his automations carry out the plan, which is why missed actions matter.
+
+Task:
+Two pieces of feedback from Dawid on the PowerPilot panel (Home Assistant custom integration in this repo). Give each point a disposition at the end.
+
+1. Times without dates are ambiguous. In the apartment supply-switching section he sees:
+   "Następne przełączenie: 15:00 → Victron (PPE 1)"
+   "trwa · 17.10 17:59 → 15:00 165.0 h · 1.6 kWh oszczędność 0.00 PLN"
+   "26.10 21:00 → po horyzoncie 109.0 h · 36.8 kWh oszczędność 1.89 PLN"
+   "15:00" has no day, and in the second line the start has a date but the end does not. Every moment the panel shows must say which day it is whenever that day is not obvious (at least whenever it is not today; consider "dziś/jutro" vs "DD.MM"). Fix it at the root: one shared date-time formatter in `frontend/src/powerpilot-panel.ts` used everywhere a plan moment is shown. Then search every other place that formats a time the same way (other tabs, chart tooltips, the "Sterowanie — realizacja vs plan" card, EV targets and trips, entity states and attributes in `custom_components/powerpilot/sensor.py` that end up on dashboards, `dashboards/`). In the report, list each place: fixed, or skipped with the reason.
+
+2. He cannot tell afterwards when he did NOT follow the plan. The plan re-computes all the time, so a missed opportunity disappears: for example he forgot to plug in the EV when charging was cheap, or forgot to flip the apartment's meter switch (PPE 1 / PPE 2) when the plan recommended it. He wants a durable record of such misses: when, what the plan asked for, what actually happened, and what it cost (PLN) where that can be computed. Start by reading what already exists: the per-hour plan vintage (the plan each hour started with, see `docs/ARCHITECTURE.md` "Vintage and plan revisions"), the plan-vs-realization card, and the ESS "plan not executed" watchdog. Build on those instead of adding a parallel mechanism. Decide the data model and where it is shown, and write the decision as an ADR in `docs/adr/`. Read history from what is persisted (vintages, recorder) so it survives restarts. Never delete records.
+
+Done means: both points implemented with tests (every rule has a test that fails when it breaks), the frontend built (`frontend/` esbuild into `custom_components/powerpilot/frontend/powerpilot-panel.js`), the full suite green (`.venv/bin/python -m pytest`, not uv, not bare pytest), docs updated, and each finished slice committed (Conventional Commits, English, `Co-Authored-By: AI` trailer). Ask before pushing: a push to main makes CI cut a release that HACS installs.
+
+Shared notes folder for this group of sessions (outside the repo; read siblings' notes there, leave hand-over notes or large findings there instead of pasting them into messages): /Users/dawid/Library/Application Support/Claude/side-session-notes/local_1f1c6273-df16-4925-946a-5d58303cc289
+
+---
+
+<task-notification>
+<task-id>bjh9rcq9w</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/da7f400a-e497-401f-83b1-66e73e2b780d/tasks/bjh9rcq9w.output</output-file>
+<status>completed</status>
+<summary>Background command "Run baseline test suite" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bg2ulo6he</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/da7f400a-e497-401f-83b1-66e73e2b780d/tasks/bg2ulo6he.output</output-file>
+<status>failed</status>
+<summary>Background command "Serve preview bundle with CORS on port 8765" failed with exit code 143</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b6rw230pd</task-id>
+<tool-use-id>toolu_01TRBWQ6dP81kRTqfBVVJhhs</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-dawid-Code-powerpilot/da7f400a-e497-401f-83b1-66e73e2b780d/tasks/b6rw230pd.output</output-file>
+<status>failed</status>
+<summary>Background command "Serve preview bundle with CORS and PNA headers" failed with exit code 143</summary>
+</task-notification>

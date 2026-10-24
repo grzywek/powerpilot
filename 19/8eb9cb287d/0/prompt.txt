@@ -1,0 +1,5 @@
+to napraw Ruff zgłasza jeden błąd w tests/test_ev.py:75 (F821 datetime). Był tam już przed tą zmianą i go nie ruszałem.
+
+---
+
+Zostaje jedna luka. Przy spóźnionym wyjeździe (kalendarz mówi „już pojechał”, a auto wciąż na kablu) kasowanie nadal zabiera część jazdy przypadającą na bieżącą godzinę. Po poprawce to najwyżej tyle, ile przypada na pozostałe minuty tej godziny. Żeby to naprawić, trzeba odróżnić, czy auto jeszcze nie wyjechało, czy już wróciło. Da się to zrobić po spadku SoC od momentu wyjazdu, ale tego nie robiłem. -> to też zrób

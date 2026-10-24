@@ -377,6 +377,10 @@ class _LPSolution:
     ppe2_periods: list[tuple[float, float, bool]] = field(default_factory=list)
     # The winning objective without the cycle thresholds (PLN).
     objective: float = 0.0
+    # The horizon's spend in PLN: the objective without the steering terms
+    # (reserve-recovery penalty, ``#ess`` bonus), with the fixed demand and EV
+    # load priced back in (wear and the pack's terminal value included).
+    objective_pln: float = 0.0
 
 
 class Optimizer:
@@ -611,6 +615,7 @@ class Optimizer:
         plan.supply_switching = switching
         plan.supply_reason = supply.switching_reason if supply is not None else None
         plan.comparable_cost_pln = solution.objective
+        plan.objective_pln = solution.objective_pln
         if switch is not None:
             plan.supply_boundaries = [all_slots[t].start for t in switch.starts[1:]]
         return plan
@@ -1042,6 +1047,9 @@ class Optimizer:
 
         n_cols = q0 + 2 * len(ppe2_periods)
         cost = np.zeros(n_cols, dtype=np.float64)
+        # The part of ``cost`` that only steers the solver (recovery penalty,
+        # ``#ess`` bonus), taken back off for the money-only objective.
+        steer = np.zeros(n_cols, dtype=np.float64)
         for t in range(n):
             # Earliness tie-break: among equally priced hours prefer charging
             # in the earliest, so an unfinished charge extends into the cheap
@@ -1068,6 +1076,7 @@ class Optimizer:
             penalty = max((abs(p) for p in total_price), default=0.0) + abs(tv) + abs(wear) + 1e3
             for t in range(n):
                 cost[r0 + t] = penalty
+                steer[r0 + t] = penalty
         # ``#ess`` hours: charge here whatever it costs. Expressed as an
         # objective bonus rather than a lower bound on the charge columns —
         # a hard floor collides with the pack's own SoC band the moment the
@@ -1081,6 +1090,7 @@ class Optimizer:
                 if slots[t].start in ess_forced_hours:
                     for k in range(seg_n):
                         cost[seg_col(t, k)] -= bonus
+                        steer[seg_col(t, k)] -= bonus
         h.changeColsCost(n_cols, np.arange(n_cols, dtype=np.int32), cost)
 
         # Floors demanded by ``#ess_socNN``: the level after the last hour that
@@ -1375,6 +1385,27 @@ class Optimizer:
         # without them (o is exact under minimisation while the threshold is
         # positive; at zero it costs nothing either way).
         objective -= sum(switch.threshold * sol[o_col(k)] for k in range(1, seg_k))
+        # Money only. The columns price only what the plan can move, so the
+        # house's demand and the planned EV load at their per-hour price are a
+        # constant the solver never sees — added back, or two plans with the
+        # car charged in different hours would compare as if its energy were
+        # free. Charging is priced at the real price, not the grosz-rounded,
+        # tie-broken ordering price, and the steering terms come off.
+        fixed_pln = sum(
+            (total_price[t] - settled[t]) * (demand[t] + apartment[t] + ev_kwh[t])
+            for t in range(n)
+        )
+        ordering_pln = sum(
+            (total_price[t] - charge_price[t] - _EARLY_TIE_BREAK * t) * sol[seg_col(t, k)]
+            for t in range(n)
+            for k in range(seg_n)
+        )
+        objective_pln = (
+            objective
+            - float(np.dot(steer, np.asarray(sol[:n_cols])))
+            + fixed_pln
+            + ordering_pln
+        )
         regimes = list(regime_combo[: len(periods)])
         regimes2 = list(regime_combo[len(periods) :])
 
@@ -1421,6 +1452,7 @@ class Optimizer:
             supply=supply,
             ppe2_periods=ppe2_settled,
             objective=objective,
+            objective_pln=objective_pln,
         )
 
     @staticmethod

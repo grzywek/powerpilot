@@ -475,6 +475,12 @@ class Plan:
     # of the same inputs are compared by (``supply_cycles.py``). ``None`` for
     # a plan that was not solved (an empty horizon).
     comparable_cost_pln: float | None = None
+    # The horizon's spend in PLN under the plan: the objective without the
+    # steering terms (reserve-recovery penalty, ``#ess`` bonus), with the
+    # house's demand and the planned EV load priced in — comparable across
+    # plans that charge the car in different hours. What the cost of a missed
+    # plan action is measured in (ADR 002).
+    objective_pln: float | None = None
     # Hour boundaries (slot starts) at which the apartment may switch, in
     # order; empty unless switching was modelled.
     supply_boundaries: list[datetime] = field(default_factory=list)

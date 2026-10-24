@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "547d81889761",
+  "session_id": "da7f400a-e497-401f-83b1-66e73e2b780d",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-24T14:33:19.564107Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "custom_components/powerpilot/modules/prices.py",
+    "custom_components/powerpilot/modules/supply.py",
+    "custom_components/powerpilot/modules/tariff.py"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "0a216d26a18c",
+  "checkpoint_transcript_start": 2290,
+  "transcript_lines_at_start": 2290,
+  "compact_transcript_start": 188,
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 5489,
+    "cache_read_tokens": 2536890,
+    "output_tokens": 3228,
+    "api_call_count": 5
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-24T14:33:19.394528Z",
+    "agent_lines": 5,
+    "agent_removed": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 5,
+    "total_lines_changed": 8,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}

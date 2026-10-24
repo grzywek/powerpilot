@@ -91,6 +91,15 @@ def _hour_floor(moment: datetime) -> datetime:
     return moment.replace(minute=0, second=0, microsecond=0)
 
 
+def _presence_value(raw: str | None) -> bool | None:
+    """Home (``True``), away (``False``) or unknown (``None``) from a raw
+    presence state — live or from history, read the same way."""
+    value = str(raw).lower()
+    if value in ("unknown", "unavailable", "none", ""):
+        return None
+    return value in HOME_STATES
+
+
 def _hours_between(start: datetime, end: datetime) -> list[datetime]:
     """Hour-bucket starts overlapping ``[start, end)`` (at least the start hour)."""
     if end <= start:
@@ -325,6 +334,28 @@ class EVChargeTarget:
     trip_soc: float | None = None
 
 
+@dataclass(frozen=True)
+class TripDeparture:
+    """How a trip under way actually left, read back from the recorder.
+
+    ``tracked`` says whether the car's own tracker could see it. Then
+    ``left_at`` is the first moment at or after the calendar departure that
+    the tracker reported the car away — the calendar departure itself when it
+    was already away by then, since history read from that moment on cannot
+    see an earlier leave — and ``None`` while it has not been seen away: the
+    car has not left yet, whatever its SoC does on the drive. Untracked, the
+    calendar departure stands for the moment it left.
+
+    ``soc`` is the pack at that moment (``None`` while the car has not left,
+    or when the recorder holds no reading for it): the reference the driving
+    already done is measured against.
+    """
+
+    tracked: bool
+    left_at: datetime | None
+    soc: float | None
+
+
 @dataclass
 class EVRequest:
     """Structured EV charging need passed to the optimizer."""
@@ -395,9 +426,10 @@ class EVModule(PowerPilotModule):
         self._plugged: bool | None = None
         self._targets: list[EVChargeTarget] = []
         self._trip_targets: list[EVChargeTarget] = []
-        # Per in-progress trip: the SoC seen on the first cycle after it left,
-        # so the drive already done can be discounted from what is forecast.
-        self._trip_soc_baseline: dict[str, tuple[float, float]] = {}
+        # Per trip under way (keyed by its calendar departure): how it actually
+        # left, read back from the recorder every cycle so a restart mid-trip
+        # loses nothing (see _read_departures).
+        self._departures: dict[str, TripDeparture] = {}
         self._forced_hours: set[datetime] = set()
         # Hours the car is away from home (calendar trips: located events
         # extended by travel time + margins) — the only source of
@@ -505,6 +537,7 @@ class EVModule(PowerPilotModule):
         # Learn first: trip drain/targets below depend on the freshest capacity
         # and kWh/km estimates.
         await self._maybe_learn()
+        await self._read_departures(self.coordinator.calendar.trips, dt_util.now())
         self._load_calendar_plans()
 
         self.log_info(
@@ -661,6 +694,19 @@ class EVModule(PowerPilotModule):
         self, entity_id: str, start: datetime, end: datetime
     ) -> list[tuple[datetime, float]]:
         """Sorted ``(time, value)`` numeric state history for a sensor."""
+        series: list[tuple[datetime, float]] = []
+        for at, raw in await self._state_history(entity_id, start, end):
+            try:
+                series.append((at, float(raw)))
+            except (TypeError, ValueError):
+                continue  # "unavailable" / "unknown"
+        return series
+
+    async def _state_history(
+        self, entity_id: str, start: datetime, end: datetime
+    ) -> list[tuple[datetime, str]]:
+        """Sorted ``(time, raw state)`` history: the state in force at ``start``
+        (stamped ``start``) followed by every change up to ``end``."""
         from homeassistant.components.recorder import get_instance, history
 
         changes = await get_instance(self.hass).async_add_executor_job(
@@ -674,12 +720,7 @@ class EVModule(PowerPilotModule):
             None,  # limit
             True,  # include_start_time_state
         )
-        series: list[tuple[datetime, float]] = []
-        for st in changes.get(entity_id, []):
-            try:
-                series.append((st.last_updated, float(st.state)))
-            except (TypeError, ValueError):
-                continue  # "unavailable" / "unknown"
+        series = [(st.last_updated, st.state) for st in changes.get(entity_id, [])]
         series.sort(key=lambda item: item[0])
         return series
 
@@ -760,10 +801,7 @@ class EVModule(PowerPilotModule):
         state = self.hass.states.get(entity_id)
         if state is None:
             return None
-        value = str(state.state).lower()
-        if value in ("unknown", "unavailable", "none", ""):
-            return None
-        return value in HOME_STATES
+        return _presence_value(state.state)
 
     def _combined_home(self) -> bool | None:
         """Combine the car tracker with the extra presence entities.
@@ -841,7 +879,6 @@ class EVModule(PowerPilotModule):
         for trip in calendar.trips:
             self._apply_trip(trip, now)
         self._apply_chain_targets(calendar.trips, now)
-        self._prune_trip_baselines(calendar.trips, now)
 
     def _parse_keyword_event(
         self, event: CalendarEvent, keyword: str, now: datetime
@@ -966,7 +1003,9 @@ class EVModule(PowerPilotModule):
         # car drove home an hour before its return bucket, so by the calendar
         # the leg had barely started while the pack had already paid for it in
         # full — 31 % projected as 3 %.
-        remaining, started = self._trip_remaining_kwh(trip, now, by_calendar)
+        remaining, started = self._trip_remaining_kwh(
+            trip, now, by_calendar, outbound_kwh + return_kwh
+        )
         if remaining <= 1e-9:
             return
 
@@ -983,20 +1022,22 @@ class EVModule(PowerPilotModule):
                     )
 
     def _trip_remaining_kwh(
-        self, trip: Trip, now: datetime, by_calendar: float
+        self, trip: Trip, now: datetime, by_calendar: float, trip_kwh: float
     ) -> tuple[float, bool]:
         """Driving still to forecast, reconciled against the pack, and whether
-        the pack shows the car has already been out on this trip.
+        the car has left on this trip.
 
-        On the first cycle after departure the calendar's own figure stands and
-        is banked together with the SoC of that moment. From then on the pair
-        is the reference: whatever the pack has visibly given up since is
-        driving that has already happened, and forecasting it again would
-        subtract the same trip twice.
+        The reference is the trip as it left (:class:`TripDeparture`): the
+        whole drive ahead and the pack at that moment. Whatever the pack has
+        visibly given up since is driving that has already happened, and
+        forecasting it again would subtract the same trip twice. A car its
+        tracker has not seen leave has driven nothing of it yet, so all of it
+        is ahead — a SoC that ticks down while it stands at home is not a
+        drive, and must not pass for one.
 
         Falls back to ``by_calendar`` whenever there is nothing to reconcile
-        against — trip not started, SoC sensor asleep, capacity unknown, or
-        PowerPilot restarted mid-drive and never saw the pack beforehand.
+        against — trip not under way, no departure read for it, no SoC
+        recorded at the departure, live SoC or capacity unknown.
 
         A residual survives when the prediction and the drive disagree on
         SIZE (21.8 kWh predicted, 19.1 kWh actually used): it is bounded by
@@ -1006,34 +1047,60 @@ class EVModule(PowerPilotModule):
         zero rather than credited — this figure exists only to stop double
         counting, not to track energy in.
 
-        The trip counts as started once the pack has given up anything since
-        the baseline. That is what tells a car still on the cable after its
-        calendar departure (left late: all of the drive is ahead) from one
-        already back from it (home early: what is left is the prediction's
-        error). Without a baseline nothing has been seen, so it is not started.
+        Only the tracker can say the car has left. That is what tells a car
+        still on the cable after its calendar departure (left late: all of
+        the drive is ahead) from one already back from it (home early: what
+        is left is the prediction's error).
         """
-        if not self._capacity or self._soc is None:
-            return by_calendar, False
         if now < trip.depart or now >= trip.return_end:
             return by_calendar, False
-        key = trip.depart.isoformat()
-        seen = self._trip_soc_baseline.get(key)
-        if seen is None:
-            self._trip_soc_baseline[key] = (self._soc, by_calendar)
+        departure = self._departures.get(trip.depart.isoformat())
+        if departure is None:
             return by_calendar, False
-        baseline_soc, baseline_remaining = seen
-        spent = max(0.0, (baseline_soc - self._soc) / 100.0 * self._capacity)
-        return max(0.0, baseline_remaining - spent), spent > 0.0
+        left = departure.tracked and departure.left_at is not None
+        if departure.tracked and not left:
+            return trip_kwh, False
+        if not self._capacity or self._soc is None or departure.soc is None:
+            return by_calendar, left
+        spent = max(0.0, (departure.soc - self._soc) / 100.0 * self._capacity)
+        return max(0.0, trip_kwh - spent), left
 
-    def _prune_trip_baselines(self, trips: list[Trip], now: datetime) -> None:
-        """Forget baselines for trips that are over (or vanished from the calendar)."""
-        live = {
-            trip.depart.isoformat()
-            for trip in trips
-            if trip.depart <= now < trip.return_end
-        }
-        for key in [k for k in self._trip_soc_baseline if k not in live]:
-            del self._trip_soc_baseline[key]
+    async def _read_departures(self, trips: list[Trip], now: datetime) -> None:
+        """Read back from the recorder how each trip under way actually left.
+
+        The recorder, not memory, so a restart mid-trip (or HA being down at
+        the very moment the car drove off) loses nothing. Only trips whose
+        away window holds ``now`` matter; the rest have nothing to reconcile.
+        """
+        departures: dict[str, TripDeparture] = {}
+        tracker = self.config.get(CONF_EV_LOCATION_SENSOR)
+        soc_entity = self.config.get(CONF_EV_SOC_SENSOR)
+        for trip in trips:
+            if not trip.depart <= now < trip.return_end:
+                continue
+            left_at: datetime | None = trip.depart
+            if tracker:
+                history = await self._state_history(tracker, trip.depart, now)
+                if not history:
+                    self.log_warning(
+                        f"Wyjazd „{trip.label}”: recorder nie ma historii "
+                        f"{tracker} — nie wiadomo, czy auto już wyjechało; "
+                        "przejazd liczony wg kalendarza.",
+                        extra={"trip": trip.label, "tracker": tracker},
+                    )
+                    continue
+                left_at = next(
+                    (at for at, raw in history if _presence_value(raw) is False),
+                    None,
+                )
+            soc = None
+            if soc_entity and left_at is not None:
+                reading = await self._numeric_history(soc_entity, left_at, left_at)
+                soc = reading[0][1] if reading else None
+            departures[trip.depart.isoformat()] = TripDeparture(
+                tracked=bool(tracker), left_at=left_at, soc=soc
+            )
+        self._departures = departures
 
     def _apply_chain_targets(self, trips: list[Trip], now: datetime) -> None:
         """One pre-departure target per chain of trips.

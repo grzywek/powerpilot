@@ -89,7 +89,7 @@ flow (Settings → Devices & Services → PowerPilot → Configure → 🚗 EV).
 | Charging now | on/off | plan-vs-reality check — warns when a charging window is due but the charger draws no power |
 | Energy added this session | `kWh` (increasing) | how much energy the current session has delivered (shown in the panel) |
 | Charger behind the meters | toggle | **off** = the charger taps in before the house meters (own metering point): grid import never sees EV charging, so the realized import and hour costs add the car's session energy back (÷ charging efficiency, skipping away-trip hours) |
-| EV location (home/away) | tracker | fallback availability signal when no "charger connected" sensor is set |
+| EV location (home/away) | tracker | availability signal when no "charger connected" sensor is set; during a calendar trip, read back from the recorder to tell when the car actually left — until it has, all of the trip's drive is still forecast, and the pack's drop since that moment is what has been driven (without a tracker the calendar departure stands for it) |
 | Charging power per phase | `kW` | the charger's per-phase power |
 | Charger phases | `1` / `3` | number of phases — total charge power is *per-phase × phases* (e.g. 3.5 kW × 3 = 10.5 kW) |
 

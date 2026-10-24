@@ -59,13 +59,19 @@ Calendar trips are the only source of EV *unavailability*, but they are a
 overrides the calendar **for the running hour in both directions**: unplugged
 drops that hour from the plan, still plugged brings it back even when the trip
 window says the car should already be gone (it left late, came home early, the
-event overran). What happens to that hour's predicted drive drain depends on the
-pack: a trip it has paid anything for since its departure baseline is one the car
-is back from, so its leftover drain is the prediction's error and is dropped; a
-trip the pack has paid nothing for has not started (left late), so all of its
-drive stays ahead. Only the running hour is re-opened; whether the car is still
-home in two hours is genuinely unknown, so later hours stay calendar-driven and
-each one re-opens as it becomes current.
+event overran). What happens to that hour's predicted drive drain depends on
+whether the car has left, and only its tracker can say that: a trip it has been
+seen leaving on is one the car is back from, so its leftover drain is the
+prediction's error and is dropped; a trip it has not been seen leaving on has not
+started (left late), so all of its drive stays ahead — a SoC that ticks down
+while the car stands at home is not a drive. The departure (`TripDeparture`: when
+the tracker first saw the car away at or after the calendar departure, and the
+pack at that moment) is read back from the recorder every cycle, never held in
+memory, so a restart mid-trip loses nothing; the pack's drop since then is the
+driving already done. Without a tracker the calendar departure stands for the
+moment it left and no drain is ever dropped. Only the running hour is re-opened;
+whether the car is still home in two hours is genuinely unknown, so later hours
+stay calendar-driven and each one re-opens as it becomes current.
 
 Availability is not all-or-nothing per hour either: the hour a trip departs in is
 carried as a **fraction** (`EVRequest.hour_fraction`), so a 13:40 departure keeps

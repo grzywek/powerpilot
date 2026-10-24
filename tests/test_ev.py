@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from homeassistant.util import dt as dt_util
 
@@ -19,6 +20,7 @@ from custom_components.powerpilot.const import (
     CONF_EV_ENABLED,
     CONF_EV_LOCATION_SENSOR,
     CONF_EV_PRESENCE_ENTITIES,
+    CONF_EV_SOC_SENSOR,
     CONF_TRAVEL_MARGIN_AFTER_MIN,
     CONF_TRAVEL_MARGIN_BEFORE_MIN,
 )
@@ -35,6 +37,7 @@ from custom_components.powerpilot.modules.ev import (
     EVChargeTarget,
     EVModule,
     EVRequest,
+    TripDeparture,
     _capacity_samples,
     _segment_sessions,
     _spread_energy,
@@ -491,7 +494,7 @@ def _bare_module(**state) -> EVModule:
     module._capacity = state.get("capacity", 60.0)
     module._kwh_per_km = state.get("kwh_per_km")
     module._soc = state.get("soc")
-    module._trip_soc_baseline = {}
+    module._departures = {}
     module.min_soc_entity = (
         SimpleNamespace(native_value=state["min_soc"]) if "min_soc" in state else None
     )
@@ -989,7 +992,7 @@ def _module_with_state(**state) -> EVModule:
     module._capacity = state.get("capacity", 60.0)
     module._kwh_per_km = state.get("kwh_per_km")
     module._soc = state.get("soc")
-    module._trip_soc_baseline = {}
+    module._departures = {}
     module._drain_profile = state.get("drain_profile") or WeeklyAccumulator()
     module._request = EVRequest()
     return module
@@ -1699,8 +1702,28 @@ def test_still_plugged_drops_only_the_started_trips_share_of_the_hour() -> None:
     assert req.drain_kwh == {now_hour: 4.0}
 
 
-def _replan_trip(module: EVModule, trip: Trip, now: datetime) -> None:
-    """One cycle's trip pass, reset the way _load_calendar_plans resets it."""
+TRACKER = "device_tracker.kotek_location_tracker"
+SOC_SENSOR = "sensor.kotek_battery"
+
+
+def _recorded(module: EVModule, series: dict[str, list[tuple[datetime, str]]]) -> None:
+    """Serve the module's recorder reads from captured ``(time, raw state)``
+    series, with the real API's boundaries: the state in force before
+    ``start`` (stamped ``start``), then the changes strictly inside it."""
+
+    async def history(entity_id, start, end):
+        rows = series.get(entity_id, [])
+        before = [raw for at, raw in rows if at < start]
+        out = [(start, before[-1])] if before else []
+        return out + [(at, raw) for at, raw in rows if start < at < end]
+
+    module._state_history = history
+
+
+async def _cycle(module: EVModule, trip: Trip) -> None:
+    """One cycle's trip pass at the frozen now, as async_update runs it."""
+    now = dt_util.now()
+    await module._read_departures([trip], now)
     module._unavailable_hours = set()
     module._partial_hours = {}
     module._trip_drain = {}
@@ -1731,29 +1754,43 @@ def _round_trip(depart, event_start, event_end, return_end) -> Trip:
     )
 
 
-def test_still_plugged_after_the_calendar_departure_keeps_the_whole_drive(
-    freezer,
-) -> None:
-    """Left late: the calendar says the car went at 10:10, but at 10:30 it is
-    still on the cable and the pack has given nothing up (it charged). All of
-    the drive is still ahead, yet the plug used to drop the running hour's
-    share of it — 12.6 of 42 kWh here, together with the charge the car still
-    needed in the one hour it can get it."""
-    now_hour = BASE + timedelta(hours=10)
-    trip = _round_trip(
+def _tracked_module(**state) -> EVModule:
+    module = _module_with_state(min_soc=10.0, capacity=75.0, kwh_per_km=0.3, **state)
+    module.config[CONF_EV_LOCATION_SENSOR] = TRACKER
+    module.config[CONF_EV_SOC_SENSOR] = SOC_SENSOR
+    return module
+
+
+def _late_departure(now_hour: datetime) -> Trip:
+    """Calendar: leaves 10:10, event 11:10–12:40, home 13:40."""
+    return _round_trip(
         depart=now_hour + timedelta(minutes=10),
         event_start=now_hour + timedelta(hours=1, minutes=10),
         event_end=now_hour + timedelta(hours=2, minutes=40),
         return_end=now_hour + timedelta(hours=3, minutes=40),
     )
-    module = _module_with_state(
-        soc=60.0, plugged=True, min_soc=10.0, capacity=75.0, kwh_per_km=0.3
+
+
+async def test_still_plugged_after_the_calendar_departure_keeps_the_whole_drive(
+    freezer,
+) -> None:
+    """Left late: the calendar says the car went at 10:10, but at 10:30 its
+    tracker still has it at home, on the cable and charging. All of the drive
+    is still ahead, yet the plug used to drop the running hour's share of it —
+    12.6 of 42 kWh here, together with the charge the car still needed in the
+    one hour it can get it."""
+    now_hour = BASE + timedelta(hours=10)
+    trip = _late_departure(now_hour)
+    module = _tracked_module(soc=61.0, plugged=True)
+    _recorded(
+        module,
+        {
+            TRACKER: [(now_hour - timedelta(days=1), "home")],
+            SOC_SENSOR: [(now_hour, "60"), (now_hour + timedelta(minutes=20), "61")],
+        },
     )
-    freezer.move_to(trip.depart)
-    _replan_trip(module, trip, dt_util.now())  # baseline at the calendar departure
     freezer.move_to(now_hour + timedelta(minutes=30))
-    module._soc = 61.0  # still at home, charging
-    _replan_trip(module, trip, dt_util.now())
+    await _cycle(module, trip)
 
     req = module.get_request(_forecast_from(now_hour))
 
@@ -1762,13 +1799,40 @@ def test_still_plugged_after_the_calendar_departure_keeps_the_whole_drive(
     assert round(req.drain_kwh[now_hour], 6) == 12.6
 
 
-def test_back_on_the_cable_drops_the_running_hours_leftover_of_the_trip(
+async def test_soc_ticking_down_on_the_cable_is_not_a_drive(freezer) -> None:
+    """Parked at the charge ceiling past the calendar departure, the pack
+    ticks 90 → 89 %. Measured by SoC alone that looked like a car back from
+    its trip, and the running hour's drive was dropped. The tracker never saw
+    it leave, so nothing of the trip has been driven: all 42 kWh stay ahead."""
+    now_hour = BASE + timedelta(hours=10)
+    trip = _late_departure(now_hour)
+    module = _tracked_module(soc=89.0, plugged=True)
+    _recorded(
+        module,
+        {
+            TRACKER: [(now_hour - timedelta(days=1), "home")],
+            SOC_SENSOR: [(now_hour, "90"), (now_hour + timedelta(minutes=25), "89")],
+        },
+    )
+    freezer.move_to(now_hour + timedelta(minutes=30))
+    await _cycle(module, trip)
+
+    req = module.get_request(_forecast_from(now_hour))
+
+    assert round(sum(req.drain_kwh.values()), 6) == 42.0
+    assert round(req.drain_kwh[now_hour], 6) == 12.6
+
+
+async def test_back_on_the_cable_drops_the_running_hours_leftover_of_the_trip(
     freezer,
 ) -> None:
-    """Home early: left at 7:00 on 80 %, on the cable at 10:30 with the pack
-    37.5 kWh lighter while the calendar still has the drive home running until
-    11:45. The 4.5 kWh it still predicts is the forecast's error, not driving;
-    the running hour's share of it must not pull down a car that charges."""
+    """Home early: left at 7:02 on 80 %, back on the cable at 10:30 with the
+    pack 37.5 kWh lighter while the calendar still has the drive home running
+    until 11:45. The 4.5 kWh it still predicts is the forecast's error, not
+    driving; the running hour's share must not pull down a car that charges.
+
+    The module is fresh — it ran no cycle during the trip, as after a restart:
+    the departure is read back from the recorder, not from memory."""
     now_hour = BASE + timedelta(hours=10)
     trip = _round_trip(
         depart=now_hour - timedelta(hours=3),
@@ -1776,15 +1840,25 @@ def test_back_on_the_cable_drops_the_running_hours_leftover_of_the_trip(
         event_end=now_hour - timedelta(minutes=15),
         return_end=now_hour + timedelta(hours=1, minutes=45),
     )
-    module = _module_with_state(
-        soc=80.0, plugged=False, min_soc=10.0, capacity=75.0, kwh_per_km=0.3
+    left = trip.depart + timedelta(minutes=2)
+    module = _tracked_module(soc=30.0, plugged=True)
+    _recorded(
+        module,
+        {
+            TRACKER: [
+                (now_hour - timedelta(days=1), "home"),
+                (left, "not_home"),
+                (now_hour + timedelta(minutes=20), "home"),
+            ],
+            SOC_SENSOR: [
+                (trip.depart - timedelta(hours=1), "80"),
+                (left + timedelta(minutes=5), "79"),
+                (now_hour + timedelta(minutes=15), "30"),
+            ],
+        },
     )
-    freezer.move_to(trip.depart)
-    _replan_trip(module, trip, dt_util.now())  # baseline at the departure
     freezer.move_to(now_hour + timedelta(minutes=30))
-    module._soc = 30.0
-    module._plugged = True
-    _replan_trip(module, trip, dt_util.now())
+    await _cycle(module, trip)
 
     req = module.get_request(_forecast_from(now_hour))
 
@@ -1794,48 +1868,119 @@ def test_back_on_the_cable_drops_the_running_hours_leftover_of_the_trip(
     assert round(sum(req.drain_kwh.values()), 6) == round(4.5 * 45 / 75, 6)
 
 
-def test_still_plugged_keeps_the_drive_of_a_departure_later_this_hour(
-    freezer,
-) -> None:
-    """Incident 2026-10-24: on the cable at 10:38, leaving at 10:54 for a
-    round trip that ends at 11 % with a 10 % reserve. A third of the outbound
-    leg was bucketed into the 10:00 hour and the plug then dropped that hour's
-    drain, so 7.2 kWh of driving vanished and the plan left the car at 20 %
-    after the trip — read as an EV minimum of 20 %. Being plugged in now says
-    nothing about the minutes after departure."""
-    now_hour = BASE + timedelta(hours=10)
-    freezer.move_to(now_hour + timedelta(minutes=38))
-    module = _module_with_state(
-        soc=67.0, plugged=True, min_soc=10.0, capacity=75.0, kwh_per_km=0.3
-    )
-    trip = Trip(
-        label="Epil Studio",
-        location="Kraków",
-        event_start=now_hour + timedelta(hours=2, minutes=10),
-        event_end=now_hour + timedelta(hours=3, minutes=40),
-        depart=now_hour + timedelta(minutes=54),
-        return_end=now_hour + timedelta(hours=4, minutes=33),
-        outbound_distance_km=70.0,
-        return_distance_km=70.0,
-    )
-    module._apply_trip(trip, dt_util.now())
-    module._apply_chain_targets([trip], dt_util.now())
-    fc = Forecast(
-        slots=[
-            HourSlot(start=now_hour + timedelta(hours=i), buy_price=0.5)
-            for i in range(8)
-        ]
+# Captured 2026-10-24: calendar departure 10:54:48, the car charged to 67 %
+# by 10:38:11, unplugged and drove off at 11:11:11 (tracker and plug flipped
+# in the same second), 66 % at 11:13:12.
+WARSAW = ZoneInfo("Europe/Warsaw")
+CAPTURED_DEPART = datetime(2026, 10, 24, 10, 54, 48, tzinfo=WARSAW)
+CAPTURED_LEFT = datetime(2026, 10, 24, 11, 11, 11, tzinfo=WARSAW)
+CAPTURED = {
+    TRACKER: [
+        (datetime(2026, 10, 22, 22, 28, 28, tzinfo=WARSAW), "home"),
+        (CAPTURED_LEFT, "not_home"),
+    ],
+    SOC_SENSOR: [
+        (datetime(2026, 10, 24, 10, 32, 11, tzinfo=WARSAW), "66"),
+        (datetime(2026, 10, 24, 10, 38, 11, tzinfo=WARSAW), "67"),
+        (datetime(2026, 10, 24, 11, 13, 12, tzinfo=WARSAW), "66"),
+        (datetime(2026, 10, 24, 11, 15, 12, tzinfo=WARSAW), "65"),
+    ],
+}
+
+
+def _captured_trip() -> Trip:
+    return _round_trip(
+        depart=CAPTURED_DEPART,
+        event_start=datetime(2026, 10, 24, 12, 10, tzinfo=WARSAW),
+        event_end=datetime(2026, 10, 24, 13, 40, tzinfo=WARSAW),
+        return_end=datetime(2026, 10, 24, 14, 33, 12, tzinfo=WARSAW),
     )
 
-    req = module.get_request(fc)
 
-    # Both legs in full: 2 × 70 km × 0.3 kWh/km.
-    assert round(sum(req.drain_kwh.values()), 6) == 42.0
-    # Only the six minutes driven before 11:00 belong to the running hour.
-    assert round(req.drain_kwh[now_hour], 6) == round(21.0 * 6 / 76, 6)
-    # The projected line ends the trip on the reserve: 67 % − 42/75 = 11 %.
-    plan = _optimizer().optimize(fc, BatteryModel(capacity_kwh=10.0, soc=50.0), req)
-    assert [d.ev_soc for d in plan.decisions][-1] == 11.0
+async def test_departure_is_when_the_tracker_saw_the_car_go() -> None:
+    """Captured: 16 minutes after the calendar departure the tracker reports
+    the car away; the pack at that moment is the trip's reference."""
+    module = _tracked_module()
+    _recorded(module, CAPTURED)
+    trip = _captured_trip()
+
+    await module._read_departures([trip], datetime(2026, 10, 24, 11, 30, tzinfo=WARSAW))
+
+    assert module._departures == {
+        trip.depart.isoformat(): TripDeparture(
+            tracked=True, left_at=CAPTURED_LEFT, soc=67.0
+        )
+    }
+
+
+async def test_departure_not_seen_yet_while_the_tracker_has_the_car_home() -> None:
+    """Captured, five minutes past the calendar departure: still at home."""
+    module = _tracked_module()
+    _recorded(module, CAPTURED)
+    trip = _captured_trip()
+
+    await module._read_departures([trip], datetime(2026, 10, 24, 11, 0, tzinfo=WARSAW))
+
+    assert module._departures == {
+        trip.depart.isoformat(): TripDeparture(tracked=True, left_at=None, soc=None)
+    }
+
+
+async def test_departure_of_a_car_already_away_is_the_calendar_departure() -> None:
+    """Gone before the calendar said so: read from the departure on, the
+    tracker shows it away from the first moment."""
+    module = _tracked_module()
+    early = {
+        TRACKER: [(CAPTURED_DEPART - timedelta(minutes=10), "not_home")],
+        SOC_SENSOR: CAPTURED[SOC_SENSOR],
+    }
+    _recorded(module, early)
+    trip = _captured_trip()
+
+    await module._read_departures([trip], datetime(2026, 10, 24, 11, 30, tzinfo=WARSAW))
+
+    assert module._departures[trip.depart.isoformat()] == TripDeparture(
+        tracked=True, left_at=CAPTURED_DEPART, soc=67.0
+    )
+
+
+async def test_departure_without_a_tracker_is_the_calendar_departure() -> None:
+    module = _tracked_module()
+    del module.config[CONF_EV_LOCATION_SENSOR]
+    _recorded(module, CAPTURED)
+    trip = _captured_trip()
+
+    await module._read_departures([trip], datetime(2026, 10, 24, 11, 30, tzinfo=WARSAW))
+
+    assert module._departures[trip.depart.isoformat()] == TripDeparture(
+        tracked=False, left_at=CAPTURED_DEPART, soc=67.0
+    )
+
+
+async def test_departure_with_no_tracker_history_is_not_guessed() -> None:
+    """A configured tracker the recorder holds nothing for cannot say whether
+    the car has left: no departure is recorded and the gap is logged."""
+    module = _tracked_module()
+    warnings: list[str] = []
+    module.log_warning = lambda message, **kw: warnings.append(message)
+    _recorded(module, {SOC_SENSOR: CAPTURED[SOC_SENSOR]})
+    trip = _captured_trip()
+
+    await module._read_departures([trip], datetime(2026, 10, 24, 11, 30, tzinfo=WARSAW))
+
+    assert module._departures == {}
+    assert warnings and TRACKER in warnings[0]
+
+
+async def test_departures_are_read_only_for_trips_under_way() -> None:
+    module = _tracked_module()
+    _recorded(module, CAPTURED)
+    trip = _captured_trip()
+
+    await module._read_departures([trip], datetime(2026, 10, 24, 10, 0, tzinfo=WARSAW))
+    assert module._departures == {}
+    await module._read_departures([trip], datetime(2026, 10, 24, 15, 0, tzinfo=WARSAW))
+    assert module._departures == {}
 
 
 def test_partial_departure_hour_reaches_the_request() -> None:

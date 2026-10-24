@@ -21,7 +21,7 @@ import pytest
 from homeassistant.util import dt as dt_util
 
 from custom_components.powerpilot.modules.calendar import Trip
-from custom_components.powerpilot.modules.ev import EVModule
+from custom_components.powerpilot.modules.ev import EVModule, TripDeparture
 
 H = dt_util.now().replace(minute=0, second=0, microsecond=0)
 KWH_PER_KM = 0.287
@@ -39,7 +39,7 @@ def _module(soc: float | None = None) -> EVModule:
     ev._kwh_per_km = KWH_PER_KM
     ev._capacity = CAPACITY
     ev._soc = soc
-    ev._trip_soc_baseline = {}
+    ev._departures = {}
     ev.min_soc_entity = SimpleNamespace(native_value=10.0)
     return ev
 
@@ -131,33 +131,57 @@ def test_early_return_does_not_forecast_the_drive_again() -> None:
     forecast (almost) nothing more.
     """
     trip = _trip()
-    ev = _module(soc=58.0)
-    ev._apply_trip(trip, H - timedelta(minutes=30))  # baseline taken en route
-
-    ev._soc = 31.0  # the drive home has happened
-    ev._trip_drain = {}
+    ev = _module(soc=31.0)  # the drive home has happened
+    # Left on 90 %; the tracker saw it go at the calendar departure.
+    ev._departures = {
+        trip.depart.isoformat(): TripDeparture(
+            tracked=True, left_at=trip.depart, soc=90.0
+        )
+    }
     ev._apply_trip(trip, H + timedelta(minutes=1))
 
     projected = 31.0 - _drain_ahead(ev, H + timedelta(minutes=1)) / CAPACITY * 100.0
     # Was 3.2 % before the fix — the whole return leg came off a SoC that had
     # already paid for it. The few points left over are the gap between the
-    # 21.8 kWh predicted for the drive and the 19.1 kWh it actually took.
+    # 44.3 kWh predicted for the trip and the 41.7 kWh it actually took.
     assert projected > 25.0
 
 
 def test_late_departure_still_forecasts_the_whole_drive() -> None:
-    """Nothing has been spent yet, so nothing may be discounted."""
+    """Not seen leaving yet: nothing has been driven, so nothing may be
+    discounted — not even by the clock, which has the outbound part-way done."""
     trip = _trip()
     ev = _module(soc=80.0)
-    ev._apply_trip(trip, H - timedelta(hours=5))  # baseline at departure
-    ev._trip_drain = {}
-    ev._apply_trip(trip, H - timedelta(hours=4, minutes=59))
+    ev._departures = {
+        trip.depart.isoformat(): TripDeparture(tracked=True, left_at=None, soc=None)
+    }
+    now = H - timedelta(hours=4, minutes=30)
+    ev._apply_trip(trip, now)
 
-    assert _drain_ahead(ev, H - timedelta(hours=5)) > 0.0
+    assert _drain_ahead(ev, now) == pytest.approx((OUT_KM + RET_KM) * KWH_PER_KM)
+
+
+def test_untracked_car_is_measured_from_the_calendar_departure() -> None:
+    """No car tracker: the calendar departure stands for the moment it left,
+    and the pack since then is what has been driven."""
+    trip = _trip()
+    ev = _module(soc=31.0)
+    ev._departures = {
+        trip.depart.isoformat(): TripDeparture(
+            tracked=False, left_at=trip.depart, soc=90.0
+        )
+    }
+    now = H + timedelta(minutes=1)
+    ev._apply_trip(trip, now)
+
+    spent = (90.0 - 31.0) / 100.0 * CAPACITY
+    assert _drain_ahead(ev, now) == pytest.approx(
+        (OUT_KM + RET_KM) * KWH_PER_KM - spent
+    )
 
 
 def test_without_a_baseline_it_falls_back_to_calendar_time() -> None:
-    """Restarted mid-trip: no observation to reconcile against."""
+    """No departure read (tracker history missing): nothing to reconcile against."""
     ev = _module(soc=31.0)
     ev._apply_trip(_trip(), H + timedelta(minutes=30))
 

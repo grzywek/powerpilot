@@ -1,0 +1,25 @@
+zerknij czemu w planie jest przełączenie na baterię a nie na drugi licznik obecnie; skoro energia taka droga i powinno chcieć korzystać z drugiego licznika i tarczy
+
+---
+
+zalogowałem w przeglądarce, ale przekierowało do formularza logownia znowu i widzę taki adres: https://ha.ds2.pl/auth/authorize?response_type=code&redirect_uri=https%3A%2F%2Fha.ds2.pl%2Flovelace%2Fkwiatowa%3Fauth_callback%3D1&client_id=https%3A%2F%2Fha.ds2.pl%2F&REDACTED
+
+czemu to nie działa i czemu wylogowuje
+
+---
+
+wpisuje haslo i koncze na ekranie "Zacznij od nowa", i potem znow formularz logowania, wpisuje usera i haslo i znow "zacznij od nowa"
+
+---
+
+Licznik 2 miał sens w październiku. Wtedy PPE 1 miał średnią poniżej 0,61 i płacił realne niskie ceny, a drogie godziny szły na PPE 2 po 0,61. Wróci do gry dopiero wtedy, gdy średnia PPE 1 za miesiąc znów może zejść poniżej limitu. Rekomendacja „przełącz z powrotem na Victron do 12:00” jest więc poprawna.
+
+nie zgadzam się. jeśli tak mamy, to mamy fundamentalny błąd w założeniach gdzieś, albo ja jednak nie rozumiem czego.
+
+róznica jest taka, że licznik w mieszkaniu ma założenie, że od razu korzysta z tarczy, a licznik na magazyn przez cały miesiąc walczy o to, żeby zejść z ceną poniżej tej, która gwarantuje tarcza.
+
+więc to nie tak, że nie ma znaczenia nabijanie teraz prądu w drogich godzinach na liczniku magazynu, bo jak pojawią się tańsze godziny, to będzie znacznie dużo wyższa średnia cena energii do zbicia najpierw, zanim końcowy wynik wyjdzie korzystniejszy niż tarcza.
+
+---
+
+Tak, zacznij

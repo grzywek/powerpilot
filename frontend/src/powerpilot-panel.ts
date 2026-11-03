@@ -11,6 +11,7 @@ import {
 } from "./palette";
 import "./flow-diagram";
 import { fmtTime, fmtWhen, fmtWhenRange } from "./when";
+import { capOddsText, capWeeksLine, type CapScenario } from "./cap-odds";
 import type { FlowTopology } from "./flow-diagram";
 
 interface PlanHour {
@@ -211,6 +212,10 @@ interface TarczaOutcome {
   available: boolean;
   unavailable_reason: string | null;
   discount_pln: number;
+  /** PPE 1 only: the share of the replayed real weeks in which the month
+   *  binds, the plan's price of its kWh (ADR 003); ``null`` for PPE 2. */
+  bind_probability: number | null;
+  scenarios: CapScenario[];
 }
 
 interface TarczaMeter {
@@ -1463,6 +1468,10 @@ export class PowerPilotPanel extends LitElement {
         <div class="check">
           Prognozowany rabat: <b>${fc?.available ? this._pln(fc.discount_pln) : "—"}</b>
         </div>
+        ${fc?.available && fc.scenarios?.length
+          ? html`<div class="check">${capOddsText(fc.scenarios) ?? "—"}</div>
+              <div class="check muted">${capWeeksLine(fc.scenarios)}</div>`
+          : nothing}
         ${why ? html`<div class="check muted">${why}</div>` : nothing}
       </div>`;
     };

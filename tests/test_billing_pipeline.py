@@ -429,3 +429,24 @@ async def test_without_a_usable_week_the_cap_is_unavailable(
     outcome = coordinator.data.billing[0]
     assert not outcome.available
     assert "żaden z 4" in outcome.unavailable_reason
+
+
+async def test_the_odds_reach_the_binary_sensor_and_the_status(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """ADR 003, decision 7: the cap-binds entity and the panel's status carry
+    PPE 1's bind probability and the replayed weeks behind it."""
+    coordinator, _calls, _odds = await _refresh_with_outlook(
+        hass,
+        monkeypatch,
+        lambda period: CapOutlook(month_start=period.month_start, scenarios=_weeks(2, 1)),
+    )
+    await hass.async_block_till_done()
+    binds = _state(hass, coordinator.entry, "binary_sensor", BINARY_TARCZA_PPE1_CAP_BINDS)
+    assert binds.attributes["bind_probability"] == 2 / 3
+    weeks = binds.attributes["scenarios"]
+    assert [w["binds"] for w in weeks] == [True, True, False, None]
+    assert weeks[3]["dropped_reason"] == "tydzień 4: brak"
+    forecast = coordinator.billing_status()["outcomes"][0]
+    assert forecast["bind_probability"] == 2 / 3
+    assert len(forecast["scenarios"]) == 4

@@ -396,6 +396,16 @@ class BillingOutcome:
             "discount_pln": round(self.discount_pln, 4),
             "planned_energy_kwh": round(self.planned_energy_kwh, 3),
             "tail_energy_kwh": round(self.tail_energy_kwh, 3),
+            # PPE 1: how often its month binds over the replayed real weeks,
+            # the price the plan gives its kWh (ADR 003).
+            "bind_probability": (
+                self.outlook.bind_probability if self.outlook is not None else None
+            ),
+            "scenarios": (
+                [s.as_dict() for s in self.outlook.scenarios]
+                if self.outlook is not None
+                else []
+            ),
         }
 
 

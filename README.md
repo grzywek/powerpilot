@@ -241,12 +241,13 @@ PowerPilot models it end to end:
 | `sensor.…_tarcza_ppe1_average` | observed weighted average so far (PLN/kWh, pre-cap) |
 | `sensor.…_tarcza_ppe1_forecast_average` | forecast month-end average (observed + plan + tail) |
 | `sensor.…_tarcza_ppe1_discount` | forecast discount the cap yields this month (PLN) |
-| `binary_sensor.…_tarcza_ppe1_cap_binds` | the plan expects the cap to bind this month |
+| `binary_sensor.…_tarcza_ppe1_cap_binds` | the plan's own path ends the month above the limit; `bind_probability` and `scenarios` say in how many of the four replayed real weeks the cap binds (each week's first date, month average, verdict, or why it was left out) |
 | `sensor.…_tarcza_ppe2_energy` | PPE 2's observed import since the month started (kWh) |
 | `sensor.…_tarcza_ppe2_average` | PPE 2's observed weighted average so far (PLN/kWh, pre-cap) |
 
 All of them carry the full settlement record (hours covered, gaps, reasons) as
-attributes.
+attributes; PPE 1's forecast ones also its bind probability and the replayed
+weeks behind it.
 
 ## Apartment supply (second meter)
 
@@ -347,7 +348,9 @@ liczników*); the form refuses anything else.
   switch, the cycles (start → return, hours, kWh, saving), the threshold,
   minimum stay and quiet window, the reason when nothing is recommended or
   switching is not modelled, and a Tarcza block per meter (average so far,
-  forecast month-end average against the limit, forecast discount).
+  forecast month-end average against the limit, forecast discount; for PPE 1
+  also "limit działa w 2 z 4 ostatnich tygodni" and, on one muted line, each
+  replayed week's month average).
 - Unknown: the apartment is planned on the Victron, and the plan carries a
   reminder that its supply is not known yet.
 

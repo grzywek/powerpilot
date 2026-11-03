@@ -1,6 +1,6 @@
 # PPE 1's cap regime under uncertainty and the tail's EV charging
 
-Status: planned 2026-11-03, not started.
+Status: done 2026-11-03 (slices 1–4; see "Results").
 
 Decision record: `docs/adr/003-cap-regime-under-uncertainty.md`. Background:
 `docs/apartment-supply-planning.plan.md` (both meters' caps, "Where the money
@@ -168,6 +168,46 @@ AGENTS.md line for slice 4:
   (at `p = 1` it may pick either).
 - Panel: the card's text for 0, 2 and 4 binding weeks, as a pure helper with a
   `frontend/test/*.test.ts` case (run by `tests/test_frontend_units.py`).
+
+## Results (2026-11-03)
+
+Slices: 1 `5a8fc2e`, 2 `84c9b3f`, 3 `7bd89c4`, 4 the panel/docs commit after
+them.
+
+**Gate 1** — `scripts/backtest_month_tail.py` on a fresh export (2026-07-04 –
+2026-11-03 15:00), as of the 1st at 12:00 with `real` prices, EV on the grid
+side (÷ 0.91, the installation's charge efficiency):
+
+| month | meter | `profile` | `hour` | `month` | `p` (profile) |
+|---|---|---|---|---|---|
+| August | 0.260 | 0.209 | 0.233 | 0.152 | 0/4 |
+| September | 0.349 | 0.416 | 0.330 | 0.268 | 0/4 |
+| October | 0.562 | **0.523** | 0.527 | 0.307 | 1/4 |
+| November (03.11 16:00) | 1.207 so far | | | | 4/4 |
+
+October −0.039, inside ±0.06. `month` (the tail's cheapest hours, now placed
+by the script instead of the LP) reproduces the 0.307 above. September's
+profile is pessimistic (+0.067): August's charging hours priced at
+September's prices.
+
+**Gate 3** — `scripts/bench_supply_model.py`, old (`e5ebaf9`) and new code
+alternated on a loaded Mac: the four scenarios add 0.18–0.27 s without
+switching and 0.46–0.65 s with it (0.90 s under heavy load), within the 3 s;
+no coefficient-only fallback needed. The plan's own MIP time moves with the
+tail's EV shape, not with the model: the switching winter case with no tail
+EV solves alike on old and new code (10.7 / 10.6 s), in 0.7 s with a flat EV,
+8.7 s with the bench's night profile and 2.6 s with the old free placement.
+Not measured in the Home Assistant log yet (needs a release): watch the
+optimizer's "Tarcza PPE 1: limit działa w …" line, which carries the
+scenarios' wall time.
+
+Taken during implementation: the 28 complete days are looked for within the
+last 56 (one missing hour does not take the cap down for four weeks); the
+tail's learned EV does not narrow the battery's charge cap (an hourly mean,
+not a session on the shared phase); "no usable week → cap unavailable" acts
+from slice 3, when the plan first prices by `p`; the statistics reader keys
+local hours, so the autumn change's repeated hour counts once (the same root
+cause as the `powerpilot/series` follow-up below).
 
 ## Out of scope (separate follow-ups)
 

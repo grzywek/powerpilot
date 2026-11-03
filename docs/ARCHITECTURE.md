@@ -178,9 +178,19 @@ This `battery_energy_cost` is what the optimizer compares against the live grid
 price to decide *charge / discharge / passthrough*.
 
 ### Optimizer
-The first implementation is a **transparent heuristic** (price-percentile +
-SoC-aware greedy). The interfaces are designed so it can later be swapped for an
-LP/MILP solver without touching the modules or the HA glue (see `ROADMAP.md`).
+A HiGHS mixed-integer program over the whole horizon (`optimizer.py`; its module
+docstring holds the model). Under the seller's monthly price cap ("Tarcza") each
+meter's month is settled as `min(C, L·E)`, and the hours from the horizon's end
+to the month's end are an accounting-only tail: the consumption profile, the
+price archive's estimate, and the car's learned charging per weekday and hour
+(the EV module's 28-day profile — the LP never places it).
+
+PPE 2's months take the exact regime enumeration. PPE 1's month is priced by
+its bind probability `p` as `p·L·E + (1−p)·C`: each refresh replays the four
+latest real (certain) price weeks over every hour without a source price and
+judges each with the plan's own model as an LP relaxation
+(`cap_outlook.py`, `Optimizer.cap_regimes`); `p` is the share that binds,
+computed once per refresh and shared by every re-solve of it (ADR 003).
 
 Decision outputs per hour:
 

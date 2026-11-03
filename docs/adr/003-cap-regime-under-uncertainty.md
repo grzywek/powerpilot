@@ -1,6 +1,6 @@
 # ADR 003: PPE 1's price-cap regime under uncertain tail prices
 
-Status: accepted, 2026-11-03 (implementation: `docs/plans/tarcza-regime-uncertainty-2026-11-03.md`)
+Status: accepted, 2026-11-03; implemented 2026-11-03 (`docs/plans/tarcza-regime-uncertainty-2026-11-03.md`, done, with the backtest and bench results)
 
 ## Context
 

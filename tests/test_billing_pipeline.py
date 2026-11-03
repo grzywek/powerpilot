@@ -19,6 +19,7 @@ from custom_components.powerpilot.const import (
     CONF_TARCZA_TERMS,
     DEFAULTS,
     DOMAIN,
+    PPE_1,
     PRICE_TYPE_CERTAIN,
     SENSOR_TARCZA_PPE1_AVERAGE,
     SENSOR_TARCZA_PPE1_DISCOUNT,
@@ -26,8 +27,18 @@ from custom_components.powerpilot.const import (
     SENSOR_TARCZA_PPE1_FORECAST_AVERAGE,
     SENSOR_TARCZA_PPE2_AVERAGE,
     SENSOR_TARCZA_PPE2_ENERGY,
+    SUPPLY_VICTRON,
 )
-from custom_components.powerpilot.models import ESSRequest, Forecast, HourSlot
+from custom_components.powerpilot.models import (
+    BillingPeriod,
+    CapOutlook,
+    CapScenario,
+    ESSRequest,
+    Forecast,
+    HourSlot,
+    MonthTail,
+    SupplyPlanning,
+)
 from custom_components.powerpilot.modules.billing import month_bounds
 from custom_components.powerpilot.modules.ev import _local_day_hours
 
@@ -310,3 +321,111 @@ async def test_each_refresh_judges_ppe1_on_the_replayed_weeks(hass: HomeAssistan
     assert outlook.month_start == periods[0].month_start
     assert outlook.bind_probability == 0.5
     assert coordinator.cap_outlook_seconds is not None
+
+
+async def _refresh_with_outlook(hass: HomeAssistant, monkeypatch, outlook_of):
+    """One refresh over a short capped horizon, three solves of it.
+
+    ``outlook_of(period)`` is what the scenarios come to. Returns the
+    coordinator, the outlook calls and the ``bind_probability`` of every
+    solve.
+    """
+    from custom_components.powerpilot import coordinator as coordinator_module
+    from custom_components.powerpilot.optimizer import Optimizer
+
+    _entry, coordinator = await _setup(hass, **{CONF_TARCZA_TERMS: [TERMS]})
+    hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    slots = [
+        HourSlot(start=hour + timedelta(hours=i), buy_price=0.5, cap_price_kwh=0.5)
+        for i in range(3)
+    ]
+    period = BillingPeriod(
+        ppe=PPE_1,
+        month_start=hour - timedelta(days=2),
+        month_end=hour + timedelta(hours=5),
+        limit_kwh=0.61,
+        energy_kwh=10.0,
+        cost_pln=5.0,
+        hours_expected=48,
+        hours_covered=48,
+    )
+    tail = MonthTail(
+        slots=[
+            HourSlot(start=hour + timedelta(hours=i), buy_price=0.7, cap_price_kwh=0.7)
+            for i in range(3, 5)
+        ]
+    )
+    coordinator.forecast_builder.build = lambda: Forecast(slots=list(slots))
+
+    async def billing_inputs(forecast, ev_request):
+        return [period], tail, None
+
+    coordinator._billing_inputs = billing_inputs
+    outlook_calls: list[list[BillingPeriod]] = []
+
+    def cap_outlooks(optimizer, forecast, battery, ev_request, ess, periods, tail, supply):
+        outlook_calls.append(periods)
+        return [outlook_of(period)]
+
+    coordinator._cap_outlooks = cap_outlooks
+    odds_seen: list = []
+    optimize = Optimizer.optimize
+
+    def spy(self, *args, **kwargs):
+        odds_seen.append(kwargs.get("bind_probability"))
+        return optimize(self, *args, **kwargs)
+
+    monkeypatch.setattr(Optimizer, "optimize", spy)
+
+    def settle_cycles(solve, planning):
+        solve(supply=planning)
+        solve(supply=planning)
+        return solve(supply=planning)
+
+    monkeypatch.setattr(coordinator_module, "settle_cycles", settle_cycles)
+    coordinator._supply_inputs = lambda forecast, periods, reason: (
+        SupplyPlanning(actual=SUPPLY_VICTRON, switching_reason="test"),
+        None,
+    )
+    await coordinator.async_refresh()
+    return coordinator, outlook_calls, odds_seen
+
+
+def _weeks(binding: int, dropped: int = 0) -> tuple[CapScenario, ...]:
+    return tuple(
+        CapScenario(week=k, dropped_reason=f"tydzień {k}: brak")
+        if k > 4 - dropped
+        else CapScenario(week=k, average_kwh=0.7 if k <= binding else 0.5, binds=k <= binding)
+        for k in range(1, 5)
+    )
+
+
+async def test_a_refresh_with_re_solves_evaluates_the_scenarios_once(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    coordinator, outlook_calls, odds_seen = await _refresh_with_outlook(
+        hass,
+        monkeypatch,
+        lambda period: CapOutlook(month_start=period.month_start, scenarios=_weeks(2)),
+    )
+    assert len(outlook_calls) == 1
+    assert len(odds_seen) == 3
+    month = outlook_calls[0][0].month_start
+    assert odds_seen == [{month: 0.5}] * 3
+    outcome = coordinator.data.billing[0]
+    assert outcome.available
+    assert outcome.outlook.bind_probability == 0.5
+
+
+async def test_without_a_usable_week_the_cap_is_unavailable(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    coordinator, _calls, odds_seen = await _refresh_with_outlook(
+        hass,
+        monkeypatch,
+        lambda period: CapOutlook(month_start=period.month_start, scenarios=_weeks(0, 4)),
+    )
+    assert odds_seen and all(odds is None for odds in odds_seen)
+    outcome = coordinator.data.billing[0]
+    assert not outcome.available
+    assert "żaden z 4" in outcome.unavailable_reason

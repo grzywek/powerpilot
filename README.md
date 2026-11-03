@@ -220,10 +220,20 @@ PowerPilot models it end to end:
   charging of its weekday and hour over the latest 28 complete days of the
   energy-added sensor's statistics (within the last 56), on the grid side —
   never moved into the month's cheapest hours;
+- whether PPE 1's month binds is not decided on that one estimated path.
+  Every refresh replays the four latest real (certain) price weeks over every
+  hour without a source price — the horizon's estimated hours and the rest of
+  the month — and judges each with the plan's own model (as an LP
+  relaxation). The plan then prices PPE 1's month as
+  `p × limit × E + (1 − p) × C`, `p` being the share of those weeks in which
+  the cap binds, so a kWh costs `p × limit + (1 − p) × price`: in a month near
+  the limit the plan keeps buying cheaply and moves expensive hours off PPE 1,
+  in a lost one it behaves as if the cap binds. PPE 2's months keep the exact
+  `min(C, limit × E)`. A replayed week missing a price is left out and named;
 - when the cap cannot be modelled (unusable editions, incomplete month data,
-  unpriced tail hours, fewer than 28 complete days of EV charging statistics)
-  the plan says why and the battery is planned without it — no substitute
-  data.
+  unpriced tail hours, fewer than 28 complete days of EV charging statistics,
+  no complete replayed price week) the plan says why and the battery is
+  planned without it — no substitute data.
 
 | Entity | Meaning |
 |--------|---------|

@@ -885,7 +885,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         )
         # PPE 1's month over the replayed real weeks — once per refresh, so
         # every solve of it (cycle re-solves, missed-action counterfactuals)
-        # sees the same odds (ADR 003).
+        # prices PPE 1 by the same odds (ADR 003). Without a usable week the
+        # cap cannot be modelled.
         outlooks: list[CapOutlook] = []
         if billing_periods:
             outlooks = await self.hass.async_add_executor_job(
@@ -899,6 +900,18 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 tail,
                 supply_planning,
             )
+            lost = next((o for o in outlooks if o.bind_probability is None), None)
+            if lost is not None:
+                billing_periods, tail, outlooks = None, None, []
+                billing_reason = lost.unavailable_reason
+                supply_planning, ppe2_reason = self._supply_inputs(
+                    forecast, billing_periods, billing_reason
+                )
+        odds = (
+            {outlook.month_start: outlook.bind_probability for outlook in outlooks}
+            if billing_periods
+            else None
+        )
 
         def solve_for(request: EVRequest) -> Callable[..., Plan]:
             return partial(
@@ -910,6 +923,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 ess_request=ess_request,
                 billing=billing_periods,
                 tail=tail,
+                bind_probability=odds,
             )
 
         solve = solve_for(ev_request)

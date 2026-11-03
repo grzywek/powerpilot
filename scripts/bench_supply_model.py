@@ -13,7 +13,12 @@ meters under the price cap — and times ``Optimizer.optimize`` for:
   the observed month plus the horizon only),
 * a full refresh with recommendations (stage 3, slice 3) at ``T_sw`` = 72 h
   and 168 h: the plan, a re-solve per proposed cycle (more when one is
-  dropped), and the running cycle's (``supply_cycles.settle_cycles``).
+  dropped), and the running cycle's (``supply_cycles.settle_cycles``),
+* the same refresh as it runs since ADR 003: PPE 1's four replayed-week
+  scenarios judged by LP relaxation (``cap_outlook.py``, from an archive of
+  ten synthetic certain weeks), then the plan and its re-solves pricing
+  PPE 1 by the resulting bind probability — the scenarios' own time is what
+  the 3 s budget of ADR 003's plan (decision 8) bounds.
 
 Three runs each; prints the median seconds, what the plan did, how many
 cap-regime combinations there were, how many MIPs ran (the rest are pruned by
@@ -43,9 +48,14 @@ from homeassistant.util import dt as dt_util  # noqa: E402
 
 from custom_components.powerpilot import optimizer as optimizer_module  # noqa: E402
 from custom_components.powerpilot.battery import BatteryModel  # noqa: E402
+from custom_components.powerpilot.cap_outlook import (  # noqa: E402
+    cap_outlooks,
+    replay_scenarios,
+)
 from custom_components.powerpilot.const import (  # noqa: E402
     PPE_1,
     PPE_2,
+    PRICE_TYPE_CERTAIN,
     SUPPLY_METER_2,
     SUPPLY_VICTRON,
 )
@@ -54,9 +64,11 @@ from custom_components.powerpilot.models import (  # noqa: E402
     Forecast,
     HourSlot,
     MonthTail,
+    PriceCapTerms,
     SupplyPlanning,
 )
 from custom_components.powerpilot.modules.ev import EVRequest  # noqa: E402
+from custom_components.powerpilot.modules.prices import PriceArchive  # noqa: E402
 from custom_components.powerpilot.optimizer import (  # noqa: E402
     ChargeCurve,
     Optimizer,
@@ -271,6 +283,90 @@ def _run_refresh(label: str, t_sw: int) -> float:
     return median
 
 
+_TERMS = PriceCapTerms(
+    name="bench",
+    valid_from=datetime(2025, 1, 1).date(),
+    valid_to=datetime(2099, 12, 31).date(),
+    limit_kwh=LIMIT,
+    handling_fee_included=False,
+)
+
+
+def _archive(start) -> PriceArchive:
+    """Ten certain weeks before ``start``, priced like the case (cap = tge)."""
+    rng = random.Random(20261103)
+    archive = PriceArchive()
+    for back in range(1, 10 * 7 * 24 + 1):
+        moment = start - timedelta(hours=back)
+        price = round(_PRICE[dt_util.as_local(moment).hour] * rng.uniform(0.7, 1.4), 4)
+        archive.record(
+            moment,
+            price,
+            PRICE_TYPE_CERTAIN,
+            "bench",
+            "t",
+            formula={"tge": price, "markup": 0.0, "vat": 0.0},
+        )
+    return archive
+
+
+def _run_scenarios(label: str, t_sw: int, switching: bool = True) -> float:
+    """A refresh since ADR 003: the scenarios, then the plan priced by them."""
+    optimizer_module.SUPPLY_SWITCH_HOURS = t_sw
+    scenario_times: list[float] = []
+    totals: list[float] = []
+    plan = outlook = None
+    for _ in range(RUNS):
+        forecast, tail, billing, ppe2, ev = _case()
+        archive = _archive(forecast.slots[0].start)
+        planning = SupplyPlanning(
+            actual=SUPPLY_VICTRON,
+            switching_reason=None if switching else "bench: bez przełączania",
+            ppe2_periods=ppe2,
+            last_transition_at=forecast.slots[0].start - timedelta(days=3),
+        )
+        optimizer = _optimizer()
+        began = time.perf_counter()
+        [outlook] = cap_outlooks(
+            billing,
+            replay_scenarios(forecast, tail, archive, lambda day: _TERMS),
+            lambda sc, ev=ev, billing=billing, planning=planning: optimizer.cap_regimes(
+                sc.forecast, _battery(), ev, billing=billing, tail=sc.tail, supply=planning
+            ),
+        )
+        scenario_times.append(time.perf_counter() - began)
+        odds = {outlook.month_start: outlook.bind_probability}
+
+        def solve(supply: SupplyPlanning, forecast=forecast, tail=tail, billing=billing, ev=ev):
+            return optimizer.optimize(
+                forecast,
+                _battery(),
+                ev,
+                billing=billing,
+                tail=tail,
+                supply=supply,
+                bind_probability=odds,
+            )
+
+        plan = settle_cycles(solve, planning)
+        totals.append(time.perf_counter() - began)
+    scenarios = statistics.median(scenario_times)
+    median = statistics.median(totals)
+    weeks = ", ".join(
+        f"{s.average_kwh:.3f}{' B' if s.binds else ''}" for s in outlook.scenarios
+    )
+    print(
+        f"{label:<28} median {median:7.2f} s  runs "
+        + ", ".join(f"{t:.2f}" for t in totals)
+        + f"  | scenarios {scenarios:.2f} s (runs "
+        + ", ".join(f"{t:.2f}" for t in scenario_times)
+        + f"), p = {outlook.bind_probability:.2f} [{weeks}]"
+        + f"  | {plan.supply_resolves} re-solve(s), cycles {len(plan.supply_cycles)}",
+        flush=True,
+    )
+    return scenarios
+
+
 def main() -> None:
     print(
         f"horizon {HORIZON_H} h + tail {TAIL_H} h, {RUNS} runs per case"
@@ -286,6 +382,8 @@ def main() -> None:
     # The production switch horizon may plan no cycle on these cases; 168 h
     # shows what valuing cycles costs once one is planned.
     _run_refresh("refresh + recs, T_sw = 168 h", 168)
+    _run_scenarios("ADR 003, no switching", 72, switching=False)
+    _run_scenarios("ADR 003 refresh + recs", 72)
 
 
 if __name__ == "__main__":

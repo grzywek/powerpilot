@@ -96,6 +96,12 @@ over the plan and over the regimes commute, and at the optimum each chosen
 term is the min, so the settlement is exact — ``2^P`` solves of one model
 whose objective alone changes.
 
+The plan itself prices PPE 1's months by their bind probability ``p`` instead
+(ADR 003): ``p·L·E + (1−p)·C``, linear, so they leave the enumeration and only
+PPE 2's months are enumerated. ``p`` is the share of replayed real price weeks
+in which the month binds, each judged by :meth:`Optimizer.cap_regimes` — the
+same model, only the enumeration's LP relaxations.
+
 The solver output is replayed through :class:`BatteryModel` so the reported
 ``battery_energy_cost`` / ``battery_use_cost`` and the per-hour cost breakdown
 stay consistent with the rest of the integration.
@@ -108,6 +114,7 @@ import logging
 import math
 import statistics
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -436,6 +443,7 @@ class Optimizer:
         billing: list[BillingPeriod] | None = None,
         tail: MonthTail | None = None,
         supply: SupplyPlanning | None = None,
+        bind_probability: Mapping[datetime, float] | None = None,
     ) -> Plan:
         """Plan the horizon; with ``billing`` also settle each month under its cap.
 
@@ -455,11 +463,20 @@ class Optimizer:
         plan chooses it hour by hour under the switching rules and settles
         PPE 2's months (``supply.ppe2_periods``) next to PPE 1's. Switching
         needs both meters' periods; without them it is refused.
+
+        ``bind_probability`` (PPE 1 month start → ``p``, from the replayed
+        weeks of ``cap_outlook.py``) prices each PPE 1 month as
+        ``p·L·E + (1−p)·C`` — the expected cost of its kWh — instead of
+        enumerating its regime; every PPE 1 month the plan touches needs one.
+        ``p = 1`` plans it as binding, ``p = 0`` as not (ADR 003). PPE 2's
+        months keep the exact enumeration.
         """
         battery = battery.copy()  # never mutate the live state
         if not forecast.slots:
             return Plan(forecast=forecast, decisions=[], created_at=dt_util.now())
-        model = self._model(forecast, battery, ev_request, ess_request, billing, tail, supply)
+        model = self._model(
+            forecast, battery, ev_request, ess_request, billing, tail, supply, bind_probability
+        )
         solution = self._solve_lp(**model.lp)
         n, total = model.n, model.total
         all_slots, periods, ppe2_periods = model.all_slots, model.periods, model.ppe2_periods
@@ -564,6 +581,7 @@ class Optimizer:
         billing: list[BillingPeriod] | None,
         tail: MonthTail | None,
         supply: SupplyPlanning | None,
+        bind_probability: Mapping[datetime, float] | None = None,
     ) -> _Model:
         """The LP's inputs for a non-empty horizon, validated (see :meth:`optimize`)."""
         slots = forecast.slots
@@ -682,6 +700,17 @@ class Optimizer:
             if switch is not None
             else [demand[t] + apartment[t] * (1.0 - fixed_s) for t in range(total)]
         )
+        odds: list[float] | None = None
+        if bind_probability is not None:
+            odds = []
+            for cp in periods:
+                p = bind_probability.get(cp.period.month_start)
+                if p is None or not 0.0 <= p <= 1.0:
+                    raise ValueError(
+                        f"PPE 1 month {cp.period.month_start.isoformat()} has no "
+                        f"bind probability in [0, 1] ({p})"
+                    )
+                odds.append(p)
 
         return _Model(
             n=n,
@@ -718,6 +747,7 @@ class Optimizer:
                 apartment=apartment if switch is not None else None,
                 switch=switch,
                 ppe2_periods=ppe2_periods if switch is not None else None,
+                ppe1_odds=odds,
             ),
         )
 
@@ -878,6 +908,7 @@ class Optimizer:
         switch: _SwitchModel | None = None,
         ppe2_periods: list[_CapPeriod] | None = None,
         relaxed: bool = False,
+        ppe1_odds: list[float] | None = None,
     ) -> _LPSolution:
         """Solve the MILP over ``len(total_price)`` hours.
 
@@ -893,6 +924,11 @@ class Optimizer:
         demand without it) and PPE 2's ``ppe2_periods`` are settled like
         PPE 1's; without it ``demand`` already holds the apartment's share.
 
+        ``ppe1_odds`` (one ``p`` per ``periods`` entry) prices each PPE 1
+        period as ``p·L·E + (1−p)·C`` and takes it out of the regime
+        enumeration; its ``cap binds`` is then the solved path's own
+        ``L·E < C``.
+
         ``relaxed`` stops after the regime combinations' LP relaxations and
         returns only the cheapest one's settlements (``periods``,
         ``ppe2_periods`` and its objective; no flows, the diagnostics
@@ -902,6 +938,8 @@ class Optimizer:
         n = len(total_price)
         if switch is not None and (apartment is None or not periods or not ppe2_periods):
             raise ValueError("switching needs the apartment and both meters' periods")
+        if ppe1_odds is not None and (relaxed or len(ppe1_odds) != len(periods or [])):
+            raise ValueError("bind probabilities need one value per PPE 1 period, unrelaxed")
         apartment = apartment if switch is not None else [0.0] * n
         ppe2_periods = ppe2_periods if switch is not None else []
         tail_start = n if tail_start is None else tail_start
@@ -1377,7 +1415,23 @@ class Optimizer:
         # empty next month: 0 = 0) prices its kWh below the limit at no real
         # gain, inviting battery shifts into it that save exactly nothing —
         # the binding regime plans the same cost without them.
-        settlements = [(cp, period_cols(i)) for i, cp in enumerate(periods)] + [
+        # PPE 1's periods priced by their bind probability leave the
+        # enumeration: a fixed linear cost p·L on E and (1 − p) on C.
+        if ppe1_odds is not None:
+            cols = [col for i in range(len(periods)) for col in period_cols(i)]
+            vals = [
+                val
+                for p, cp in zip(ppe1_odds, periods)
+                for val in (1.0 - p, p * cp.period.limit_kwh)
+            ]
+            if cols:
+                h.changeColsCost(
+                    len(cols),
+                    np.array(cols, dtype=np.int32),
+                    np.array(vals, dtype=np.float64),
+                )
+        enumerated = 0 if ppe1_odds is not None else len(periods)
+        settlements = [(cp, period_cols(i)) for i, cp in enumerate(periods[:enumerated])] + [
             (cp, ppe2_cols(i)) for i, cp in enumerate(ppe2_periods)
         ]
         combos = sorted(
@@ -1401,7 +1455,7 @@ class Optimizer:
 
         if relaxed:
             return self._cheapest_relaxation(
-                h, combos, set_regimes, settlements, len(periods)
+                h, combos, set_regimes, settlements, enumerated
             )
 
         # Exact pruning: a combination's LP relaxation bounds its MIP from
@@ -1479,8 +1533,8 @@ class Optimizer:
             + fixed_pln
             + ordering_pln
         )
-        regimes = list(regime_combo[: len(periods)])
-        regimes2 = list(regime_combo[len(periods) :])
+        regimes = list(regime_combo[:enumerated])
+        regimes2 = list(regime_combo[enumerated:])
 
         charge = [
             sum(sol[seg_col(t, k)] for k in range(seg_n)) for t in range(n)
@@ -1500,9 +1554,14 @@ class Optimizer:
         ]
         grid = [max(0.0, sol[grid_col(t)]) for t in range(n)]
         settled_periods: list[tuple[float, float, bool]] = []
-        for i in range(len(periods)):
+        for i, cp in enumerate(periods):
             c_col, e_col = period_cols(i)
-            settled_periods.append((sol[e_col], sol[c_col], regimes[i]))
+            binds = (
+                regimes[i]
+                if ppe1_odds is None
+                else cp.period.limit_kwh * sol[e_col] < sol[c_col]
+            )
+            settled_periods.append((sol[e_col], sol[c_col], binds))
         supply = (
             [1.0 if sol[s_col(switch.segment[t])] > 0.5 else 0.0 for t in range(n)]
             if switch is not None

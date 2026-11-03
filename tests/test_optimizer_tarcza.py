@@ -330,3 +330,95 @@ def test_unpriced_tail_hour_is_refused() -> None:
         _optimizer().optimize(
             forecast, _battery(), billing=[_period()], tail=MonthTail(slots=tail_slots)
         )
+
+
+# ------------------------------------------- bind probability (ADR 003)
+#
+# PPE 1's month is priced as p·L·E + (1 − p)·C, p being the share of four
+# replayed real weeks in which it binds. On 2026-11-02 one averaged tail path
+# taken as certain gave November up; near the limit single weeks disagree.
+
+
+def _same_plan(a, b) -> None:
+    assert _modes(a) == _modes(b)
+    assert [round(d.battery_charge_kwh, 6) for d in a.decisions] == [
+        round(d.battery_charge_kwh, 6) for d in b.decisions
+    ]
+    assert a.comparable_cost_pln == pytest.approx(b.comparable_cost_pln, abs=1e-6)
+    assert a.billing[0].energy_kwh == pytest.approx(b.billing[0].energy_kwh)
+    assert a.billing[0].cost_pln == pytest.approx(b.billing[0].cost_pln)
+    assert a.billing[0].cap_binds == b.billing[0].cap_binds
+
+
+def test_certain_binding_odds_reproduce_todays_binding_plan() -> None:
+    forecast = Forecast(
+        slots=_slots([0.2, 0.2, 1.0, 1.0], demand=3.0, distribution=[0.0, 0.0, 0.5, 0.5])
+    )
+    period = _period(energy=100.0, cost=100.0)
+    today = _optimizer().optimize(forecast, _battery(), billing=[period])
+    assert today.billing[0].cap_binds is True
+    odds = _optimizer().optimize(
+        forecast, _battery(), billing=[period], bind_probability={period.month_start: 1.0}
+    )
+    _same_plan(odds, today)
+
+
+def test_certain_non_binding_odds_reproduce_todays_non_binding_plan() -> None:
+    forecast = Forecast(slots=_slots([0.2, 0.2, 1.0, 1.0], demand=3.0))
+    period = _period(energy=100.0, cost=20.0)
+    today = _optimizer().optimize(forecast, _battery(), billing=[period])
+    assert today.billing[0].cap_binds is False
+    odds = _optimizer().optimize(
+        forecast, _battery(), billing=[period], bind_probability={period.month_start: 0.0}
+    )
+    _same_plan(odds, today)
+
+
+def test_the_odds_price_the_kwh_while_the_outcome_keeps_the_plans_path() -> None:
+    """p = 1 on a month whose own path stays under the limit: planned as
+    binding (no energy arbitrage), reported as the path settles it."""
+    forecast = Forecast(slots=_slots([0.2, 0.2, 1.0, 1.0], demand=3.0))
+    period = _period(energy=100.0, cost=20.0)
+    plan = _optimizer().optimize(
+        forecast, _battery(), billing=[period], bind_probability={period.month_start: 1.0}
+    )
+    assert _modes(plan) == [InverterMode.PASSTHROUGH] * 4
+    outcome = plan.billing[0]
+    assert outcome.cap_binds is False
+    assert outcome.settled_cost_pln == pytest.approx(outcome.cost_pln)
+
+
+def test_half_odds_price_a_kwh_at_its_expected_cost() -> None:
+    """At p = 0.5 a kWh of an hour priced 2.00 costs PPE 1
+    0.5·0.61 + 0.5·2.00 = 1.305, plus distribution."""
+    forecast = Forecast(slots=_slots([2.0], demand=1.0, distribution=[0.1]))
+    plan = _optimizer(inverter_max_charge_kw=0.0, inverter_max_discharge_kw=0.0).optimize(
+        forecast, _battery(), billing=[_period()], bind_probability={H0: 0.5}
+    )
+    assert plan.objective_pln == pytest.approx(1.305 + 0.1)
+
+
+def test_half_odds_charge_in_the_cheaper_of_two_hours_of_one_zone() -> None:
+    """At p = 1 every kWh costs the limit, so 1.12 and 2.23 cost the same and
+    the battery may pick either; at p = 0.5 the 1.12 hour is cheaper."""
+    slots = _slots([1.12, 2.23, 3.0], demand=0.0, distribution=[0.1, 0.1, 0.1])
+    slots[2].base_consumption_kwh = 3.0
+    plan = _optimizer().optimize(
+        Forecast(slots=slots),
+        _battery(),
+        billing=[_period(energy=100.0, cost=100.0)],
+        bind_probability={H0: 0.5},
+    )
+    assert _modes(plan) == [
+        InverterMode.CHARGE,
+        InverterMode.PASSTHROUGH,
+        InverterMode.DISCHARGE,
+    ]
+
+
+def test_every_ppe1_month_needs_its_odds() -> None:
+    forecast = Forecast(slots=_slots([0.5], demand=1.0))
+    with pytest.raises(ValueError):
+        _optimizer().optimize(
+            forecast, _battery(), billing=[_period()], bind_probability={H0 - timedelta(days=1): 0.5}
+        )

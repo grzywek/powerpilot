@@ -617,3 +617,28 @@ def test_four_periods_across_a_month_boundary_match_a_brute_force() -> None:
         assert abs(outcome.settled_cost_pln - min(cost, cap)) < 1e-6
         if abs(cost - cap) > 1e-6:
             assert outcome.cap_binds is (cap < cost)
+
+
+def test_half_odds_move_the_apartment_off_an_expensive_hour() -> None:
+    """ADR 003: at p = 0.5 PPE 1's kWh of a 2.00 hour costs 1.305 while PPE 2,
+    already capped, takes it at 0.61 — worth the cycle. Planned as binding
+    (today's regime here, or p = 1) both meters pay the limit: nothing moves."""
+    forecast = Forecast(
+        slots=_slots([0.3, 2.0, 2.0], base=[1.0, 0.0, 0.0], apartment=[0.0, 5.0, 5.0])
+    )
+    billing = [_period(PPE_1, 100.0, 100.0)]
+
+    def plan(odds):
+        return _optimizer(inverter_max_discharge_kw=0.0).optimize(
+            forecast,
+            _battery(),
+            billing=billing,
+            supply=_planning(ppe2=(50.0, 50.0)),
+            bind_probability=odds,
+        )
+
+    assert _on_meter_2(plan(None)) == [0, 0, 0]
+    assert _on_meter_2(plan({H0: 1.0})) == [0, 0, 0]
+    half = plan({H0: 0.5})
+    assert _on_meter_2(half) == [0, 1, 1]
+    assert _outcome(half, PPE_2).cap_binds is True

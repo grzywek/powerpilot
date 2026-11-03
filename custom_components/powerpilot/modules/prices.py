@@ -37,7 +37,6 @@ from ..const import (
     PRICE_SOURCE_PRADCAST,
     PRICE_SOURCE_SENSOR,
     PRICE_TYPE_CERTAIN,
-    PRICE_TYPE_ESTIMATED,
     PRICE_TYPE_FORECAST,
     STORAGE_VERSION_PRICE_ARCHIVE,
 )
@@ -242,6 +241,28 @@ class PriceArchive:
     ) -> tuple[float | None, list[dict[str, Any]]]:
         """Same estimator as :meth:`estimate`, over the price ``terms`` average."""
         return self._estimate(hour_start, lambda entry: cap_price_of(entry, terms))
+
+    def replay(
+        self, hour_start: datetime, k: int, value_of
+    ) -> tuple[float | None, datetime | None]:
+        """The ``k``-th latest certain price of ``hour_start``'s weekday and hour.
+
+        Walks back whole weeks, at most ``_ESTIMATE_MAX_WEEKS_BACK``, counting
+        only certain (binding) entries: a forecast or an unarchived week is
+        skipped, never a sample. Returns ``(value_of(entry), sampled hour)``,
+        or ``(None, None)`` without a ``k``-th certain entry. Scenario ``k`` of
+        PPE 1's cap regime is the ``k``-th latest real week repeated (ADR 003).
+        """
+        found = 0
+        for weeks in range(1, _ESTIMATE_MAX_WEEKS_BACK + 1):
+            past = hour_start - timedelta(days=7 * weeks)
+            entry = self.get(past)
+            if entry is None or entry.get("type") != PRICE_TYPE_CERTAIN:
+                continue
+            found += 1
+            if found == k:
+                return value_of(entry), past
+        return None, None
 
     def _estimate(
         self, hour_start: datetime, value_of

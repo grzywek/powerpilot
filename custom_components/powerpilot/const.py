@@ -124,6 +124,11 @@ STORAGE_VERSION_PRICE_ARCHIVE: Final = 1
 # More recent weeks weigh more; renormalised over whatever samples exist.
 ESTIMATE_WEEKLY_WEIGHTS: Final = (0.5, 0.3, 0.2)
 
+# PPE 1's cap regime is judged on this many price scenarios: scenario k prices
+# every hour without a source price with the k-th latest real (certain) week
+# of the same weekday and hour (ADR 003). Never fewer to save solve time.
+CAP_SCENARIOS: Final = 4
+
 # --- EV ---
 CONF_EV_ENABLED: Final = "ev_enabled"
 CONF_EV_SOC_SENSOR: Final = "ev_soc_sensor"

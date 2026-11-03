@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -117,9 +118,11 @@ from .misses import (
     supply_record,
     switch_moment,
 )
+from .cap_outlook import cap_outlooks, replay_scenarios
 from .models import (
     BillingOutcome,
     BillingPeriod,
+    CapOutlook,
     Decision,
     ESSRequest,
     MonthTail,
@@ -217,6 +220,8 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         # held, and the alarm the binary sensor mirrors (on: None = cannot say).
         self._execution_watch = ExecutionWatch()
         self.execution_alarm: dict = {"on": None, "reason": None, "mode": None, "since": None}
+        # Wall time (s) of the last refresh's cap-regime scenarios (ADR 003).
+        self.cap_outlook_seconds: float | None = None
         self.events: deque = deque(maxlen=50)
         # What triggered the re-plan currently being computed (entity flips seen
         # by the reactive listener), and the entity → role map that names them.
@@ -878,6 +883,23 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         supply_planning, ppe2_reason = self._supply_inputs(
             forecast, billing_periods, billing_reason
         )
+        # PPE 1's month over the replayed real weeks — once per refresh, so
+        # every solve of it (cycle re-solves, missed-action counterfactuals)
+        # sees the same odds (ADR 003).
+        outlooks: list[CapOutlook] = []
+        if billing_periods:
+            outlooks = await self.hass.async_add_executor_job(
+                self._cap_outlooks,
+                optimizer,
+                forecast,
+                battery,
+                ev_request,
+                ess_request,
+                billing_periods,
+                tail,
+                supply_planning,
+            )
+
         def solve_for(request: EVRequest) -> Callable[..., Plan]:
             return partial(
                 optimizer.optimize,
@@ -892,6 +914,10 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
 
         solve = solve_for(ev_request)
         plan = await self.hass.async_add_executor_job(_settled, solve, supply_planning)
+        by_month = {outlook.month_start: outlook for outlook in outlooks}
+        for outcome in plan.billing:
+            if outcome.period.ppe == PPE_1:
+                outcome.outlook = by_month.get(outcome.period.month_start)
         if billing_reason is not None:
             plan.billing = self._unavailable_outcomes(billing_reason, forecast, PPE_1)
         elif billing_periods:
@@ -1315,6 +1341,65 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
             efficiency = ev_request.charge_efficiency if ev_request is not None else 1.0
             ev_grid = [kwh / max(efficiency, 0.01) for kwh in added]
         return periods, MonthTail(slots=tail_slots, ev_grid_kwh=ev_grid), None
+
+    def _cap_outlooks(
+        self,
+        optimizer: Optimizer,
+        forecast,
+        battery,
+        ev_request,
+        ess_request: ESSRequest,
+        periods: list[BillingPeriod],
+        tail: MonthTail | None,
+        supply: SupplyPlanning | None,
+    ) -> list[CapOutlook]:
+        """Each PPE 1 month's bind probability over the replayed weeks (executor).
+
+        Every usable scenario is the refresh's own inputs with its prices
+        replayed, solved by the plan's model as an LP relaxation
+        (``cap_outlook.py``); switching is modelled exactly when the plan
+        models it.
+        """
+        began = time.perf_counter()
+        scenarios = replay_scenarios(
+            forecast, tail, self.prices.archive, self.billing.terms_on
+        )
+        outlooks = cap_outlooks(
+            periods,
+            scenarios,
+            lambda scenario: optimizer.cap_regimes(
+                scenario.forecast,
+                battery,
+                ev_request,
+                ess_request=ess_request,
+                billing=periods,
+                tail=scenario.tail,
+                supply=supply,
+            ),
+        )
+        self.cap_outlook_seconds = time.perf_counter() - began
+        self.log_info(
+            "optimizer",
+            "Tarcza PPE 1: limit działa w "
+            + ", ".join(
+                f"{sum(1 for s in o.usable if s.binds)} z {len(o.usable)}"
+                f" tyg. ({dt_util.as_local(o.month_start):%m.%Y})"
+                for o in outlooks
+            )
+            + f" — {self.cap_outlook_seconds:.2f} s.",
+            extra={
+                "seconds": round(self.cap_outlook_seconds, 3),
+                "outlooks": [
+                    {
+                        "month_start": o.month_start.isoformat(),
+                        "bind_probability": o.bind_probability,
+                        "scenarios": [s.as_dict() for s in o.scenarios],
+                    }
+                    for o in outlooks
+                ],
+            },
+        )
+        return outlooks
 
     def _observed_month_problem(
         self, ppe: str, periods: list[BillingPeriod], first

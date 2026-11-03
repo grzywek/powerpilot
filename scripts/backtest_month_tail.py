@@ -21,7 +21,9 @@ Demand is the Victron's real load (perfect foresight, so only prices
 differ); where the car's import goes in the tail is ``--ev`` (see
 :func:`plan_month`), ``profile`` being the integration's own rule. For each
 run it prints the month's forecast average and whether the cap binds, next to
-the month's real average from the meter.
+the month's real average from the meter, and ``p``: in how many of the
+replayed weeks 1…4 the month binds by LP relaxation, the integration's bind
+probability (ADR 003).
 
 Usage, from the repository root with the project's venv::
 
@@ -303,8 +305,13 @@ def plan_month(
     known_end: datetime | None = None,
     ev: str = "month",
     efficiency: float = EV_CHARGE_EFFICIENCY,
+    relaxed: bool = False,
 ) -> tuple[float, float, bool] | None:
     """PPE 1's month forecast at ``as_of`` with the tail priced by ``method``.
+
+    ``relaxed`` judges the month as the integration judges a scenario of its
+    bind probability — the LP relaxation over the regimes
+    (:meth:`Optimizer.cap_regimes`) — instead of planning it.
 
     The archive reaches ``known_end`` (default: the end of the next day).
     The EV's import over the tail (``ev``):
@@ -389,14 +396,27 @@ def plan_month(
         hours_covered=so_far,
     )
     dt_util.now = lambda time_zone=None: as_of
-    plan = _optimizer().optimize(
-        Forecast(slots=slots),
-        _battery(),
-        billing=[period],
-        tail=MonthTail(slots=tail_slots, ev_grid_kwh=ev_grid),
-    )
+    tail = MonthTail(slots=tail_slots, ev_grid_kwh=ev_grid)
+    if relaxed:
+        [(_, energy, cost, binds)] = _optimizer().cap_regimes(
+            Forecast(slots=slots), _battery(), billing=[period], tail=tail
+        )
+        return energy, cost, binds
+    plan = _optimizer().optimize(Forecast(slots=slots), _battery(), billing=[period], tail=tail)
     outcome = plan.billing[0]
     return outcome.energy_kwh, outcome.cost_pln, bool(outcome.cap_binds)
+
+
+def bind_probability(hours: Hours, as_of: datetime, **kwargs) -> str:
+    """The integration's ``p``: the share of the replayed weeks 1…4 that bind."""
+    verdicts = [
+        plan_month(hours, as_of, week_k(k), relaxed=True, **kwargs)
+        for k in range(1, REPLAY_WEEKS + 1)
+    ]
+    usable = [v for v in verdicts if v is not None]
+    if not usable:
+        return "  —  "
+    return f"{sum(1 for _, _, binds in usable if binds)}/{len(usable)}"
 
 
 def _cheapest_hours(prices: list[float], kwh: float) -> tuple[float, float]:
@@ -518,6 +538,7 @@ def main() -> None:
     print(
         "\nas-of (12:00)    real month   "
         + "  ".join(f"{name:^12}" for name, _ in methods)
+        + "    p"
     )
     last = dt_util.as_local(hours.end - HOUR)
     as_of_days = (
@@ -541,9 +562,11 @@ def main() -> None:
             plan_month(hours, as_of, method, ev=args.ev, efficiency=args.ev_efficiency)
             for _, method in methods
         ]
+        odds = bind_probability(hours, as_of, ev=args.ev, efficiency=args.ev_efficiency)
         print(
             f"{local:%a %d.%m}        {truth}  "
-            + "  ".join(f"{_fmt(r):^12}" for r in results),
+            + "  ".join(f"{_fmt(r):^12}" for r in results)
+            + f"  {odds}",
             flush=True,
         )
 
@@ -561,9 +584,13 @@ def main() -> None:
         )
         for _, method in methods
     ]
+    odds = bind_probability(
+        hours, as_of, known_end=hours.prices_end, ev=args.ev, efficiency=args.ev_efficiency
+    )
     print(
         f"{dt_util.as_local(as_of):%a %d.%m %H:%M}    (trwa)     "
         + "  ".join(f"{_fmt(r):^12}" for r in results)
+        + f"  {odds}"
     )
     print(f"  EV past the measurements: {hours.ev_daily_kwh:.1f} kWh/day")
 

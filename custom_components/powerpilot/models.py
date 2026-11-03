@@ -277,6 +277,72 @@ class BillingPeriod:
         }
 
 
+@dataclass(frozen=True)
+class CapScenario:
+    """One replayed real price week behind PPE 1's bind probability (ADR 003).
+
+    Week ``week`` (1 = the latest) prices every hour without a source price
+    with the ``week``-th latest certain price of its weekday and hour.
+    ``week_start`` is the first date the replay drew a price from;
+    ``average_kwh`` and ``binds`` are the month under it by LP relaxation.
+    A scenario missing a price is dropped: ``dropped_reason`` says which hours.
+    """
+
+    week: int
+    week_start: date | None = None
+    average_kwh: float | None = None
+    binds: bool | None = None
+    dropped_reason: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        return self.dropped_reason is None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "week": self.week,
+            "week_start": self.week_start.isoformat() if self.week_start else None,
+            "average_kwh": (
+                round(self.average_kwh, 4) if self.average_kwh is not None else None
+            ),
+            "binds": self.binds,
+            "dropped_reason": self.dropped_reason,
+        }
+
+
+@dataclass(frozen=True)
+class CapOutlook:
+    """How often PPE 1's month binds over the replayed real weeks (ADR 003).
+
+    ``bind_probability`` is the share of usable scenarios in which the month
+    binds (0, ¼, ½, ¾, 1 with four); ``None`` — with ``unavailable_reason`` —
+    when no scenario is usable.
+    """
+
+    month_start: datetime
+    scenarios: tuple[CapScenario, ...]
+
+    @property
+    def usable(self) -> list[CapScenario]:
+        return [s for s in self.scenarios if s.usable]
+
+    @property
+    def bind_probability(self) -> float | None:
+        usable = self.usable
+        if not usable:
+            return None
+        return sum(1 for s in usable if s.binds) / len(usable)
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        if self.usable:
+            return None
+        return (
+            f"żaden z {len(self.scenarios)} tygodni cen nie da się odtworzyć: "
+            + "; ".join(s.dropped_reason or "" for s in self.scenarios)
+        )
+
+
 @dataclass
 class BillingOutcome:
     """The optimizer's month forecast for one :class:`BillingPeriod`.
@@ -297,6 +363,9 @@ class BillingOutcome:
     planned_energy_kwh: float  # scheduled inside the planning horizon
     tail_energy_kwh: float  # estimated beyond the horizon
     unavailable_reason: str | None = None
+    # PPE 1's month over the replayed real weeks (``cap_outlook.py``); ``None``
+    # for PPE 2 and while the cap is unavailable.
+    outlook: CapOutlook | None = None
 
     @property
     def available(self) -> bool:

@@ -385,6 +385,33 @@ class _LPSolution:
     objective_pln: float = 0.0
 
 
+@dataclass
+class _Model:
+    """A horizon's validated LP inputs (:meth:`Optimizer._model`): the per-hour
+    series over horizon + month tail, and ``lp`` — the keyword arguments of
+    :meth:`Optimizer._solve_lp`."""
+
+    n: int  # planning-horizon hours; the month tail follows them
+    total: int
+    all_slots: list
+    fracs: list[float]
+    ev_alloc: EVAllocation
+    energy_price: list[float]
+    distribution: list[float]
+    total_price: list[float]
+    charge_order_price: list[float]
+    demand: list[float]  # the Victron's own demand, the apartment apart
+    apartment: list[float]
+    ev_kwh: list[float]
+    cap_price: list[float] | None
+    periods: list[_CapPeriod]
+    ppe2_periods: list[_CapPeriod]
+    fixed_s: float
+    switch: _SwitchModel | None
+    switching: bool
+    lp: dict
+
+
 class Optimizer:
     """Produces a cost-optimal :class:`Plan` via a HiGHS linear program."""
 
@@ -430,10 +457,117 @@ class Optimizer:
         needs both meters' periods; without them it is refused.
         """
         battery = battery.copy()  # never mutate the live state
+        if not forecast.slots:
+            return Plan(forecast=forecast, decisions=[], created_at=dt_util.now())
+        model = self._model(forecast, battery, ev_request, ess_request, billing, tail, supply)
+        solution = self._solve_lp(**model.lp)
+        n, total = model.n, model.total
+        all_slots, periods, ppe2_periods = model.all_slots, model.periods, model.ppe2_periods
+        switch, fixed_s, apartment = model.switch, model.fixed_s, model.apartment
+        demand, energy_price, cap_price = model.demand, model.energy_price, model.cap_price
+        distribution, total_price, ev_kwh = model.distribution, model.total_price, model.ev_kwh
+        charge_order_price, fracs = model.charge_order_price, model.fracs
+        ev_alloc, switching = model.ev_alloc, model.switching
+        on_meter_2 = solution.supply if switch is not None else [fixed_s] * total
+        ppe2_import = [apartment[t] * on_meter_2[t] for t in range(total)]
+        victron_demand = [demand[t] + apartment[t] - ppe2_import[t] for t in range(total)]
+
+        plan = self._build_plan(
+            forecast=forecast,
+            battery=battery,
+            charge=solution.charge[:n],
+            discharge=solution.discharge[:n],
+            stored=solution.stored[:n],
+            energy_price=energy_price[:n],
+            distribution=distribution[:n],
+            total_price=total_price[:n],
+            demand=victron_demand[:n],
+            ev_kwh=ev_kwh[:n],
+            ev_alloc=ev_alloc,
+            charge_order_price=charge_order_price[:n],
+            ev_request=ev_request,
+            reminders=reminders,
+            fracs=fracs[:n],
+            # Only hours of capped months carry a cap price into the trace.
+            cap_price=(
+                [
+                    cap_price[t] if any(t in cp.hours for cp in periods) else None
+                    for t in range(n)
+                ]
+                if cap_price is not None
+                else None
+            ),
+            supply=(
+                [
+                    SUPPLY_METER_2 if on_meter_2[t] > 0.5 else SUPPLY_VICTRON
+                    for t in range(n)
+                ]
+                if supply is not None
+                else None
+            ),
+            apartment=apartment[:n],
+        )
+        plan.billing = self._billing_outcomes(
+            periods, solution.periods, solution.grid, n
+        )
+        if ppe2_periods:
+            settled2 = (
+                solution.ppe2_periods
+                if switch is not None
+                else self._fixed_settlements(ppe2_periods, ppe2_import, cap_price)
+            )
+            plan.billing += self._billing_outcomes(
+                ppe2_periods, settled2, ppe2_import, n
+            )
+        plan.supply_switching = switching
+        plan.supply_reason = supply.switching_reason if supply is not None else None
+        plan.comparable_cost_pln = solution.objective
+        plan.objective_pln = solution.objective_pln
+        if switch is not None:
+            plan.supply_boundaries = [all_slots[t].start for t in switch.starts[1:]]
+        return plan
+
+    def cap_regimes(
+        self,
+        forecast: Forecast,
+        battery: BatteryModel,
+        ev_request: EVRequest | None = None,
+        ess_request: ESSRequest | None = None,
+        billing: list[BillingPeriod] | None = None,
+        tail: MonthTail | None = None,
+        supply: SupplyPlanning | None = None,
+    ) -> list[tuple[BillingPeriod, float, float, bool]]:
+        """PPE 1's month regimes under these inputs, by LP relaxation (ADR 003).
+
+        The plan's own model and inputs (as :meth:`optimize` takes them), but
+        only the bounding step of the regime enumeration: every combination's
+        LP relaxation, the cheapest giving each period's regime. The relaxation
+        is optimistic (fractional discharge and supply), so it errs toward
+        "does not bind", the cheaper error. Returns ``(period, energy, pre-cap
+        cost, cap binds)`` per PPE 1 period the horizon and tail touch.
+        """
+        if not forecast.slots or not billing:
+            return []
+        model = self._model(forecast, battery.copy(), ev_request, ess_request, billing, tail, supply)
+        solution = self._solve_lp(**model.lp, relaxed=True)
+        return [
+            (cp.period, energy, cost, binds)
+            for cp, (energy, cost, binds) in zip(model.periods, solution.periods)
+        ]
+
+    def _model(
+        self,
+        forecast: Forecast,
+        battery: BatteryModel,
+        ev_request: EVRequest | None,
+        ess_request: ESSRequest | None,
+        billing: list[BillingPeriod] | None,
+        tail: MonthTail | None,
+        supply: SupplyPlanning | None,
+    ) -> _Model:
+        """The LP's inputs for a non-empty horizon, validated (see :meth:`optimize`)."""
         slots = forecast.slots
         n = len(slots)
-        if n == 0:
-            return Plan(forecast=forecast, decisions=[], created_at=dt_util.now())
         switching = supply is not None and supply.switching
         if switching and not (billing and supply.ppe2_periods):
             raise ValueError("switching the apartment needs PPE 1's and PPE 2's periods")
@@ -549,81 +683,43 @@ class Optimizer:
             else [demand[t] + apartment[t] * (1.0 - fixed_s) for t in range(total)]
         )
 
-        solution = self._solve_lp(
-            battery=battery,
-            total_price=total_price,
-            demand=lp_demand,
-            ev_kwh=ev_kwh,
-            ev_charger_kw=ev_charger_kw,
-            charge_order_price=charge_order_price,
+        return _Model(
+            n=n,
+            total=total,
+            all_slots=all_slots,
             fracs=fracs,
-            slots=all_slots,
-            ess_request=ess_request,
+            ev_alloc=ev_alloc,
+            energy_price=energy_price,
+            distribution=distribution,
+            total_price=total_price,
+            charge_order_price=charge_order_price,
+            demand=demand,
+            apartment=apartment,
+            ev_kwh=ev_kwh,
             cap_price=cap_price,
             periods=periods,
-            tail_start=n,
-            apartment=apartment if switch is not None else None,
+            ppe2_periods=ppe2_periods,
+            fixed_s=fixed_s,
             switch=switch,
-            ppe2_periods=ppe2_periods if switch is not None else None,
-        )
-        on_meter_2 = solution.supply if switch is not None else [fixed_s] * total
-        ppe2_import = [apartment[t] * on_meter_2[t] for t in range(total)]
-        victron_demand = [demand[t] + apartment[t] - ppe2_import[t] for t in range(total)]
-
-        plan = self._build_plan(
-            forecast=forecast,
-            battery=battery,
-            charge=solution.charge[:n],
-            discharge=solution.discharge[:n],
-            stored=solution.stored[:n],
-            energy_price=energy_price[:n],
-            distribution=distribution[:n],
-            total_price=total_price[:n],
-            demand=victron_demand[:n],
-            ev_kwh=ev_kwh[:n],
-            ev_alloc=ev_alloc,
-            charge_order_price=charge_order_price[:n],
-            ev_request=ev_request,
-            reminders=reminders,
-            fracs=fracs[:n],
-            # Only hours of capped months carry a cap price into the trace.
-            cap_price=(
-                [
-                    cap_price[t] if any(t in cp.hours for cp in periods) else None
-                    for t in range(n)
-                ]
-                if cap_price is not None
-                else None
+            switching=switching,
+            lp=dict(
+                battery=battery,
+                total_price=total_price,
+                demand=lp_demand,
+                ev_kwh=ev_kwh,
+                ev_charger_kw=ev_charger_kw,
+                charge_order_price=charge_order_price,
+                fracs=fracs,
+                slots=all_slots,
+                ess_request=ess_request,
+                cap_price=cap_price,
+                periods=periods,
+                tail_start=n,
+                apartment=apartment if switch is not None else None,
+                switch=switch,
+                ppe2_periods=ppe2_periods if switch is not None else None,
             ),
-            supply=(
-                [
-                    SUPPLY_METER_2 if on_meter_2[t] > 0.5 else SUPPLY_VICTRON
-                    for t in range(n)
-                ]
-                if supply is not None
-                else None
-            ),
-            apartment=apartment[:n],
         )
-        plan.billing = self._billing_outcomes(
-            periods, solution.periods, solution.grid, n
-        )
-        if ppe2_periods:
-            settled2 = (
-                solution.ppe2_periods
-                if switch is not None
-                else self._fixed_settlements(ppe2_periods, ppe2_import, cap_price)
-            )
-            plan.billing += self._billing_outcomes(
-                ppe2_periods, settled2, ppe2_import, n
-            )
-        plan.supply_switching = switching
-        plan.supply_reason = supply.switching_reason if supply is not None else None
-        plan.comparable_cost_pln = solution.objective
-        plan.objective_pln = solution.objective_pln
-        if switch is not None:
-            plan.supply_boundaries = [all_slots[t].start for t in switch.starts[1:]]
-        return plan
 
     @staticmethod
     def _switch_model(
@@ -781,6 +877,7 @@ class Optimizer:
         apartment: list[float] | None = None,
         switch: _SwitchModel | None = None,
         ppe2_periods: list[_CapPeriod] | None = None,
+        relaxed: bool = False,
     ) -> _LPSolution:
         """Solve the MILP over ``len(total_price)`` hours.
 
@@ -795,6 +892,11 @@ class Optimizer:
         on the Victron or on meter 2 (``demand`` is then the Victron's own
         demand without it) and PPE 2's ``ppe2_periods`` are settled like
         PPE 1's; without it ``demand`` already holds the apartment's share.
+
+        ``relaxed`` stops after the regime combinations' LP relaxations and
+        returns only the cheapest one's settlements (``periods``,
+        ``ppe2_periods`` and its objective; no flows, the diagnostics
+        untouched) — see :meth:`cap_regimes`.
         """
         cfg = self.config
         n = len(total_price)
@@ -1297,6 +1399,11 @@ class Optimizer:
                     np.array(vals, dtype=np.float64),
                 )
 
+        if relaxed:
+            return self._cheapest_relaxation(
+                h, combos, set_regimes, settlements, len(periods)
+            )
+
         # Exact pruning: a combination's LP relaxation bounds its MIP from
         # below, so the MIPs run cheapest bound first and one whose bound
         # exceeds the best plan found is skipped. The others run with the
@@ -1415,6 +1522,45 @@ class Optimizer:
             ppe2_periods=ppe2_settled,
             objective=objective,
             objective_pln=objective_pln,
+        )
+
+    @staticmethod
+    def _cheapest_relaxation(
+        h, combos, set_regimes, settlements, ppe1_count: int
+    ) -> _LPSolution:
+        """The regime combination whose LP relaxation is cheapest, settled.
+
+        ``combos`` come in the tie order, so among relaxations within the MIP's
+        gap the earlier (more binding) one wins, as in the exact enumeration.
+        """
+        h.setOptionValue("solve_relaxation", True)
+        best: tuple[float, tuple[bool, ...], list[float]] | None = None
+        try:
+            for combo in combos:
+                set_regimes(combo)
+                h.run()
+                if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+                    raise RuntimeError(
+                        f"HiGHS could not relax cap regimes {combo}: {h.getModelStatus()}"
+                    )
+                objective = h.getInfo().objective_function_value
+                if best is None or objective < best[0] - _REGIME_TIE_PLN:
+                    best = (objective, combo, list(h.getSolution().col_value))
+        finally:
+            h.setOptionValue("solve_relaxation", False)
+        objective, combo, sol = best
+        settled = [
+            (sol[e_col], sol[c_col], binds)
+            for (_cp, (c_col, e_col)), binds in zip(settlements, combo)
+        ]
+        return _LPSolution(
+            charge=[],
+            discharge=[],
+            stored=[],
+            grid=[],
+            periods=settled[:ppe1_count],
+            ppe2_periods=settled[ppe1_count:],
+            objective=objective,
         )
 
     @staticmethod

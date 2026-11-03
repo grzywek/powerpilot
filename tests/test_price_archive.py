@@ -162,3 +162,32 @@ def test_serialisation_roundtrip() -> None:
     restored = PriceArchive.from_dict(archive.to_dict())
     assert restored.get(h) == archive.get(h)
     assert len(restored) == 1
+
+
+def test_replay_takes_the_kth_latest_certain_week_and_skips_forecasts() -> None:
+    """Scenario k of PPE 1's cap regime is the k-th latest real week (ADR 003)."""
+    archive = PriceArchive()
+    h = _hour()
+    week = timedelta(days=7)
+    archive.record(h - week, 9.9, PRICE_TYPE_FORECAST, "pradcast", "t")  # never a sample
+    archive.record(h - 2 * week, 1.0, PRICE_TYPE_CERTAIN, "pradcast", "t")
+    # three weeks back is not archived at all
+    archive.record(h - 4 * week, 2.0, PRICE_TYPE_CERTAIN, "pradcast", "t")
+    archive.record(h - 5 * week, 3.0, PRICE_TYPE_CERTAIN, "pradcast", "t")
+
+    def energy(entry):
+        return entry["energy"]
+
+    assert archive.replay(h, 1, energy) == (1.0, h - 2 * week)
+    assert archive.replay(h, 2, energy) == (2.0, h - 4 * week)
+    assert archive.replay(h, 3, energy) == (3.0, h - 5 * week)
+    assert archive.replay(h, 4, energy) == (None, None)
+
+
+def test_replay_looks_back_at_most_twelve_weeks() -> None:
+    archive = PriceArchive()
+    h = _hour()
+    archive.record(h - timedelta(days=7 * 13), 1.0, PRICE_TYPE_CERTAIN, "pradcast", "t")
+    assert archive.replay(h, 1, lambda entry: entry["energy"]) == (None, None)
+    archive.record(h - timedelta(days=7 * 12), 2.0, PRICE_TYPE_CERTAIN, "pradcast", "t")
+    assert archive.replay(h, 1, lambda entry: entry["energy"])[0] == 2.0

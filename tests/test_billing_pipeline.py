@@ -19,6 +19,7 @@ from custom_components.powerpilot.const import (
     CONF_TARCZA_TERMS,
     DEFAULTS,
     DOMAIN,
+    PRICE_TYPE_CERTAIN,
     SENSOR_TARCZA_PPE1_AVERAGE,
     SENSOR_TARCZA_PPE1_DISCOUNT,
     SENSOR_TARCZA_PPE1_ENERGY,
@@ -26,7 +27,7 @@ from custom_components.powerpilot.const import (
     SENSOR_TARCZA_PPE2_AVERAGE,
     SENSOR_TARCZA_PPE2_ENERGY,
 )
-from custom_components.powerpilot.models import Forecast, HourSlot
+from custom_components.powerpilot.models import ESSRequest, Forecast, HourSlot
 from custom_components.powerpilot.modules.billing import month_bounds
 from custom_components.powerpilot.modules.ev import _local_day_hours
 
@@ -266,3 +267,46 @@ async def test_too_few_days_of_ev_charging_make_the_cap_unavailable(
     assert periods is None and tail is None
     assert "sensor.ev_added" in reason
     assert "10 z 28" in reason
+
+
+async def test_each_refresh_judges_ppe1_on_the_replayed_weeks(hass: HomeAssistant) -> None:
+    """The scenarios come from the price archive's certain weeks under the
+    month's edition; one relaxed solve per usable scenario (ADR 003)."""
+    coordinator, horizon, _ = await _next_month_with_a_tail(hass, 28)
+    periods, tail, reason = await coordinator._billing_inputs(horizon, None)
+    assert reason is None
+    calls: list[list[float]] = []
+
+    def cap_regimes(forecast, battery, ev_request, ess_request=None, billing=None, tail=None, supply=None):
+        calls.append([slot.buy_price for slot in tail.slots[:2]])
+        return [(billing[0], 10.0, 8.0, len(calls) % 2 == 1)]
+
+    optimizer = SimpleNamespace(cap_regimes=cap_regimes)
+    # An empty archive: every scenario is dropped, none is solved.
+    [outlook] = coordinator._cap_outlooks(
+        optimizer, horizon, None, None, ESSRequest(), periods, tail, None
+    )
+    assert calls == []
+    assert outlook.bind_probability is None
+    assert "żaden z 4" in outlook.unavailable_reason
+
+    # Four weeks of certain prices behind every tail hour.
+    archive = coordinator.prices.archive
+    hour = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    for back in range(1, 40 * 24):
+        moment = hour - timedelta(hours=back)
+        archive.record(
+            moment,
+            0.4,
+            PRICE_TYPE_CERTAIN,
+            "pradcast",
+            "t",
+            formula={"tge": 0.3, "markup": 0.1, "vat": 0.0},
+        )
+    [outlook] = coordinator._cap_outlooks(
+        optimizer, horizon, None, None, ESSRequest(), periods, tail, None
+    )
+    assert calls == [[0.4, 0.4]] * 4
+    assert outlook.month_start == periods[0].month_start
+    assert outlook.bind_probability == 0.5
+    assert coordinator.cap_outlook_seconds is not None

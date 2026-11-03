@@ -1,0 +1,56 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "d0b5c1641423",
+  "session_id": "1d381190-c240-422f-9adc-7a8dfcb75ad4",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-03T14:26:26.417614Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/adr/003-cap-regime-under-uncertainty.md",
+    "docs/plans/tarcza-regime-uncertainty-2026-11-03.md"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "16ab897aab95",
+  "checkpoint_transcript_start": 1274,
+  "transcript_lines_at_start": 1274,
+  "compact_transcript_start": 136,
+  "token_usage": {
+    "input_tokens": 40,
+    "cache_creation_tokens": 355647,
+    "cache_read_tokens": 7213591,
+    "output_tokens": 28422,
+    "api_call_count": 20
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-11-03T14:26:26.306455Z",
+    "agent_lines": 257,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 257,
+    "total_lines_changed": 257,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 150,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84,
+        ".claude/settings.local.json": 11,
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 52
+      }
+    }
+  ]
+}

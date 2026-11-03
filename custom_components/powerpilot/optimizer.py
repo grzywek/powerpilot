@@ -31,7 +31,10 @@ bounded by the usable SoC band ``[E_min, E_max]``. The household demand of
 each hour is served either from the grid or from the battery (no export, so
 ``d[t] ≤ demand[t]``). The EV charger sits before the inverter and is always
 grid-fed; its per-hour energy ``ev[t]`` is planned separately into the cheapest
-available hours and enters the LP as a fixed extra grid load.
+available hours and enters the LP as a fixed extra grid load. In the month's
+tail past the horizon ``ev[t]`` is the car's learned charging of that weekday
+and hour — never placed by the LP, which would put it in the month's cheapest
+hours (ADR 003).
 
 Grid energy imported in an hour is ``grid[t] = demand[t] − d[t] + c[t] + ev[t]``
 and is capped by the physical connection power.
@@ -369,7 +372,6 @@ class _LPSolution:
     discharge: list[float]  # kWh delivered to the house from the battery
     stored: list[float]  # post-loss kWh stored
     grid: list[float]  # grid import (PPE 1)
-    tail_ev: list[float]  # expected EV import placed in tail hours
     periods: list[tuple[float, float, bool]]  # (energy, pre-cap cost, cap binds)
     # Apartment on meter 2 per hour (1.0) and PPE 2's settled months; empty
     # unless switching was modelled.
@@ -436,6 +438,11 @@ class Optimizer:
         if switching and not (billing and supply.ppe2_periods):
             raise ValueError("switching the apartment needs PPE 1's and PPE 2's periods")
         tail_slots = list(tail.slots) if (tail is not None and billing) else []
+        tail_ev = list(tail.ev_grid_kwh) if tail_slots else []
+        if tail_ev and len(tail_ev) != len(tail_slots):
+            raise ValueError(
+                f"tail EV import has {len(tail_ev)} hours for {len(tail_slots)} tail hours"
+            )
         all_slots = slots + tail_slots
         total = len(all_slots)
 
@@ -482,10 +489,10 @@ class Optimizer:
         ]
         # The LP and every cost see GRID energy; the pack-side ("added") energy
         # and the fitted amps ride along into the plan for SoC/control. The
-        # tail carries no planned EV hours — its expected EV import is placed
-        # by the solver itself.
+        # tail's EV import is the car's learned charging per hour, a fixed load
+        # like the horizon's planned one.
         ev_kwh = [ev_alloc.grid.get(slots[t].start, 0.0) for t in range(n)]
-        ev_kwh += [0.0] * len(tail_slots)
+        ev_kwh += tail_ev or [0.0] * len(tail_slots)
 
         # Energy price each hour moves into its month's settlement: the cap
         # price inside a capped month, nothing outside one (that hour's energy
@@ -555,8 +562,6 @@ class Optimizer:
             cap_price=cap_price,
             periods=periods,
             tail_start=n,
-            tail_ev_kwh=tail.ev_grid_kwh if (tail is not None and billing) else 0.0,
-            tail_ev_cap_kw=tail.ev_charger_kw if (tail is not None and billing) else 0.0,
             apartment=apartment if switch is not None else None,
             switch=switch,
             ppe2_periods=ppe2_periods if switch is not None else None,
@@ -773,8 +778,6 @@ class Optimizer:
         cap_price: list[float] | None = None,
         periods: list[_CapPeriod] | None = None,
         tail_start: int | None = None,
-        tail_ev_kwh: float = 0.0,
-        tail_ev_cap_kw: float = 0.0,
         apartment: list[float] | None = None,
         switch: _SwitchModel | None = None,
         ppe2_periods: list[_CapPeriod] | None = None,
@@ -784,9 +787,9 @@ class Optimizer:
         With ``periods`` (billing months under a price cap) the energy part of
         every grid kWh is settled per month as ``min(C_P, limit·E_P)``; without
         them the model is the plain per-hour objective. Hours from
-        ``tail_start`` on are the accounting-only month tail: they carry no
-        planned EV load, but ``tail_ev_kwh`` of expected EV import is placed
-        among them by the solver (≤ ``tail_ev_cap_kw`` per hour).
+        ``tail_start`` on are the accounting-only month tail; their
+        ``ev_kwh`` is the car's learned charging, an import that does not
+        share the inverter's phase the way a planned session does.
 
         With ``switch`` the apartment's ``apartment`` kWh are placed per hour
         on the Victron or on meter 2 (``demand`` is then the Victron's own
@@ -885,18 +888,13 @@ class Optimizer:
         s0 = d0 + n  # first reservoir-level (state) column
         y0 = s0 + n  # first min-charge indicator column
         g0 = y0 + (n if min_charge > _EPS else 0)  # first grid-import column
-        tail_n = n - tail_start
-        v0 = g0 + n  # first tail-EV column (one per tail hour)
-        p0 = v0 + tail_n  # first billing-period block (C, E per period)
+        p0 = g0 + n  # first billing-period block (C, E per period)
 
         def state_col(t: int) -> int:
             return s0 + t
 
         def grid_col(t: int) -> int:
             return g0 + t
-
-        def tail_ev_col(t: int) -> int:
-            return v0 + (t - tail_start)
 
         def period_cols(i: int) -> tuple[int, int]:
             base = p0 + 2 * i
@@ -907,11 +905,12 @@ class Optimizer:
         # electrical: worst case the EV charger and the inverter share one
         # phase, so the inverter gets whatever the phase fuse leaves after the
         # EV draw. Without fuse data fall back to the legacy blanket
-        # subtraction.
+        # subtraction. The tail's learned EV import is an hourly mean, not a
+        # session sharing the phase.
         charge_caps: list[float] = []
         for t in range(n):
             charge_cap = cfg.inverter_max_charge_kw
-            if ev_kwh[t] > 0:
+            if ev_kwh[t] > 0 and t < tail_start:
                 if cfg.phase_capacity_kw > _EPS:
                     charge_cap = min(
                         charge_cap,
@@ -967,28 +966,11 @@ class Optimizer:
                 if t < tail_start:
                     h.changeColIntegrality(y0 + t, highspy.HighsVarType.kInteger)
 
-        # Grid import g[t] = demand + EV + charge − discharge (+ tail EV), capped
-        # by the physical connection power straight on the column bound.
+        # Grid import g[t] = demand + EV + charge − discharge, capped by the
+        # physical connection power straight on the column bound.
         conn = cfg.connection_power_kw or 0.0
         for t in range(n):
             h.addVar(0.0, conn * fracs[t] if conn > 0 else inf)
-
-        # Expected EV import in the month's tail, placed by the solver.
-        tail_ev_cap = [0.0] * n
-        if tail_n > 0 and tail_ev_kwh > _EPS and tail_ev_cap_kw > _EPS:
-            for t in range(tail_start, n):
-                tail_ev_cap[t] = tail_ev_cap_kw * fracs[t]
-        placeable = sum(tail_ev_cap[tail_start:])
-        if tail_ev_kwh > placeable + _EPS:
-            _LOGGER.warning(
-                "Ogon miesiąca: oczekiwane ładowanie EV %.1f kWh nie mieści się "
-                "w %.1f kWh dostępnych na ładowarce — przycinam do tej wartości.",
-                tail_ev_kwh,
-                placeable,
-            )
-            tail_ev_kwh = placeable
-        for t in range(tail_start, n):
-            h.addVar(0.0, tail_ev_cap[t])
 
         # Billing-period blocks: C (pre-cap cost) and E (import). The month's
         # settlement ``min(C, L·E)`` is concave; instead of a regime binary
@@ -1065,8 +1047,6 @@ class Optimizer:
             cost[d0 + t] = per_kwh * discharge_cap[t]
             if t in w_cols:
                 cost[w_cols[t]] = -per_kwh * apartment_share[t]
-        for t in range(tail_start, n):
-            cost[tail_ev_col(t)] = total_price[t] - settled[t]
         for k in range(1, seg_k):
             cost[o_col(k)] = switch.threshold
         # The settlement columns' costs are set per regime combination below.
@@ -1148,14 +1128,11 @@ class Optimizer:
                 np.array(val, dtype=np.float64),
             )
 
-        # Grid balance (PPE 1): g[t] − Σ_k c[t,k] + cap[t]·z[t] − v[t] = demand + EV,
-        # with switching g[t] − Σc + D0·z − (D0 − D1)·w + A·s − v = F + A + EV.
+        # Grid balance (PPE 1): g[t] − Σ_k c[t,k] + cap[t]·z[t] = demand + EV,
+        # with switching g[t] − Σc + D0·z − (D0 − D1)·w + A·s = F + A + EV.
         for t in range(n):
             idx = [grid_col(t)] + [seg_col(t, k) for k in range(seg_n)] + [d0 + t]
             val = [1.0] + [-1.0] * seg_n + [discharge_cap[t]]
-            if t >= tail_start:
-                idx.append(tail_ev_col(t))
-                val.append(-1.0)
             if t in w_cols:
                 idx.append(w_cols[t])
                 val.append(-apartment_share[t])
@@ -1232,17 +1209,6 @@ class Optimizer:
                         [*([1.0] * seg_n), -min_charge * fracs[t]], dtype=np.float64
                     ),
                 )
-
-        # Expected tail EV import: exactly ``tail_ev_kwh`` over the tail hours.
-        if tail_n > 0 and tail_ev_kwh > _EPS:
-            idx = [tail_ev_col(t) for t in range(tail_start, n)]
-            h.addRow(
-                tail_ev_kwh,
-                tail_ev_kwh,
-                len(idx),
-                np.array(idx, dtype=np.int32),
-                np.ones(len(idx), dtype=np.float64),
-            )
 
         # Monthly settlement per billing period:
         #   C_P = C_mtd + Σ cap_price[t]·g[t]      E_P = E_mtd + Σ g[t]
@@ -1426,9 +1392,6 @@ class Optimizer:
             for t in range(n)
         ]
         grid = [max(0.0, sol[grid_col(t)]) for t in range(n)]
-        tail_ev = [0.0] * n
-        for t in range(tail_start, n):
-            tail_ev[t] = max(0.0, sol[tail_ev_col(t)])
         settled_periods: list[tuple[float, float, bool]] = []
         for i in range(len(periods)):
             c_col, e_col = period_cols(i)
@@ -1447,7 +1410,6 @@ class Optimizer:
             discharge=discharge,
             stored=stored,
             grid=grid,
-            tail_ev=tail_ev,
             periods=settled_periods,
             supply=supply,
             ppe2_periods=ppe2_settled,

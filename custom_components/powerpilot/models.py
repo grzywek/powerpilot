@@ -394,14 +394,14 @@ class MonthTail:
 
     The monthly cap depends on the whole month, so the optimizer prices the
     battery against these estimated hours too — but reports decisions only for
-    the planning horizon. ``ev_grid_kwh`` is the expected EV import over the
-    tail (from the learned driving profile); the LP places it in the cheapest
-    tail hours, bounded per hour by ``ev_charger_kw``.
+    the planning horizon. ``ev_grid_kwh`` is the EV's grid import of each slot
+    from the car's learned charging profile, a fixed load the optimizer adds
+    to PPE 1's import and settlement — never placed by the LP (ADR 003).
+    Empty without an EV; otherwise one value per slot.
     """
 
     slots: list[HourSlot] = field(default_factory=list)
-    ev_grid_kwh: float = 0.0
-    ev_charger_kw: float = 0.0
+    ev_grid_kwh: list[float] = field(default_factory=list)
 
 
 @dataclass

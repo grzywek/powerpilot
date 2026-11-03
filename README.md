@@ -215,11 +215,15 @@ PowerPilot models it end to end:
   to PPE 1's (its outcome is in `plan.billing` with `ppe = ppe2`);
 - the optimizer settles each capped month it touches as `min(C, limit × E)` and
   plans the battery under that regime, pricing the rest of the month from the
-  weekly consumption profile, the archive's price estimate and the learned EV
-  driving profile;
+  weekly consumption profile and the archive's price estimate. The car charges
+  in the rest of the month when it usually does: each hour carries the mean
+  charging of its weekday and hour over the latest 28 complete days of the
+  energy-added sensor's statistics (within the last 56), on the grid side —
+  never moved into the month's cheapest hours;
 - when the cap cannot be modelled (unusable editions, incomplete month data,
-  unpriced tail hours, no EV driving profile yet) the plan says why and the
-  battery is planned without it — no substitute data.
+  unpriced tail hours, fewer than 28 complete days of EV charging statistics)
+  the plan says why and the battery is planned without it — no substitute
+  data.
 
 | Entity | Meaning |
 |--------|---------|

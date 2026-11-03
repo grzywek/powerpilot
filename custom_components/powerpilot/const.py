@@ -256,6 +256,14 @@ DRAIN_LEARN_DAYS: Final = 30
 MIN_TRIP_KM: Final = 2.0  # ignore sub-2 km noise when learning kWh/km
 DRAIN_HORIZON_HOURS: Final = 24  # look-ahead window for predicted driving drain
 
+# --- EV charging profile (learned) ---
+# The month's tail beyond the planning horizon carries the car's charging as a
+# fixed import per hour: the mean charge of its weekday and hour over the latest
+# EV_CHARGE_PROFILE_DAYS complete days of the energy-added sensor's hourly
+# statistics, looked for within EV_CHARGE_PROFILE_LOOKBACK_DAYS (ADR 003).
+EV_CHARGE_PROFILE_DAYS: Final = 28
+EV_CHARGE_PROFILE_LOOKBACK_DAYS: Final = 56
+
 # --- Monthly price cap ("Tarcza Pstryk") ---
 # The seller caps the MONTHLY weighted-average energy price: at month end the
 # bill is ``min(Σ kWh × price, limit × Σ kWh)`` per point of delivery (PPE).

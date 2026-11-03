@@ -1244,7 +1244,7 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         Returns ``(periods, tail, reason)``. With ``periods`` the optimizer
         settles each month as ``min(cost, limit × energy)`` and plans the
         battery under that regime; with ``reason`` the cap cannot be modelled
-        (incomplete month-to-date data, unpriced tail hours, no EV driving
+        (incomplete month-to-date data, unpriced tail hours, no EV charging
         profile) and the battery is planned WITHOUT it — the plan says so, no
         substitute data is used. ``(None, None, None)`` means no cap applies
         to the horizon at all.
@@ -1304,25 +1304,17 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                 "za krótka historia cen w archiwum",
             )
 
-        ev_grid = 0.0
-        charger_kw = 0.0
+        # The car charges in the tail when it usually does — its learned
+        # charging per weekday and hour, never the month's cheapest hours
+        # (ADR 003), on the grid side like the planned sessions.
+        ev_grid: list[float] = []
         if self.ev.enabled and tail_slots:
-            drain = self.ev.predicted_drain_between(tail_start, tail_end)
-            if drain is None:
-                return (
-                    None,
-                    None,
-                    "brak wyuczonego profilu jazdy EV — nie da się oszacować "
-                    "ładowania auta w ogonie miesiąca",
-                )
+            added = self.ev.charge_profile_kwh([slot.start for slot in tail_slots])
+            if added is None:
+                return None, None, self.ev.charge_profile_reason
             efficiency = ev_request.charge_efficiency if ev_request is not None else 1.0
-            ev_grid = drain / max(efficiency, 0.01)
-            charger_kw = ev_request.charger_power_kw if ev_request is not None else 0.0
-        return (
-            periods,
-            MonthTail(slots=tail_slots, ev_grid_kwh=ev_grid, ev_charger_kw=charger_kw),
-            None,
-        )
+            ev_grid = [kwh / max(efficiency, 0.01) for kwh in added]
+        return periods, MonthTail(slots=tail_slots, ev_grid_kwh=ev_grid), None
 
     def _observed_month_problem(
         self, ppe: str, periods: list[BillingPeriod], first

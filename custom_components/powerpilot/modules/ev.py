@@ -65,6 +65,8 @@ from ..const import (
     DOMAIN,
     DRAIN_HORIZON_HOURS,
     DRAIN_LEARN_DAYS,
+    EV_CHARGE_PROFILE_DAYS,
+    EV_CHARGE_PROFILE_LOOKBACK_DAYS,
     EV_MIN_SOC_DEFAULT,
     MAX_CAPACITY_SAMPLES,
     MIN_CAPACITY_SAMPLES,
@@ -111,6 +113,21 @@ def _hours_between(start: datetime, end: datetime) -> list[datetime]:
         out.append(hour)
         hour += timedelta(hours=1)
     return out
+
+
+def _local_day_hours(day: date) -> list[datetime]:
+    """The local hour starts of ``day`` as the recorder's hourly reader keys them.
+
+    The autumn clock change's repeated hour shares one wall-clock key, so a
+    25-hour day yields 24 keys and a 23-hour day 23.
+    """
+    hour = dt_util.as_utc(dt_util.start_of_local_day(day))
+    end = dt_util.as_utc(dt_util.start_of_local_day(day + timedelta(days=1)))
+    keys: dict[datetime, None] = {}
+    while hour < end:
+        keys[_hour_floor(dt_util.as_local(hour))] = None
+        hour += timedelta(hours=1)
+    return list(keys)
 
 
 def _spread_energy(start: datetime, end: datetime, kwh: float) -> dict[datetime, float]:
@@ -460,6 +477,14 @@ class EVModule(PowerPilotModule):
         self._kwh_per_km: float | None = None
         self._drain_profile = WeeklyAccumulator()
         self._last_drain_learn: date | None = None
+        # Learned charging — a 7×24 mean of the energy-added sensor's hourly
+        # statistics over the latest complete days (see _learn_charge_profile);
+        # ``None`` with ``charge_profile_reason`` until enough days exist.
+        self._charge_profile: WeeklyAccumulator | None = None
+        self._charge_profile_through: date | None = None
+        self.charge_profile_reason: str | None = (
+            "profil ładowania EV nie został jeszcze odczytany"
+        )
 
     @property
     def enabled(self) -> bool:
@@ -540,6 +565,7 @@ class EVModule(PowerPilotModule):
         await self._maybe_learn()
         await self._read_departures(self.coordinator.calendar.trips, dt_util.now())
         self._load_calendar_plans()
+        await self._learn_charge_profile(dt_util.now())
 
         self.log_info(
             f"EV: SoC={self._soc if self._soc is not None else '–'}%, "
@@ -582,36 +608,98 @@ class EVModule(PowerPilotModule):
     ) -> float | None:
         """Expected drain (kWh) over the next ``hours`` from the profile.
 
-        ``skip`` = hour starts left out of the sum — hours a calendar trip
-        already forecasts, which must not be counted a second time.
-        """
-        start = _hour_floor(dt_util.now())
-        return self.predicted_drain_between(
-            start, start + timedelta(hours=hours), skip=skip
-        )
-
-    def predicted_drain_between(
-        self,
-        start: datetime,
-        end: datetime,
-        skip: set[datetime] | frozenset[datetime] = frozenset(),
-    ) -> float | None:
-        """Expected driving drain (kWh) over the hours ``[start, end)``.
-
         ``None`` until the profile has observed at least one day — an unknown
-        drain must not read as zero driving. ``skip`` as in
-        :meth:`predicted_drain_kwh`.
+        drain must not read as zero driving. ``skip`` = hour starts left out of
+        the sum — hours a calendar trip already forecasts, which must not be
+        counted a second time.
         """
         if self._drain_profile.observed_days == 0:
             return None
+        start = _hour_floor(dt_util.now())
         total = 0.0
-        hour = start
-        while hour < end:
+        for offset in range(hours):
+            hour = start + timedelta(hours=offset)
             if hour not in skip:
                 local = dt_util.as_local(hour)
                 total += self._drain_profile.value(local.weekday(), local.hour) or 0.0
-            hour += timedelta(hours=1)
         return total
+
+    def charge_profile_kwh(self, hours: list[datetime]) -> list[float] | None:
+        """The learned charging (pack-side kWh) of each hour start in ``hours``.
+
+        The mean of its weekday and local hour over the profile's days; an
+        hour the profile never saw (the spring clock change's missing hour)
+        charged nothing. ``None`` until the profile exists —
+        ``charge_profile_reason`` says why.
+        """
+        profile = self._charge_profile
+        if profile is None:
+            return None
+        out: list[float] = []
+        for hour in hours:
+            local = dt_util.as_local(hour)
+            out.append(profile.value(local.weekday(), local.hour) or 0.0)
+        return out
+
+    async def _learn_charge_profile(self, now: datetime) -> None:
+        """Learn the 7×24 charging profile from the recorder (ADR 003).
+
+        The mean of the energy-added sensor's hourly statistics per weekday and
+        hour over the latest ``EV_CHARGE_PROFILE_DAYS`` complete days — local
+        days whose every hour has a statistic — within the last
+        ``EV_CHARGE_PROFILE_LOOKBACK_DAYS``. Negative hours (a dip the recorder
+        booked) are kept like every recorder energy read. Re-read until the
+        profile reaches yesterday, then once a day.
+        """
+        today = dt_util.as_local(now).date()
+        if self._charge_profile_through == today - timedelta(days=1):
+            return
+        eid = self.config.get(CONF_EV_ENERGY_ADDED_SENSOR)
+        if not eid:
+            self._charge_profile = None
+            self._charge_profile_through = None
+            self.charge_profile_reason = (
+                "brak czujnika energii ładowania EV — nie da się wyuczyć, "
+                "kiedy auto się ładuje"
+            )
+            return
+        first = today - timedelta(days=EV_CHARGE_PROFILE_LOOKBACK_DAYS)
+        try:
+            # One lead-in hour: the reader differences consecutive sums.
+            series = await self.coordinator.consumption.async_range_kwh(
+                eid,
+                dt_util.start_of_local_day(first) - timedelta(hours=1),
+                dt_util.start_of_local_day(today),
+            )
+        except Exception as err:  # noqa: BLE001 — the reason carries it to the plan
+            _LOGGER.warning("EV charging profile: reading %s failed: %s", eid, err)
+            self._charge_profile = None
+            self._charge_profile_through = None
+            self.charge_profile_reason = f"błąd odczytu statystyk {eid}: {err}"
+            return
+        profile = WeeklyAccumulator()
+        days: list[date] = []
+        day = today
+        while len(days) < EV_CHARGE_PROFILE_DAYS and day > first:
+            day -= timedelta(days=1)
+            hours = _local_day_hours(day)
+            if all(hour in series for hour in hours):
+                for hour in hours:
+                    profile.observe(hour, series[hour])
+                profile.mark_date_observed(day)
+                days.append(day)
+        self._charge_profile_through = days[0] if days else None
+        if len(days) < EV_CHARGE_PROFILE_DAYS:
+            self._charge_profile = None
+            self.charge_profile_reason = (
+                f"za mało pełnych dni statystyk {eid}: {len(days)} z "
+                f"{EV_CHARGE_PROFILE_DAYS} w ostatnich "
+                f"{EV_CHARGE_PROFILE_LOOKBACK_DAYS} dniach — nie da się "
+                "oszacować ładowania auta w ogonie miesiąca"
+            )
+            return
+        self._charge_profile = profile
+        self.charge_profile_reason = None
 
     def _routine_target(
         self, predicted_kwh: float, battery_kwh: float

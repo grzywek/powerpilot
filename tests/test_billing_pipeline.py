@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -11,6 +12,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.powerpilot.const import (
     BINARY_TARCZA_PPE1_CAP_BINDS,
+    CONF_EV_ENABLED,
+    CONF_EV_ENERGY_ADDED_SENSOR,
     CONF_PPE1_IMPORT_SENSORS,
     CONF_SOC_SENSOR,
     CONF_TARCZA_TERMS,
@@ -25,6 +28,7 @@ from custom_components.powerpilot.const import (
 )
 from custom_components.powerpilot.models import Forecast, HourSlot
 from custom_components.powerpilot.modules.billing import month_bounds
+from custom_components.powerpilot.modules.ev import _local_day_hours
 
 
 TERMS = {
@@ -186,3 +190,79 @@ async def test_a_cap_starting_next_month_needs_nothing_observed_this_month(
     assert [p.month_start for p in periods] == [next_month]
     assert periods[0].energy_kwh == 0.0
     assert tail.slots == []
+
+
+async def _next_month_with_a_tail(hass: HomeAssistant, series_days: int):
+    """A cap starting next month, a horizon ending a day into it, the EV on.
+
+    Returns the coordinator (its EV charging profile read from ``series_days``
+    complete days of 1 kWh every hour) and the horizon.
+    """
+    now = dt_util.now()
+    _, next_month = month_bounds(now)
+    _, month_after = month_bounds(next_month)
+    starts_next_month = {
+        **TERMS,
+        "valid_from": dt_util.as_local(next_month).date().isoformat(),
+        "valid_to": (dt_util.as_local(month_after).date() - timedelta(days=1)).isoformat(),
+    }
+    hass.states.async_set("sensor.ev_added", "3.2", {"unit_of_measurement": "kWh"})
+    _entry, coordinator = await _setup(
+        hass,
+        **{
+            CONF_TARCZA_TERMS: [starts_next_month],
+            CONF_EV_ENABLED: True,
+            CONF_EV_ENERGY_ADDED_SENSOR: "sensor.ev_added",
+        },
+    )
+
+    def priced(start, end) -> list[HourSlot]:
+        slots = []
+        while start < end:
+            slots.append(HourSlot(start=start, buy_price=0.5, cap_price_kwh=0.5))
+            start += timedelta(hours=1)
+        return slots
+
+    horizon_end = next_month + timedelta(days=1)
+    coordinator.forecast_builder.build_tail = lambda start, end: Forecast(
+        slots=priced(start, end)
+    )
+    today = dt_util.as_local(now).date()
+    series = {
+        hour: 1.0
+        for back in range(1, series_days + 1)
+        for hour in _local_day_hours(today - timedelta(days=back))
+    }
+
+    async def reader(entity_id, start, end):
+        return {h: v for h, v in series.items() if start <= h < end}
+
+    coordinator.consumption.async_range_kwh = reader
+    coordinator.ev._charge_profile_through = None
+    await coordinator.ev._learn_charge_profile(now)
+    hour = now.replace(minute=0, second=0, microsecond=0)
+    return coordinator, Forecast(slots=priced(hour, horizon_end)), month_after - horizon_end
+
+
+async def test_the_tail_ev_follows_the_learned_charging_on_the_grid_side(
+    hass: HomeAssistant,
+) -> None:
+    coordinator, horizon, tail_length = await _next_month_with_a_tail(hass, 28)
+    periods, tail, reason = await coordinator._billing_inputs(
+        horizon, SimpleNamespace(charge_efficiency=0.8)
+    )
+    assert reason is None and periods
+    assert len(tail.slots) == int(tail_length / timedelta(hours=1))
+    assert tail.ev_grid_kwh == [1.25] * len(tail.slots)
+
+
+async def test_too_few_days_of_ev_charging_make_the_cap_unavailable(
+    hass: HomeAssistant,
+) -> None:
+    """2026-11-02: without the car's real charging hours the tail priced
+    October's EV at 0.31 against 0.56 on the meter — no profile, no cap."""
+    coordinator, horizon, _ = await _next_month_with_a_tail(hass, 10)
+    periods, tail, reason = await coordinator._billing_inputs(horizon, None)
+    assert periods is None and tail is None
+    assert "sensor.ev_added" in reason
+    assert "10 z 28" in reason

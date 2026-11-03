@@ -206,20 +206,33 @@ def test_battery_charged_in_the_horizon_serves_the_tail() -> None:
     assert outcome.cap_binds is False
 
 
-def test_tail_ev_import_lands_in_the_cheapest_tail_hours() -> None:
+def test_tail_ev_import_stays_in_the_hours_the_car_charges() -> None:
+    """Incident 2026-11-02: the LP placed the tail's EV import in the month's
+    cheapest hours, so October's PPE 1 settled at 0.31 zł/kWh in the model
+    against 0.56 on the meter. The learned charging keeps its own hours — a
+    very cheap tail hour the car does not charge in attracts none of it — and
+    the settlement includes it."""
     forecast = Forecast(slots=_slots([0.5], demand=0.0))
     tail = MonthTail(
-        slots=_slots([0.9, 0.3, 0.9], demand=0.0, start=H0 + timedelta(hours=1)),
-        ev_grid_kwh=4.0,
-        ev_charger_kw=3.0,
+        slots=_slots([0.9, 0.05, 0.9], demand=0.0, start=H0 + timedelta(hours=1)),
+        ev_grid_kwh=[2.0, 0.0, 2.0],
     )
-    plan = _optimizer().optimize(
-        forecast, _battery(), billing=[_period(limit=5.0)], tail=tail
-    )
+    plan = _optimizer().optimize(forecast, _battery(), billing=[_period()], tail=tail)
     outcome = plan.billing[0]
     assert abs(outcome.tail_energy_kwh - 4.0) < 1e-6
-    # 3 kWh at 0.30 (the charger's hourly cap) + 1 kWh at 0.90.
-    assert abs(outcome.cost_pln - (3 * 0.3 + 1 * 0.9)) < 1e-6
+    assert abs(outcome.cost_pln - 4 * 0.9) < 1e-6
+    assert outcome.cap_binds is True
+    assert abs(outcome.settled_cost_pln - LIMIT * 4.0) < 1e-6
+
+
+def test_tail_ev_import_needs_one_value_per_tail_hour() -> None:
+    forecast = Forecast(slots=_slots([0.5], demand=0.0))
+    tail = MonthTail(
+        slots=_slots([0.9, 0.9], demand=0.0, start=H0 + timedelta(hours=1)),
+        ev_grid_kwh=[2.0],
+    )
+    with pytest.raises(ValueError):
+        _optimizer().optimize(forecast, _battery(), billing=[_period()], tail=tail)
 
 
 def test_tail_without_billing_is_ignored() -> None:

@@ -112,7 +112,12 @@ def _case():
     start = dt_util.now().replace(minute=0, second=0, microsecond=0)  # running hour
     slots = _slots(start, HORIZON_H + TAIL_H, rng)
     forecast = Forecast(slots=slots[:HORIZON_H])
-    tail = MonthTail(slots=slots[HORIZON_H:], ev_grid_kwh=120.0, ev_charger_kw=11.0)
+    # The car's learned charging: 120 kWh over the tail's night hours.
+    nights = [dt_util.as_local(s.start).hour < 7 for s in slots[HORIZON_H:]]
+    tail = MonthTail(
+        slots=slots[HORIZON_H:],
+        ev_grid_kwh=[120.0 / sum(nights) if night else 0.0 for night in nights],
+    )
     month_start = start - timedelta(days=17)
     month_end = start + timedelta(hours=HORIZON_H + TAIL_H)
 

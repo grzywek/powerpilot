@@ -18,14 +18,15 @@ real prices, the tail to the month's end on prices from one of these methods:
 * ``real`` — the prices that really came (perfect foresight).
 
 Demand is the Victron's real load (perfect foresight, so only prices
-differ) and the EV's real import is spread by the LP over the tail
-(``MonthTail.ev_grid_kwh``). For each run it prints the month's forecast
-average and whether the cap binds, next to the month's real average from the
-meter.
+differ); where the car's import goes in the tail is ``--ev`` (see
+:func:`plan_month`), ``profile`` being the integration's own rule. For each
+run it prints the month's forecast average and whether the cap binds, next to
+the month's real average from the meter.
 
 Usage, from the repository root with the project's venv::
 
-    .venv/bin/python scripts/backtest_month_tail.py export.json [--every 3]
+    .venv/bin/python scripts/backtest_month_tail.py export.json [--every 3] \
+        [--ev profile] [--first 2026-09-01]
 
 ``export.json`` comes from the ``powerpilot/series`` websocket command (past
 hours) and holds consecutive UTC hours from ``first``::
@@ -39,7 +40,10 @@ hours) and holds consecutive UTC hours from ``first``::
 ``price`` is ``buy_price`` (gross energy, equal to the cap price under the
 configured edition), ``dist`` ``distribution_price_kwh``, ``consumption``
 ``consumption_real`` (the Victron's load), ``ev`` / ``grid`` / ``ppe2`` the
-``realized`` EV, PPE 1 and PPE 2 imports. A missing hour (the series skips the
+``realized`` EV, PPE 1 and PPE 2 imports. ``ev`` is the car's energy-added
+counter (pack side); PPE 1's ``grid`` holds it divided by the EV charge
+efficiency, so every EV kWh here is divided by ``--ev-efficiency`` (the
+installation's 0.91 by default; 1 reproduces the table of 2026-11-02). A missing hour (the series skips the
 repeated hour of the autumn clock change) is filled with the hour before and
 counted; a missing distribution price takes the most common one of its
 weekday-type and hour, also counted.
@@ -48,11 +52,13 @@ weekday-type and hour, also counted.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -60,6 +66,7 @@ from homeassistant.util import dt as dt_util  # noqa: E402
 
 from custom_components.powerpilot.battery import BatteryModel  # noqa: E402
 from custom_components.powerpilot.const import (  # noqa: E402
+    CONF_EV_ENERGY_ADDED_SENSOR,
     ESTIMATE_WEEKLY_WEIGHTS,
     PPE_1,
 )
@@ -69,6 +76,7 @@ from custom_components.powerpilot.models import (  # noqa: E402
     HourSlot,
     MonthTail,
 )
+from custom_components.powerpilot.modules.ev import EVModule  # noqa: E402
 from custom_components.powerpilot.optimizer import (  # noqa: E402
     ChargeCurve,
     Optimizer,
@@ -83,8 +91,10 @@ REPLAY_WEEKS = 4
 # How far back an estimate may look (``prices._ESTIMATE_MAX_WEEKS_BACK``).
 MAX_WEEKS_BACK = 12
 
-# The installation (HA options, 2026-11-02).
+# The installation (HA options, 2026-11-02; the EV charge efficiency from the
+# debug export of 2026-09-15).
 EV_CHARGER_KW = 11.04
+EV_CHARGE_EFFICIENCY = 0.91
 
 
 def _optimizer() -> Optimizer:
@@ -179,6 +189,13 @@ class Hours:
             for m in _hours(self.end - days * 24 * HOUR, self.end)
         ) / days
         self.filled_dist = self._fill_distribution()
+        # The measured EV keyed like the recorder's hourly reader (local hour;
+        # the autumn clock change's repeated hour keeps the later one).
+        self.ev_local = {
+            dt_util.as_local(moment).replace(minute=0): row["ev"]
+            for moment, row in sorted(self.rows.items())
+            if moment < self.end and row["ev"] is not None
+        }
 
     def _future(self, moment: datetime, price: float | None, dist: float | None) -> dict:
         """An hour past the measurements: the loads of the latest same hour measured."""
@@ -285,21 +302,27 @@ def plan_month(
     method,
     known_end: datetime | None = None,
     ev: str = "month",
+    efficiency: float = EV_CHARGE_EFFICIENCY,
 ) -> tuple[float, float, bool] | None:
     """PPE 1's month forecast at ``as_of`` with the tail priced by ``method``.
 
     The archive reaches ``known_end`` (default: the end of the next day).
     The EV's import over the tail (``ev``):
 
-    * ``month`` — spread by the LP over the tail's cheapest hours, as the plan
-      does (past the measurements: its daily average of the last 28 days, the
-      horizon's share included),
+    * ``month`` — the tail's cheapest hours, as the LP placed it before
+      ADR 003 (past the measurements: its daily average of the last 28 days,
+      the horizon's share included), ≤ the charger's power per hour,
     * ``day`` — each day's real energy in that day's cheapest hours,
     * ``hour`` — at the hours the car really charged,
+    * ``profile`` — the integration's rule: each tail hour the mean of its
+      weekday and hour over the 28 complete days before ``as_of``
+      (:meth:`EVModule._learn_charge_profile`), handed to the optimizer as
+      ``MonthTail.ev_grid_kwh``; ``None`` without 28 such days,
 
     past the measurements taking the latest same hour measured, and priced at
     the tail's estimate. In the horizon the car charges at its real hours
-    (``month``: only while measured).
+    (``month``: only while measured). Every EV kWh is divided by
+    ``efficiency`` to the grid side.
     """
     local = dt_util.as_local(as_of)
     month_start, month_end = _month(local)
@@ -315,37 +338,45 @@ def plan_month(
     for moment in _hours(as_of, known_end):
         row = hours.rows[moment]
         if moment >= hours.end and ev == "month":
-            tail_ev += hours.ev_daily_kwh / 24
+            tail_ev += hours.ev_daily_kwh / 24 / efficiency
         else:
-            kwh = max(0.0, row["ev"] or 0.0)
+            kwh = max(0.0, row["ev"] or 0.0) / efficiency
             energy += kwh
             cost += kwh * row["price"]
         slots.append(_slot(moment, row, row["price"]))
     tail_slots = []
-    days: dict[object, list[tuple[float, float]]] = {}
+    # Where ``month`` and ``day`` place the car: (tail prices, kWh) per group.
+    groups: dict[object, tuple[list[float], list[float]]] = {}
     for moment in _hours(known_end, month_end):
         row = hours.rows[moment]
         price = method(hours, moment, known_end)
         if price is None:
             return None
-        kwh = max(0.0, row["ev"] or 0.0)
+        kwh = max(0.0, row["ev"] or 0.0) / efficiency
         if ev == "month":
-            tail_ev += hours.ev_daily_kwh / 24 if moment >= hours.end else kwh
+            if moment >= hours.end:
+                kwh = hours.ev_daily_kwh / 24 / efficiency
+            prices, energies = groups.setdefault("month", ([], [tail_ev]))
+            prices.append(price)
+            energies.append(kwh)
         elif ev == "day":
-            days.setdefault(dt_util.as_local(moment).date(), []).append((price, kwh))
-        else:
+            prices, energies = groups.setdefault(dt_util.as_local(moment).date(), ([], []))
+            prices.append(price)
+            energies.append(kwh)
+        elif ev == "hour":
             energy += kwh
             cost += kwh * price
         tail_slots.append(_slot(moment, row, price))
-    for day_hours in days.values():
-        left = sum(kwh for _, kwh in day_hours)
-        for price, _ in sorted(day_hours):
-            take = min(left, EV_CHARGER_KW)
-            energy += take
-            cost += take * price
-            left -= take
-            if left <= 0:
-                break
+    for prices, energies in groups.values():
+        placed, placed_cost = _cheapest_hours(prices, sum(energies))
+        energy += placed
+        cost += placed_cost
+    ev_grid: list[float] = []
+    if ev == "profile":
+        profile = charge_profile(hours, as_of)
+        if profile is None:
+            return None
+        ev_grid = [kwh / efficiency for kwh in profile([slot.start for slot in tail_slots])]
     so_far = int((as_of - month_start) / HOUR)
     period = BillingPeriod(
         ppe=PPE_1,
@@ -362,10 +393,50 @@ def plan_month(
         Forecast(slots=slots),
         _battery(),
         billing=[period],
-        tail=MonthTail(slots=tail_slots, ev_grid_kwh=tail_ev, ev_charger_kw=EV_CHARGER_KW),
+        tail=MonthTail(slots=tail_slots, ev_grid_kwh=ev_grid),
     )
     outcome = plan.billing[0]
     return outcome.energy_kwh, outcome.cost_pln, bool(outcome.cap_binds)
+
+
+def _cheapest_hours(prices: list[float], kwh: float) -> tuple[float, float]:
+    """``kwh`` in the cheapest of ``prices``, ≤ the charger's power each: (kWh, cost)."""
+    placed = cost = 0.0
+    for price in sorted(prices):
+        if kwh - placed <= 0:
+            break
+        take = min(kwh - placed, EV_CHARGER_KW)
+        placed += take
+        cost += take * price
+    return placed, cost
+
+
+def charge_profile(hours: Hours, as_of: datetime):
+    """The EV module's charging profile learned at ``as_of`` from the export.
+
+    The export's measured ``ev`` stands in for the recorder's hourly reader,
+    keyed by local hour like it. Returns the profile's per-hour lookup, or
+    ``None`` (with the module's reason printed once) without enough days.
+    """
+    module = EVModule.__new__(EVModule)
+    module.config = {CONF_EV_ENERGY_ADDED_SENSOR: "export.ev"}
+
+    async def reader(entity_id, start, end):
+        return {hour: kwh for hour, kwh in hours.ev_local.items() if start <= hour < end}
+
+    module.coordinator = SimpleNamespace(consumption=SimpleNamespace(async_range_kwh=reader))
+    module._charge_profile = None
+    module._charge_profile_through = None
+    asyncio.run(module._learn_charge_profile(as_of))
+    if module.charge_profile_reason is not None:
+        if module.charge_profile_reason not in _REPORTED:
+            _REPORTED.add(module.charge_profile_reason)
+            print(f"  {dt_util.as_local(as_of):%d.%m}: {module.charge_profile_reason}")
+        return None
+    return module.charge_profile_kwh
+
+
+_REPORTED: set[str] = set()
 
 
 def _slot(moment: datetime, row: dict, price: float) -> HourSlot:
@@ -387,16 +458,35 @@ def _fmt(result: tuple[float, float, bool] | None) -> str:
     return f"{cost / energy:5.3f} {'BIND' if binds else 'pod '}"
 
 
+def _every(first: datetime, last: datetime, step: int) -> list[datetime]:
+    days = []
+    while first <= last:
+        days.append(first)
+        first += timedelta(days=step)
+    return days
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("export", type=Path)
     parser.add_argument("--every", type=int, default=3, help="days between as-of moments")
     parser.add_argument("--first", default=None, help="first as-of day, YYYY-MM-DD")
     parser.add_argument(
+        "--days",
+        default=None,
+        help="as-of days instead of --first/--every, YYYY-MM-DD,YYYY-MM-DD,…",
+    )
+    parser.add_argument(
         "--ev",
-        choices=("month", "day", "hour"),
+        choices=("month", "day", "hour", "profile"),
         default="month",
         help="where the EV's tail import goes (see plan_month)",
+    )
+    parser.add_argument(
+        "--ev-efficiency",
+        type=float,
+        default=EV_CHARGE_EFFICIENCY,
+        help="EV charge efficiency: pack-side ev ÷ this = the grid side",
     )
     args = parser.parse_args()
     dt_util.set_default_time_zone(dt_util.get_time_zone(TZ))
@@ -429,9 +519,16 @@ def main() -> None:
         "\nas-of (12:00)    real month   "
         + "  ".join(f"{name:^12}" for name, _ in methods)
     )
-    day = start_day
     last = dt_util.as_local(hours.end - HOUR)
-    while day <= last:
+    as_of_days = (
+        [
+            datetime.fromisoformat(day).replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            for day in args.days.split(",")
+        ]
+        if args.days
+        else _every(start_day, last, args.every)
+    )
+    for day in as_of_days:
         as_of = dt_util.as_utc(day.replace(hour=12))
         local = dt_util.as_local(as_of)
         month_start, month_end = _month(local)
@@ -441,20 +538,27 @@ def main() -> None:
         else:
             truth = "  (trwa)  "
         results = [
-            plan_month(hours, as_of, method, ev=args.ev) for _, method in methods
+            plan_month(hours, as_of, method, ev=args.ev, efficiency=args.ev_efficiency)
+            for _, method in methods
         ]
         print(
             f"{local:%a %d.%m}        {truth}  "
             + "  ".join(f"{_fmt(r):^12}" for r in results),
             flush=True,
         )
-        day += timedelta(days=args.every)
 
     # The running month from the last measured hour, with every price
     # published so far (forecasts included) in the archive, as the plan has.
     as_of = hours.end
     results = [
-        plan_month(hours, as_of, method, known_end=hours.prices_end, ev=args.ev)
+        plan_month(
+            hours,
+            as_of,
+            method,
+            known_end=hours.prices_end,
+            ev=args.ev,
+            efficiency=args.ev_efficiency,
+        )
         for _, method in methods
     ]
     print(

@@ -245,6 +245,22 @@ def _charge_order_price(price: float) -> float:
     )
 
 
+def _solve_fresh(h: highspy.Highs) -> None:
+    """Solve ``h`` from scratch, never from the previous solve's state.
+
+    The regime enumeration re-solves one model with only the objective
+    changed. Started from the previous combination's basis, HiGHS' simplex
+    can stop with a dual infeasibility it does not clean up and report
+    ``kUnknown``: 1.98e-4 after 19 iterations on 2026-11-06, where the same
+    relaxation solved from scratch is optimal. That failed the whole refresh:
+    every control entity went unavailable and the 12:59 plan stayed for the
+    hour. From scratch, each combination's result also no longer depends on
+    the order they run in.
+    """
+    h.clearSolver()
+    h.run()
+
+
 @dataclass
 class ChargeCurve:
     """Maps SoC to the maximum allowed charge power (kW)."""
@@ -1475,7 +1491,7 @@ class Optimizer:
             h.setOptionValue("solve_relaxation", True)
             for combo in combos:
                 set_regimes(combo)
-                h.run()
+                _solve_fresh(h)
                 if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
                     raise RuntimeError(
                         f"HiGHS could not bound cap regimes {combo}: {h.getModelStatus()}"
@@ -1493,7 +1509,7 @@ class Optimizer:
             set_regimes(combo)
             h.setOptionValue("objective_bound", best_obj + _REGIME_TIE_PLN)
             began = time.perf_counter()
-            h.run()
+            _solve_fresh(h)
             self.last_solve_seconds.append(time.perf_counter() - began)
             status = h.getModelStatus()
             if status == highspy.HighsModelStatus.kInfeasible and solved:
@@ -1600,7 +1616,7 @@ class Optimizer:
         try:
             for combo in combos:
                 set_regimes(combo)
-                h.run()
+                _solve_fresh(h)
                 if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
                     raise RuntimeError(
                         f"HiGHS could not relax cap regimes {combo}: {h.getModelStatus()}"

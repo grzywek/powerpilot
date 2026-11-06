@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import highspy
 import pytest
 from homeassistant.util import dt as dt_util
 
+from custom_components.powerpilot import optimizer as optimizer_module
 from custom_components.powerpilot.battery import BatteryModel
 from custom_components.powerpilot.const import PPE_1, InverterMode
 from custom_components.powerpilot.models import (
@@ -422,3 +424,87 @@ def test_every_ppe1_month_needs_its_odds() -> None:
         _optimizer().optimize(
             forecast, _battery(), billing=[_period()], bind_probability={H0 - timedelta(days=1): 0.5}
         )
+
+
+# ------------------------------------------------- independent regime solves
+
+
+class _RecordingHighs(highspy.Highs):
+    """HiGHS that records, per solve, whether it started from scratch."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.from_scratch: list[bool] = []
+        self._cleared = True  # a new instance carries nothing over
+
+    def clearSolver(self):  # noqa: N802 - HiGHS' own name
+        self._cleared = True
+        return super().clearSolver()
+
+    def run(self):
+        self.from_scratch.append(self._cleared)
+        self._cleared = False
+        return super().run()
+
+
+def _recorded_solves(monkeypatch) -> list[_RecordingHighs]:
+    made: list[_RecordingHighs] = []
+
+    def make() -> _RecordingHighs:
+        h = _RecordingHighs()
+        made.append(h)
+        return h
+
+    monkeypatch.setattr(optimizer_module.highspy, "Highs", make)
+    return made
+
+
+def _two_months() -> list[BillingPeriod]:
+    boundary = H0 + timedelta(hours=2)
+    return [
+        BillingPeriod(
+            ppe=PPE_1,
+            month_start=H0 - timedelta(days=10),
+            month_end=boundary,
+            limit_kwh=LIMIT,
+            energy_kwh=10.0,
+            cost_pln=10.0,
+            hours_expected=1,
+            hours_covered=1,
+        ),
+        BillingPeriod(
+            ppe=PPE_1,
+            month_start=boundary,
+            month_end=boundary + timedelta(days=31),
+            limit_kwh=LIMIT,
+        ),
+    ]
+
+
+def test_each_relaxed_regime_combination_is_solved_from_scratch(monkeypatch) -> None:
+    """Incident 2026-11-06 13:00: a replayed week's relaxation, started from the
+    previous combination's basis, ended with a dual infeasibility of 1.98e-4
+    that HiGHS left uncleaned (kUnknown). The refresh failed and the 12:59
+    plan stayed in force for the hour; from scratch the same LP is optimal."""
+    made = _recorded_solves(monkeypatch)
+    forecast = Forecast(slots=_slots([1.0, 0.2, 1.0, 0.2], demand=1.0))
+
+    _optimizer().cap_regimes(forecast, _battery(), billing=_two_months())
+
+    solves = [cold for h in made for cold in h.from_scratch]
+    assert len(solves) == 4  # every combination of two months' regimes
+    assert all(solves)
+
+
+def test_each_regime_solve_of_the_plan_starts_from_scratch(monkeypatch) -> None:
+    """The plan's own enumeration bounds every combination by its relaxation and
+    then solves the MIPs on the same model: none of them may start from the
+    state the previous combination left (incident 2026-11-06, see above)."""
+    made = _recorded_solves(monkeypatch)
+    forecast = Forecast(slots=_slots([1.0, 0.2, 1.0, 0.2], demand=1.0))
+
+    _optimizer().optimize(forecast, _battery(), billing=_two_months())
+
+    solves = [cold for h in made for cold in h.from_scratch]
+    assert len(solves) >= 5  # four bounds and at least one MIP
+    assert all(solves)

@@ -890,3 +890,25 @@ async def test_ws_status_carries_the_recommendation_rules_and_both_meters(
     assert tarcza[PPE_1]["forecast"] == ppe1.as_dict()
     for key in ("average_kwh", "discount_pln", "cap_binds", "available"):
         assert key in tarcza[PPE_1]["forecast"]
+
+
+async def test_series_hour_plan_reads_one_plan(hass: HomeAssistant) -> None:
+    """Incident 2026-11-06: the running hour's card showed the charger as
+    "niepotrzebna" from the hour-start plan next to an EV SoC of 5 → 17 % from
+    the live plan. Every plan value of the running hour, EV SoC and meter 2
+    included, now comes from the hour-start vintage."""
+    from homeassistant.util import dt as dt_util
+
+    await _setup(hass)
+    coordinator = hass.data[DOMAIN][next(iter(hass.data[DOMAIN]))]
+    hour = dt_util.now().replace(minute=0, second=0, microsecond=0)
+    vintage = coordinator.snapshots.get(coordinator.snapshots.origin_at(hour))
+    vintage["ev"][0] = 8.249
+    vintage["ev_soc"][0] = 17.1
+    vintage["ppe2"][0] = 0.3
+
+    result = await coordinator.get_series(past_hours=1)
+    current = next(h for h in result["hours"] if h.get("partial"))
+    assert current["hour_plan"]["ev"] == 8.249
+    assert current["hour_plan"]["ev_soc"] == 17.1
+    assert current["hour_plan"]["grid_ppe2"] == 0.3

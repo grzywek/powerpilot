@@ -3670,8 +3670,14 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
                             "ev": sn.run0_at(now, "ev"),
                             "ev_minutes": sn.run0_at(now, "ev_min"),
                             "grid": sn.run0_at(now, "grid"),
+                            "grid_ppe2": sn.run0_at(now, "ppe2"),
                             "consumption": sn.run0_at(now, "cons_fc"),
                             "soc_end": sn.run0_at(now, "soc"),
+                            # The same plan's EV SoC, so the card never sets
+                            # this plan's charger verdict beside the live
+                            # plan's SoC (2026-11-06: "niepotrzebna" next to
+                            # 5 → 17 %).
+                            "ev_soc": sn.run0_at(now, "ev_soc"),
                             "charge_power_kw": sn.run0_at(now, "charge_pw"),
                         }
                         if sn.origin_at(now, 0) is not None

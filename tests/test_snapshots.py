@@ -287,3 +287,32 @@ def test_serialisation_roundtrip() -> None:
     assert restored.revisions_at(base) == [
         {"at": "x", "ev": 9.1, "why": "kabel EV: podłączono"}
     ]
+
+
+def test_a_vintage_is_filed_under_the_hour_its_plan_starts() -> None:
+    """Incident 2026-11-06: a re-plan started at 12:59:56 and was saved at
+    13:00:00.8. Filed by the save time, its 12:00 slot became 13:00's
+    hour-start plan. The hour a vintage describes is its first slot's."""
+    store = SnapshotStore()
+    noon = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    one = noon + timedelta(hours=1)
+
+    store.add(_rec(one + timedelta(milliseconds=800), start=noon))
+
+    assert store.origin_at(one) is None
+    assert store.origin_at(noon) is not None
+    assert store.run0_at(noon, "soc") == 50.0
+
+
+def test_run0_reads_the_hours_own_entry_of_a_misfiled_vintage() -> None:
+    """Builds before the fix filed a boundary-straddling run an hour after its
+    start. Reading such a vintage's slot 0 for the later hour returned the
+    earlier hour's values (EV 0.002 kWh where the plan charged 8.2 kWh); the
+    requested hour's own entry of the same plan is the right one."""
+    noon = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+    one = noon + timedelta(hours=1)
+    misfiled = _rec(one + timedelta(milliseconds=800), start=noon)
+    store = SnapshotStore.from_dict({"records": {one.isoformat(): misfiled}})
+
+    assert store.run0_at(one, "soc") == 55.0
+    assert store.run0_at(one, "mode") == "p"

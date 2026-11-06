@@ -6,8 +6,9 @@ realized actuals on the "Symulacje" tab.
 
 This is a plain storage helper (not a :class:`PowerPilotModule`): the coordinator
 assembles each record from ``forecast.slots`` + ``plan.decisions`` and drives the
-``Store``. Records are keyed by the run's UTC clock hour, deduplicated to one per
-hour, and pruned after :data:`_SNAPSHOT_RETENTION_DAYS`.
+``Store``. Records are keyed by the UTC clock hour their plan's first slot
+covers, deduplicated to one per hour, and pruned after
+:data:`_SNAPSHOT_RETENTION_DAYS`.
 
 Record shape (arrays are parallel, one entry per horizon hour)::
 
@@ -62,9 +63,17 @@ class SnapshotStore:
         )
 
     def add(self, record: dict[str, Any]) -> str:
-        """Store a record, deduplicated to one per clock hour. Returns its key."""
-        run_at = dt_util.parse_datetime(record["run_at"])
-        key = self._key(run_at) if run_at else record["run_at"]
+        """Store a record under the hour its plan starts. Returns its key.
+
+        Filed by its first slot, not by when it was saved: a run that starts
+        at 12:59:56 and is saved at 13:00:00.8 is a plan for 12:00, and filing
+        it under 13:00 made its 12:00 slot read as 13:00's hour-start plan
+        (2026-11-06). One record per hour; a later one for the same hour wins.
+        """
+        start = dt_util.parse_datetime(record["start"])
+        if start is None:
+            raise ValueError(f"snapshot has no readable start: {record.get('start')!r}")
+        key = self._key(start)
         self._records[key] = record
         return key
 
@@ -217,20 +226,29 @@ class SnapshotStore:
         return key if key in self._records else None
 
     def run0_at(self, run_hour: datetime, key: str) -> Any | None:
-        """Index-0 value of the vintage *recorded at* ``run_hour`` (the plan made
-        that hour, whose first slot is that hour).
+        """``run_hour``'s value in the vintage filed under ``run_hour`` (the plan
+        the hour started with).
 
         Unlike :meth:`value_at`, this never forward-indexes an earlier plan: if
-        no vintage was recorded at ``run_hour`` it returns ``None``. Use it to
+        no vintage is filed under ``run_hour`` it returns ``None``. Use it to
         reconstruct a single coherent plan's first-hour state, so a hour's
         forecast ``soc``/``charge``/``grid`` all come from the same trajectory
         (mixing vintages produces nonsense like "charging yet SoC falls").
+
+        The entry is located by the record's own ``start``. That is index 0 for
+        every vintage filed by its first slot; builds before 2026-11-06 filed a
+        run that straddled the hour an hour late, and its index 0 is the
+        previous hour.
         """
         rec = self._records.get(self._key(run_hour))
         if not rec:
             return None
+        start = dt_util.parse_datetime(rec.get("start") or "")
+        if start is None:
+            return None
+        idx = round((run_hour - start).total_seconds() / 3600.0)
         seq = rec.get(key) or []
-        return seq[0] if seq else None
+        return seq[idx] if 0 <= idx < len(seq) else None
 
     def trips_overlapping(
         self,

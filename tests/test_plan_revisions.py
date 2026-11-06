@@ -251,3 +251,32 @@ async def test_series_tolerates_a_session_spilling_past_its_planned_hour(
     result = await coordinator.get_series(past_hours=3)
     row = next(h for h in result["hours"] if h["start"] == spill_hour.isoformat())
     assert row["ev_off_plan"] is True
+
+
+async def test_a_run_straddling_the_hour_is_not_the_next_hours_vintage(
+    hass: HomeAssistant, freezer
+) -> None:
+    """Incident 2026-11-06 13:00: a re-plan started at 12:59:56 and was
+    published at 13:00:00.8. Filed by the clock at save time, its 12:00 sliver
+    (EV 0.002 kWh, 1 min) became 13:00's hour-start plan, so the card said the
+    charger was "niepotrzebna" while that same plan charged the car 5 → 17 %
+    in 13:00. A run belongs to the hour its first slot covers."""
+    noon = dt_util.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    one = noon + timedelta(hours=1)
+    freezer.move_to(noon + timedelta(minutes=59, seconds=56))
+    coordinator = await _setup(hass)
+    plan = coordinator.data
+    assert plan.forecast.slots[0].start == noon
+    plan.decision_at(noon).ev_charge_kwh = 0.002  # the sliver left of 12:00
+    plan.decision_at(one).ev_charge_kwh = 8.249  # 13:00, planned whole
+
+    freezer.move_to(one + timedelta(milliseconds=800))
+    await coordinator._maybe_record_snapshot(plan.forecast, plan, "kabel EV: podłączono")
+
+    assert coordinator.snapshots.origin_at(one) is None
+
+    # The first run planned from 13:00 is 13:00's vintage.
+    await coordinator.async_refresh()
+    assert coordinator.data.forecast.slots[0].start == one
+    vintage = coordinator.snapshots.get(coordinator.snapshots.origin_at(one))
+    assert dt_util.parse_datetime(vintage["start"]) == one

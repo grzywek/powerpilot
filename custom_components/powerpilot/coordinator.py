@@ -1699,17 +1699,21 @@ class PowerPilotCoordinator(DataUpdateCoordinator[Plan]):
         the hour STARTED with, the honest baseline for forecast accuracy — and
         are appended as revisions instead, so a mid-hour change of mind stays
         visible rather than vanishing without trace.
-        """
-        now = dt_util.now()
-        hour = now.replace(minute=0, second=0, microsecond=0)
-        if self._last_snapshot_hour is not None and hour <= self._last_snapshot_hour:
-            if self._record_revision(hour, now, plan, trigger):
-                await self._async_save_snapshots()
-            return
 
+        The hour a run belongs to is its first slot's, not the clock's when it
+        is saved: a run started at 12:59:56 and finished at 13:00:00.8 is a
+        re-plan of 12:00. Filed by the clock it became 13:00's vintage, and the
+        panel read its 12:00 sliver as 13:00's plan (2026-11-06).
+        """
         slots = forecast.slots
         decisions = plan.decisions
         if not slots:
+            return
+        now = dt_util.now()
+        hour = slots[0].start
+        if self._last_snapshot_hour is not None and hour <= self._last_snapshot_hour:
+            if self._record_revision(hour, now, plan, trigger):
+                await self._async_save_snapshots()
             return
 
         def _r(value, ndigits=4):

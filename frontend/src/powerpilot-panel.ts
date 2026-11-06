@@ -12,6 +12,7 @@ import {
 import "./flow-diagram";
 import { fmtTime, fmtWhen, fmtWhenRange } from "./when";
 import { capOddsText, capWeeksLine, type CapScenario } from "./cap-odds";
+import { chargerNeed, runningHourPlan, type HourPlan } from "./hour-plan";
 import type { FlowTopology } from "./flow-diagram";
 
 interface PlanHour {
@@ -22,6 +23,7 @@ interface PlanHour {
   ev_charge: boolean;
   ev_charge_kwh: number;
   ev_charge_minutes: number | null;
+  ev_soc: number | null;
   battery_soc: number;
   battery_energy_cost: number;
   battery_charge_kwh: number;
@@ -442,18 +444,6 @@ interface TipSide {
   soc_end: number | null;
   ev_soc_start: number | null;
   ev_soc_end: number | null;
-}
-
-/** The current hour's full-hour baseline plan (its hour-start vintage). */
-interface HourPlan {
-  charge: number | null;
-  discharge: number | null;
-  ev: number | null;
-  ev_minutes: number | null;
-  grid: number | null;
-  consumption: number | null;
-  soc_end: number | null;
-  charge_power_kw: number | null;
 }
 
 interface Series {
@@ -1989,8 +1979,6 @@ export class PowerPilotPanel extends LitElement {
     // ever shown against the current hour — never inferred backwards from
     // whether charging happened.
     const plugNow = ev ? this._evBool(ev.plugged, "podłączona", "niepodłączona") : null;
-    const wantPlug = (kwh: number | null | undefined) =>
-      kwh == null ? null : kwh > 0.005 ? "podłączona" : "niepotrzebna";
 
     const elapsed = Math.max(0, Math.min(1, (Date.now() - curMs) / 3600_000));
     const elapsedMin = Math.round(elapsed * 60);
@@ -2029,14 +2017,18 @@ export class PowerPilotPanel extends LitElement {
         : html`<div class="muted">brak danych (wróć do „● teraz")</div>`;
 
     // --- current hour: the plan the hour STARTED with vs realized so far ---
-    const hp = sCur?.hour_plan ?? null;
-    const planCharge = hp ? hp.charge : current.battery_charge_kwh;
-    const planDischarge = hp ? hp.discharge : current.battery_discharge_kwh;
-    const planEv = hp ? hp.ev : current.ev_charge_kwh;
-    const planEvMin = hp ? hp.ev_minutes : current.ev_charge_minutes;
-    const planGrid = hp ? hp.grid : current.grid_buy_kwh;
-    const planCons = hp ? hp.consumption : this._forecastConsumptionAt(curMs);
-    const planSocEnd = hp ? hp.soc_end : current.battery_soc;
+    // One plan for the whole column (see hour-plan.ts).
+    const planned = runningHourPlan(sCur?.hour_plan ?? null, {
+      charge: current.battery_charge_kwh,
+      discharge: current.battery_discharge_kwh,
+      ev: current.ev_charge_kwh,
+      evMinutes: current.ev_charge_minutes,
+      grid: current.grid_buy_kwh,
+      gridPpe2: sCur?.forecast?.grid_ppe2 ?? null,
+      consumption: this._forecastConsumptionAt(curMs),
+      socEnd: current.battery_soc,
+      evSocEnd: current.ev_soc,
+    });
     const planMode = sCur?.planned_mode ?? current.inverter_mode;
     // Measured mode needs a few minutes of 5-min statistics to clear the
     // noise threshold: early in the hour every flow reads ~0 and the measured
@@ -2051,26 +2043,26 @@ export class PowerPilotPanel extends LitElement {
         : measuredMode;
     const curBody = html`
       ${this._modeRow(planMode, realMode)}
-      ${this._pvRow("🔋 Ładowanie ESS", planCharge, sCur?.realized?.charge, { elapsed })}
-      ${this._pvRow("🔋 Z ESS", planDischarge, sCur?.realized?.discharge, { elapsed })}
-      ${this._pvRow("🚗 Ładowanie EV", planEv, sCur?.realized?.ev, {
+      ${this._pvRow("🔋 Ładowanie ESS", planned.charge, sCur?.realized?.charge, { elapsed })}
+      ${this._pvRow("🔋 Z ESS", planned.discharge, sCur?.realized?.discharge, { elapsed })}
+      ${this._pvRow("🚗 Ładowanie EV", planned.ev, sCur?.realized?.ev, {
         elapsed,
-        planSuffix: this._minSuffix(planEvMin),
+        planSuffix: this._minSuffix(planned.evMinutes),
         realSuffix: this._minSuffix(sCur?.ev_minutes_real),
       })}
-      ${this._pvRow("🏠 Zużycie domu", planCons, sCur?.consumption_real, { elapsed })}
-      ${this._pvRow(gridLabel, planGrid, sCur?.realized?.grid, { elapsed })}
+      ${this._pvRow("🏠 Zużycie domu", planned.consumption, sCur?.consumption_real, { elapsed })}
+      ${this._pvRow(gridLabel, planned.grid, sCur?.realized?.grid, { elapsed })}
       ${supplyOn
-        ? this._pvRow(PPE2_LABEL, sCur?.forecast?.grid_ppe2, sCur?.realized?.grid_ppe2, { elapsed })
+        ? this._pvRow(PPE2_LABEL, planned.gridPpe2, sCur?.realized?.grid_ppe2, { elapsed })
         : nothing}
-      ${this._socRow("🔋 SoC ESS: teraz → plan na koniec", planSocEnd, sCur?.soc ?? null)}
+      ${this._socRow("🔋 SoC ESS: teraz → plan na koniec", planned.socEnd, sCur?.soc ?? null)}
       ${ev
         ? html`${this._socRow(
             "🚗 SoC EV: teraz → plan na koniec",
-            sCur?.forecast?.ev_soc_end,
+            planned.evSocEnd,
             sCur?.ev_soc ?? null
           )}
-          ${this._stateRow("🚗 Ładowarka", wantPlug(planEv), plugNow)}`
+          ${this._stateRow("🚗 Ładowarka", chargerNeed(planned.ev), plugNow)}`
         : nothing}
       ${this._revisionNote(sCur)}
     `;
@@ -2099,7 +2091,7 @@ export class PowerPilotPanel extends LitElement {
                 null,
                 true
               )}
-              ${this._stateRow("🚗 Ładowarka", wantPlug(pNext.ev_charge_kwh), undefined, true)}`
+              ${this._stateRow("🚗 Ładowarka", chargerNeed(pNext.ev_charge_kwh), undefined, true)}`
             : nothing}
         `
       : html`<div class="muted">poza horyzontem planu</div>`;

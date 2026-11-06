@@ -129,3 +129,18 @@ def test_ev_allocation_caps_the_running_hour(freezer) -> None:
     # Half the hour left → half the full-power yield, delivered in 30 minutes.
     assert abs(alloc.added[now_hour] - 3.5) < 1e-6
     assert alloc.minutes[now_hour] == 30
+
+
+def test_a_slot_that_ended_before_the_model_was_built_has_nothing_left(freezer) -> None:
+    """A run whose forecast was built at 14:59:59 and whose model is built
+    after 15:00 still has 14:00 as slot 0. That hour is over: planning it as a
+    whole hour would put energy where it can no longer go and leave it out of
+    15:00 (2026-11-06: a run straddled 13:00 by four seconds)."""
+    fc = _forecast([0.10, 0.10])
+    freezer.move_to(fc.slots[1].start + timedelta(seconds=1))
+    plan = _optimizer().optimize(fc, _battery())
+    assert plan.decisions[0].battery_charge_kwh < 1e-6
+    assert plan.decisions[0].trace["hour_fraction"] == 0.0
+    # 15:00 keeps its capacity: it has lost seconds, and the next run plans it
+    # as its own slot 0.
+    assert abs(plan.decisions[1].battery_charge_kwh - 3.0) < 1e-6

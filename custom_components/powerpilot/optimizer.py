@@ -603,13 +603,16 @@ class Optimizer:
         # discharge caps, consumption, connection headroom, EV charger yield) is
         # scaled by this fraction, so a mid-hour re-plan works on a physically
         # correct model instead of pretending a full hour of capacity is left.
-        # Future slots are whole hours (fraction 1).
+        # Future slots are whole hours (fraction 1). A slot 0 that ended before
+        # this model was built (forecast at 12:59:59, model at 13:00:01) has
+        # nothing left; planning it whole put energy into an hour already gone.
         now = dt_util.now()
+        first_end = slots[0].start + timedelta(hours=1)
         first_frac = 1.0
-        if slots[0].start <= now < slots[0].start + timedelta(hours=1):
-            first_frac = (
-                slots[0].start + timedelta(hours=1) - now
-            ).total_seconds() / 3600.0
+        if now >= first_end:
+            first_frac = 0.0
+        elif slots[0].start <= now:
+            first_frac = (first_end - now).total_seconds() / 3600.0
         fracs = [first_frac] + [1.0] * (n - 1) + [1.0] * len(tail_slots)
 
         ev_alloc = self._plan_ev(forecast, ev_request, first_frac)
